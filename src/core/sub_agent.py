@@ -109,26 +109,11 @@ def run_sub_agent(
     )
 
     try:
-        # Check hard limit before starting
-        initial_tokens = temp_chat_manager.token_tracker.total_tokens
-        max_iterations = 2  # Limit to 2 LLM rounds to prevent runaway loops
-
         # Wrap orchestrator.run to check hard limit before each LLM call
         original_get_llm_response = orchestrator._get_llm_response
-        iteration_count = 0
 
         def _get_llm_response_with_hard_limit(allowed_tools=None):
-            """Wrapper to check hard limit before each LLM call."""
-            nonlocal iteration_count
-            iteration_count += 1
-
-            # Check iteration limit
-            if iteration_count > max_iterations:
-                raise Exception(
-                    f"Sub-agent iteration limit exceeded ({max_iterations} rounds). "
-                    "Please refine your query or use more targeted searches."
-                )
-
+            """Wrapper to check hard token limit before each LLM call."""
             # Check hard token limit before making LLM call
             current_total = temp_chat_manager.token_tracker.total_tokens
             if current_total >= sub_agent_settings.hard_limit_tokens:

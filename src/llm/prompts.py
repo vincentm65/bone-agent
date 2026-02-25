@@ -115,7 +115,16 @@ assistant: Clients are marked as failed in the `connectToServer` function in src
 - Read full file for <500 lines. Use line ranges for larger files (100-200 lines/chunk)
 - **Minimum 50 lines per read** - never make tiny overlapping reads
 - Start/end chunks at logical boundaries (function/class definitions)
-- Use minimal overlap (10-20 lines) only if needed for continuity""",
+- Use minimal overlap (10-20 lines) only if needed for continuity
+
+**Use list_directory to Check File Sizes:**
+- `list_directory` shows line counts for each file (helps decide full vs partial reads)
+- Files >500 lines should use `start_line` and `max_lines` parameters
+
+**Track Previous Reads:**
+- Check `start_line` and `lines_read` metadata from previous tool results
+- Use this info to continue reading from where you left off
+- Avoid re-reading lines you've already seen""",
 
     "targeted_searching": """## Targeted Searching
 
@@ -429,11 +438,15 @@ When answering the main agent's query:
 inject the ACTUAL file contents based on your citations and will TRUST these injected contents 
 without re-reading them.
 
+**CRITICAL:** You MUST use bracketed citation formats only. Unbracketed formats like `file:N` 
+will NOT be recognized and will be ignored.
+
 Use these citation formats:
 - `[path/to/file] (lines N-M)` - for a specific range you've fully read
 - `[path/to/file] (full)` - if you read the entire file
-- `path/to/file:N-M` - alternative range format
-- `path/to/file:N` - single line reference
+- `lines N-M in [path/to/file]` - alternative range format
+- `[path/to/file]:N-M` - bracketed range notation
+- `[path/to/file]:N` - bracketed single line notation
 
 **Citation Guidelines:**
 - Be PRECISE with line numbers - cite only the ranges you actually read
@@ -442,8 +455,8 @@ Use these citation formats:
 - Don't over-cite - only include files you've actually read with the content
 
 Example:
-"The authentication flow starts in src/core/auth.py:45-78 where tokens are validated,
- then calls src/core/session.py:112-145 for session management."
+"The authentication flow starts in [src/core/auth.py] (lines 45-78) where tokens are validated,
+ then calls [src/core/session.py] (lines 112-145) for session management."
 
 The main agent will automatically inject the actual file contents based on your citations,
 so the main agent doesn't need to re-read files you've already explored.""",

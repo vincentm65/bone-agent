@@ -184,6 +184,27 @@ def _display_tool_feedback(command, tool_result, console, indent=False, panel_up
         return
     import re
 
+    # For sub-agent panel: add tool call with formatted message
+    if panel_updater:
+        # Extract tool name from command
+        if command.startswith("read_file"):
+            tool_name = "read_file"
+        elif command.startswith("rg"):
+            tool_name = "rg"
+        elif command.startswith("list_directory"):
+            tool_name = "list_directory"
+        elif command.startswith(("create_task_list", "complete_task", "show_task_list")):
+            tool_name = command.split()[0]
+        elif command.startswith("web search"):
+            tool_name = "web_search"
+        elif command.startswith("execute_command"):
+            tool_name = "execute_command"
+        else:
+            tool_name = command.split()[0]
+        
+        # Pass to panel updater which will handle formatting
+        panel_updater.add_tool_call(tool_name, tool_result, command)
+
     # For task list tools: show the list (bounded by MAX_TASKS / MAX_TASK_LEN)
     if command.startswith(("create_task_list", "complete_task", "show_task_list")):
         exit_code = _get_exit_code(tool_result)
@@ -192,16 +213,12 @@ def _display_tool_feedback(command, tool_result, console, indent=False, panel_up
             rendered = tool_result
             if rendered.startswith("exit_code="):
                 rendered = "\n".join(rendered.splitlines()[1:])
-            if panel_updater:
-                panel_updater.append(rendered.strip())
-            else:
+            if not panel_updater:
                 console.print(rendered.strip(), markup=False)
         else:
             # Show single-line error if present
             first_two = "\n".join(tool_result.splitlines()[:2]).strip()
-            if panel_updater:
-                panel_updater.append(first_two or tool_result.strip())
-            else:
+            if not panel_updater:
                 console.print(first_two or tool_result.strip(), markup=False)
         if not panel_updater:
             console.print()
@@ -547,9 +564,10 @@ class SubAgentPanel:
             query: The task query for the sub-agent
             console: Rich console for display
         """
-        self.query = query
         self.console = console
-        self.output_lines = []
+        self.query = query
+        self.tool_calls = []  # List of tool_name strings
+        self.total_tool_calls = 0
         self._live = None
         self._spinner_index = 0
         self._show_spinner = True
@@ -557,15 +575,15 @@ class SubAgentPanel:
         self._stop_spinner = threading.Event()
 
     def _get_title(self):
-        """Get panel title with optional spinner.
+        """Get panel title with optional spinner and tool call counter.
 
         Returns:
             Rich markup string for the panel title
         """
         if self._show_spinner:
             spinner = self._SPINNER_FRAMES[self._spinner_index % len(self._SPINNER_FRAMES)]
-            return f"[cyan]{spinner} Sub-Agent[/cyan]"
-        return "[cyan]Sub-Agent[/cyan]"
+            return f"[cyan]{spinner} Sub-Agent ({self.total_tool_calls})[/cyan]"
+        return f"[cyan]Sub-Agent ({self.total_tool_calls})[/cyan]"
 
     def _render_panel(self, title=None, border_style="cyan"):
         """Render the current panel state.
@@ -577,7 +595,15 @@ class SubAgentPanel:
         Returns:
             Rich Panel object with current content and title
         """
-        content = "\n".join(self.output_lines)
+        lines = [f"[bold cyan]Query:[/bold cyan] {self.query}", ""]
+        
+        if self.tool_calls:
+            content = "\n".join(self.tool_calls)
+            lines.append(content)
+        else:
+            lines.append("[dim]No tools called yet[/dim]")
+        
+        content = "\n".join(lines)
         return Panel(
             Text.from_markup(content, justify="left"),
             title=title if title is not None else self._get_title(),
@@ -600,10 +626,6 @@ class SubAgentPanel:
         Returns:
             self for use in with statement
         """
-        # Add query as first line in panel content
-        self.output_lines.append(f"[bold cyan]Query:[/bold cyan] {self.query}")
-        self.output_lines.append("")  # Blank line separator
-
         panel = self._render_panel()
         self._live = Live(panel, console=self.console, refresh_per_second=10)
         self._live.__enter__()
@@ -622,13 +644,164 @@ class SubAgentPanel:
         if self._live:
             self._live.__exit__(*args)
 
+    def add_tool_call(self, tool_name, tool_result=None, command=None):
+        """Add a tool call message to the panel and refresh display.
+
+        Args:
+            tool_name: Name of the tool (e.g., "read_file", "rg")
+            tool_result: Optional tool result string (for detailed formatting)
+            command: Optional command string for context
+        """
+        # If no tool_result provided, just show tool name (backward compatibility)
+        if tool_result is None:
+            message = f"[grey]{tool_name}[/grey]"
+            self.total_tool_calls += 1
+            self.tool_calls.append(message)
+            if len(self.tool_calls) > 5:
+                self.tool_calls.pop(0)
+            self._live.update(self._render_panel())
+            return
+
+        # Full implementation with tool_result
+        self.total_tool_calls += 1
+        
+        # Format message based on tool type, matching main agent styling
+        if tool_name == "read_file":
+            # Extract path from command if available
+            path = ""
+            if command:
+                # Command format is "read_file: path" (parallel) or "read_file path" (sequential)
+                match = re.search(r'read_file:?\s+(.+)', command)
+                if match:
+                    path = match.group(1).strip()
+            
+            # Parse lines_read from result
+            first_line = tool_result.split('\n')[0]
+            match = re.search(r'lines_read=(\d+)', first_line)
+            start_match = re.search(r'start_line=(\d+)', first_line)
+            
+            if match:
+                count = int(match.group(1))
+                if start_match:
+                    start_line = int(start_match.group(1))
+                    if start_line > 1:
+                        end_line = start_line + count - 1
+                        message = f"[grey]read_file {path}[/grey]\n[dim]╰─ Read lines {start_line}-{end_line} ({count} line{'s' if count != 1 else ''})[/dim]"
+                    else:
+                        message = f"[grey]read_file {path}[/grey]\n[dim]╰─ Read {count} line{'s' if count != 1 else ''}[/dim]"
+                else:
+                    message = f"[grey]read_file {path}[/grey]\n[dim]╰─ Read {count} line{'s' if count != 1 else ''}[/dim]"
+            else:
+                message = f"[grey]read_file {path}[/grey]"
+        
+        elif tool_name == "rg":
+            # Extract pattern from command if available
+            pattern = ""
+            if command:
+                # Command format is "rg: pattern" (parallel) or "rg pattern" (sequential)
+                match = re.search(r'rg:?\s+(.+)', command)
+                if match:
+                    pattern = match.group(1).strip()
+            
+            # Parse matches/files from result
+            lines = tool_result.split('\n')
+            if len(lines) > 1:
+                match = re.search(r'(matches|files)=(\d+)', lines[1])
+                if match:
+                    count = int(match.group(2))
+                    label = match.group(1)
+                    if count == 0:
+                        message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ No {label} found[/dim]"
+                    else:
+                        message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ Found {count} {label}[/dim]"
+                else:
+                    message = f"[grey]rg {pattern}[/grey]"
+            else:
+                message = f"[grey]rg {pattern}[/grey]"
+        
+        elif tool_name == "list_directory":
+            # Extract path from command if available
+            path = "."
+            if command:
+                # Command format is "list_directory: path" (parallel) or "list_directory path" (sequential)
+                match = re.search(r'list_directory:?\s+(.+)', command)
+                if match:
+                    path = match.group(1).strip()
+            
+            # Parse items_count from result
+            lines = tool_result.split('\n')
+            items_count = 0
+            for line in lines:
+                match = re.search(r'items_count=(\d+)', line)
+                if match:
+                    items_count = int(match.group(1))
+                    break
+            
+            if items_count > 0:
+                message = f"[grey]list_directory {path}[/grey]\n[dim]╰─ {items_count} item{'s' if items_count != 1 else ''}[/dim]"
+            else:
+                message = f"[grey]list_directory {path}[/grey]\n[dim]╰─ No items[/dim]"
+        
+        elif tool_name == "web_search":
+            # Extract query from command if available
+            query = ""
+            if command:
+                # Command format is "web search | query"
+                if "|" in command:
+                    parts = command.split(" | ", 1)
+                    if len(parts) > 1:
+                        query = parts[1]
+            if query:
+                message = f"[bold cyan]web search | {query}[/bold cyan]\n[dim]╰─ Search completed[/dim]"
+            else:
+                message = f"[bold cyan]web_search[/bold cyan]\n[dim]╰─ Search completed[/dim]"
+        
+        elif tool_name == "execute_command":
+            # Extract command from the command parameter if available
+            cmd_display = ""
+            if command:
+                # Command format is "execute_command: cmd" or just the cmd itself
+                if command.startswith("execute_command"):
+                    parts = command.split(' ', 1)
+                    if len(parts) > 1:
+                        cmd_display = parts[1]
+                else:
+                    # Just the command itself (from label builder)
+                    cmd_display = command
+            if cmd_display:
+                message = f"[grey]{cmd_display}[/grey]\n[dim]╰─ Command executed[/dim]"
+            else:
+                message = f"[grey]execute_command[/grey]\n[dim]╰─ Command executed[/dim]"
+        
+        elif tool_name in ("create_task_list", "complete_task", "show_task_list"):
+            # Handle task list tools - show the task list content
+            exit_code = _get_exit_code(tool_result)
+            if exit_code == 0 or exit_code is None:
+                rendered = tool_result
+                if rendered.startswith("exit_code="):
+                    rendered = "\n".join(rendered.splitlines()[1:])
+                message = f"[grey]{tool_name}[/grey]\n[dim]╰─ {rendered.strip()}[/dim]"
+            else:
+                first_two = "\n".join(tool_result.splitlines()[:2]).strip()
+                message = f"[grey]{tool_name}[/grey]\n[dim]╰─ {first_two or tool_result.strip()}[/dim]"
+        
+        else:
+            # Generic fallback
+            message = f"[grey]{tool_name}[/grey]"
+        
+        self.tool_calls.append(message)
+        # Keep only last 5 tool calls
+        if len(self.tool_calls) > 5:
+            self.tool_calls.pop(0)
+        self._live.update(self._render_panel())
+
     def append(self, text):
-        """Append text to panel and refresh display.
+        """Append text to panel and refresh display (kept for compatibility).
 
         Args:
             text: Text to append (may contain Rich markup)
         """
-        self.output_lines.append(text)
+        # For now, just update panel to refresh title counter
         self._live.update(self._render_panel())
 
     def set_complete(self, usage=None):
@@ -639,13 +812,9 @@ class SubAgentPanel:
         """
         self._show_spinner = False  # Stop spinner
 
-        if usage:
-            token_info = f"Tokens: {usage.get('prompt', 0)} + {usage.get('completion', 0)} = {usage.get('total', 0)}"
-            self.output_lines.append(f"\n[dim]{token_info}[/dim]")
-
-        # Update panel with green complete title
+        # Update panel with green complete title showing total tool calls
         self._live.update(self._render_panel(
-            title="[green]✓ Sub-Agent Complete[/green]",
+            title=f"[green]✓ Sub-Agent Complete ({self.total_tool_calls})[/green]",
             border_style="green"
         ))
 
@@ -726,8 +895,7 @@ class AgenticOrchestrator:
             return
             
         if self.panel_updater:
-            # Append to live panel instead of printing
-            # Don't add prefix here - callers that need it add it before calling
+            # For sub-agent panel, non-tool messages (like warnings) are appended directly
             self.panel_updater.append(message)
         else:
             if indent and self.is_sub_agent:
@@ -1103,17 +1271,14 @@ class AgenticOrchestrator:
                             label_text = f"[grey]{label}[/grey]"
                         
                         # Route to panel_updater for sub-agent, otherwise console
-                        if self.panel_updater:
-                            self.panel_updater.append(label_text)
-                        else:
+                        # For panel_updater, _display_tool_feedback will handle the complete display
+                        if not self.panel_updater:
                             self.console.print(label_text, highlight=False)
                             # Force flush to ensure label appears immediately
                             self.console.file.flush()
                     except:
                         label_text = f"[grey]{function_name}[/grey]"
-                        if self.panel_updater:
-                            self.panel_updater.append(label_text)
-                        else:
+                        if not self.panel_updater:
                             self.console.print(label_text, highlight=False)
                             self.console.file.flush()
 
@@ -1269,9 +1434,6 @@ class AgenticOrchestrator:
 
         # Add --line-number for all searches
         cmd_parts.append("--line-number")
-
-        # Add --max-count to prevent excessive results
-        cmd_parts.append("--max-count=100")
 
         # Add max-filesize if specified
         if arguments.get("max_filesize"):
@@ -1437,8 +1599,11 @@ class AgenticOrchestrator:
         console = self._get_console()
 
         if self.panel_updater:
-            # Append to panel when in sub-agent mode
-            self.panel_updater.append(f"[grey]{command}[/grey]")
+            # Extract tool name from command
+            tool_name = "execute_command"
+            if command.strip().startswith("rg"):
+                tool_name = "rg"
+            # Note: _display_tool_feedback will add formatted message
         elif console:
             # Print to console in normal mode (only if not suppressed)
             console.print(f"[grey]{command}[/grey]", highlight=False)
@@ -1882,9 +2047,7 @@ class AgenticOrchestrator:
         # Get console respecting parallel context
         console = self._get_console()
 
-        if self.panel_updater:
-            self.panel_updater.append(f"[bold cyan]web search | {query}[/bold cyan]")
-        elif console:
+        if console:
             console.print(f"[bold cyan]web search | {query}[/bold cyan]", highlight=False)
         try:
             tool_result = run_web_search(arguments, self.console)
@@ -2003,24 +2166,21 @@ class AgenticOrchestrator:
 
                 injected_files_content = []
 
-                # Regex to find: - [path/to/file] (lines N-M or full) OR lines N-M in [file] OR file:range OR file:N
+                # Regex to find explicit citation patterns (bracketed notation only for safety)
                 # Matches: - [src/main.py] (lines 10-20)
                 # Matches: - [src/utils.py] (full)
-                # Matches: lines 10-20 in src/main.py
+                # Matches: lines 10-20 in [src/main.py]
                 # Matches: [src/main.py]:10-20
                 # Matches: [src/main.py]:10 (single line)
-                # Matches: [src/main.py] (no line numbers, read full)
-                # Matches: src/main.py:10-20 (alternative format)
-                # Matches: src/main.py:10 (single line, alternative)
+                # Matches: [src/main.py] (full)
+                # NOTE: Only bracketed formats are accepted to prevent false positives in code/comments
                 import re
                 file_pattern = re.compile(
                     r"(?:-\s+\[(.*?)\]\s+\((?:lines\s+)?(\d+)-(\d+)(?:\s*lines)?|full)\)|"  # - [file] (N-M) or (full)
                     r"(?:lines\s+(\d+)-(\d+)\s+in\s+\[(.*?)\])|"  # lines N-M in [file]
                     r"(?:\[(.*?)\]:(\d+)-(\d+))|"  # [file]:N-M
                     r"(?:\[(.*?)\]:(\d+))|"  # [file]:N (single line)
-                    r"(?:\[(.*?)\](?![:(]))|"  # [file] (no line numbers, read full)
-                    r"(?:\b([\w./-]+):(\d+)-(\d+)\b)|"  # file:N-M (alternative format)
-                    r"(?:\b([\w./-]+):(\d+)\b)"  # file:N (single line, alternative)
+                    r"(?:\[(.*?)\](?![:(]))"  # [file] (no line numbers, read full)
                 )
 
                 for line in raw_result.split('\n'):
@@ -2032,8 +2192,6 @@ class AgenticOrchestrator:
                         # Pattern 3: [file]:N-M -> groups: (7=file, 8=N, 9=M)
                         # Pattern 4: [file]:N (single line) -> groups: (10=file, 11=N)
                         # Pattern 5: [file] (full) -> groups: (12=file)
-                        # Pattern 6: file:N-M (alternative) -> groups: (13=file, 14=N, 15=M)
-                        # Pattern 7: file:N (alternative) -> groups: (16=file, 17=N)
 
                         # Extract path and range from whichever pattern matched
                         if match.group(1):
@@ -2066,21 +2224,10 @@ class AgenticOrchestrator:
                             start_line = int(match.group(11))
                             max_lines = 1
                         elif match.group(12):
-                            # Pattern 5: [file] (no line numbers, read full)
+                            # Pattern 5: [file] (full)
                             rel_path = match.group(12).strip()
                             start_line = 1
                             max_lines = None
-                        elif match.group(13) and match.group(14) and match.group(15):
-                            # Pattern 6: file:N-M (alternative format)
-                            rel_path = match.group(13).strip()
-                            start_line = int(match.group(14))
-                            end_line = int(match.group(15))
-                            max_lines = self._calculate_line_range(start_line, end_line)
-                        elif match.group(16) and match.group(17):
-                            # Pattern 7: file:N (single line, alternative)
-                            rel_path = match.group(16).strip()
-                            start_line = int(match.group(17))
-                            max_lines = 1
                         else:
                             continue  # No valid match
 

@@ -22,7 +22,7 @@ def _group_items_by_directory(items, show_files, show_dirs) -> Dict:
     """Group items by their parent directory for smart truncation.
 
     Args:
-        items: List of (kind, rel_path, size, raw_path) tuples
+        items: List of (kind, rel_path, size, raw_path, line_count) tuples
         show_files: Whether files are included in results
         show_dirs: Whether directories are included in results
 
@@ -31,7 +31,7 @@ def _group_items_by_directory(items, show_files, show_dirs) -> Dict:
     """
     groups = {}
 
-    for kind, rel_path, size, raw_path in items:
+    for kind, rel_path, size, raw_path, line_count in items:
         # Get parent directory
         if '/' in rel_path:
             parent_dir = Path(rel_path).parent
@@ -42,9 +42,9 @@ def _group_items_by_directory(items, show_files, show_dirs) -> Dict:
             groups[parent_dir] = {'dirs': [], 'files': []}
 
         if kind == 'DIR ':
-            groups[parent_dir]['dirs'].append((kind, rel_path, size, raw_path))
+            groups[parent_dir]['dirs'].append((kind, rel_path, size, raw_path, line_count))
         else:  # FILE
-            groups[parent_dir]['files'].append((kind, rel_path, size, raw_path))
+            groups[parent_dir]['files'].append((kind, rel_path, size, raw_path, line_count))
 
     return groups
 
@@ -223,7 +223,15 @@ def list_directory(
         base_dir = resolved
         hit_limit = False  # Track if we hit MAX_TOTAL_ITEMS
 
-        def _add_item(kind, rel_path, size_str, raw_path):
+        def _count_lines(file_path: Path) -> int:
+            """Count lines in a file efficiently."""
+            try:
+                with open(file_path, 'rb') as f:
+                    return sum(1 for _ in f) - 1  # Subtract 1 for last newline, but handle empty files
+            except (OSError, IOError):
+                return 0
+
+        def _add_item(kind, rel_path, size_str, raw_path, line_count=None):
             nonlocal hit_limit
             if kind == "FILE" and not show_files:
                 return
@@ -236,7 +244,7 @@ def list_directory(
             if len(items) >= MAX_TOTAL_ITEMS:
                 hit_limit = True
                 return
-            items.append((kind, str(rel_path), size_str, raw_path))
+            items.append((kind, str(rel_path), size_str, raw_path, line_count))
 
         if recursive:
             stack = [resolved]
@@ -267,9 +275,11 @@ def list_directory(
                             if is_file:
                                 try:
                                     size = f"{entry.stat(follow_symlinks=False).st_size:>10}"
+                                    line_count = _count_lines(entry_path)
                                 except OSError:
                                     size = "         ?"
-                                _add_item("FILE", rel_path, size, entry_path)
+                                    line_count = 0
+                                _add_item("FILE", rel_path, size, entry_path, line_count)
                             else:
                                 _add_item("DIR ", rel_path, "          ", entry_path)
                                 stack.append(entry_path)
@@ -300,9 +310,11 @@ def list_directory(
                     if is_file:
                         try:
                             size = f"{entry.stat(follow_symlinks=False).st_size:>10}"
+                            line_count = _count_lines(entry_path)
                         except OSError:
                             size = "         ?"
-                        _add_item("FILE", rel_path, size, entry_path)
+                            line_count = 0
+                        _add_item("FILE", rel_path, size, entry_path, line_count)
                     else:
                         _add_item("DIR ", rel_path, "          ", entry_path)
 
@@ -323,11 +335,11 @@ def list_directory(
 
         # Build lines with truncation message
         lines = []
-        for kind, rel_path, size, _ in truncated_items:
+        for kind, rel_path, size, _, line_count in truncated_items:
             if kind == "FILE":
-                lines.append(f"{kind}  {size} bytes  {rel_path}")
+                lines.append(f"{kind}  {size} bytes  {line_count:6} lines  {rel_path}")
             else:
-                lines.append(f"{kind}              {rel_path}")
+                lines.append(f"{kind}              {line_count:6} lines  {rel_path}")
 
         # Add truncation message at end
         if truncation_info:

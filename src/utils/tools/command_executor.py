@@ -194,12 +194,12 @@ def run_shell_command(command, repo_root, rg_exe_path, console, debug_mode, giti
             # Direct execution (rg)
             cmd_list = [str(executable)] + args
             result = _execute_direct_command(cmd_list, repo_root, env, debug_mode, console)
-            # AI always gets full results; user sees summary via _display_tool_feedback
+            # AI gets truncated results (via format_tool_result); user sees summary via _display_tool_feedback
             formatted_result = format_tool_result(result, command=command, is_rg=True, debug_mode=True)
         else:
             # Shell execution (PowerShell on Windows, /bin/sh on Unix/Linux)
             result = _execute_shell_command(args, repo_root, env, debug_mode, console)
-            # AI always gets full results; user sees summary via _display_tool_feedback
+            # AI gets full results; user sees summary via _display_tool_feedback
             formatted_result = format_tool_result(result, command=command, debug_mode=True)
 
         if debug_mode and console:

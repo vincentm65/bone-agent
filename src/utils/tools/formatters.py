@@ -350,10 +350,11 @@ def format_tool_result(result, command=None, is_rg=False, debug_mode=False):
         else:
             output = "(no output)"
 
-    # For rg commands, show summary in normal mode, full output in debug mode
+    # For rg commands, apply smart truncation to prevent context explosion
     if is_rg:
         label = "files" if command and "--files-with-matches" in command.lower() else "matches"
-        
+        MAX_LINES = 100  # Maximum lines of output to show
+
         # Exit code 0: found matches, Exit code 1: no matches
         if result.returncode == 1:
             # No matches found - rg returns 1 in this case
@@ -380,20 +381,23 @@ def format_tool_result(result, command=None, is_rg=False, debug_mode=False):
             # Error occurred (exit code 2 or higher)
             count = 0
 
-        if debug_mode:
-            # Debug mode: show full output
-            return f"exit_code={result.returncode}\n{label}={count}\n{output}\n\n"
+        # Handle no matches
+        if result.returncode == 1:
+            return f"exit_code={result.returncode}\nNo matches found\n\n"
+        elif count == 0:
+            # Exit code 0 but no output - unusual but possible
+            return f"exit_code={result.returncode}\n{output}\n\n"
+
+        # Truncate output if it exceeds MAX_LINES
+        output_lines = output.splitlines()
+        if len(output_lines) > MAX_LINES:
+            truncated = "\n".join(output_lines[:MAX_LINES])
+            omitted = len(output_lines) - MAX_LINES
+            output = f"{truncated}\n\n... ({omitted} more {label} truncated)"
         else:
-            # Normal mode: show summary only
-            if result.returncode == 1:
-                return f"exit_code={result.returncode}\nNo matches found\n\n"
-            elif count == 0:
-                # Exit code 0 but no output - unusual but possible
-                return f"exit_code={result.returncode}\n{output}\n\n"
-            elif count == 1:
-                return f"exit_code={result.returncode}\nFound 1 {label.rstrip('s')}\n\n"
-            else:
-                return f"exit_code={result.returncode}\nFound {count} {label}\n\n"
+            output = "\n".join(output_lines)
+
+        return f"exit_code={result.returncode}\n{label}={count}\n{output}\n\n"
 
     return f"exit_code={result.returncode}\n{output}\n\n"
 
