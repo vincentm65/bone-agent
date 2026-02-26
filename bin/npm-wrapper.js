@@ -8,8 +8,37 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-// Get the package directory (npm installs the wrapper in bin/, so go up one level)
-const packageDir = path.resolve(__dirname, '..');
+// Get the package directory - handle both local and global npm installs
+// For global installs, the wrapper is typically in node_modules/.bin or npm's global bin directory
+let packageDir = __dirname;
+
+// First check if package.json exists in current directory (local install)
+if (!fs.existsSync(path.join(packageDir, 'package.json'))) {
+  // For global installs: check if we're in node_modules/.bin (go up to node_modules/package-name)
+  const nodeModulesBin = path.join(packageDir, '..', 'vmcode-cli', 'package.json');
+  if (fs.existsSync(nodeModulesBin)) {
+    packageDir = path.join(packageDir, '..', 'vmcode-cli');
+  } else {
+    // Alternative: walk up the directory tree looking for package.json
+    let found = false;
+    let searchDir = packageDir;
+    while (searchDir !== path.dirname(searchDir)) {
+      const pkgJson = path.join(searchDir, 'package.json');
+      if (fs.existsSync(pkgJson)) {
+        packageDir = searchDir;
+        found = true;
+        break;
+      }
+      searchDir = path.dirname(searchDir);
+    }
+    if (!found) {
+      console.error('Error: Could not find package.json. Installation may be corrupted.');
+      console.error(`Searched from: ${__dirname}`);
+      process.exit(1);
+    }
+  }
+}
+
 const pythonScript = path.join(packageDir, 'src', 'ui', 'main.py');
 
 function findPython() {

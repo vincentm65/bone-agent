@@ -1,13 +1,21 @@
 {
   "name": "vmcode-cli",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "A terminal-based AI coding assistant powered by OpenAI-style function calling",
   "main": "src/ui/main.py",
   "bin": {
-    "vmcode": "./bin/npm-wrapper.js"
+    "vmcode": "bin/npm-wrapper.js"
   },
+  "files": [
+    "package.json",
+    "LICENSE",
+    "README.md",
+    "requirements.txt",
+    "config.yaml.example",
+    "bin/npm-wrapper.js",
+    "src/**/*.py"
+  ],
   "scripts": {
-    "install": "node scripts/install.js",
     "postinstall": "echo 'vmcode installed! Run with: vmcode'",
     "start": "node bin/npm-wrapper.js"
   },
