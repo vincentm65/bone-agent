@@ -7,10 +7,15 @@
     "vmcode": "./bin/npm-wrapper.js"
   },
   "files": [
-    "src/",
-    "bin/",
+    "package.json",
+    "LICENSE",
+    "README.md",
     "requirements.txt",
-    "config.yaml.example"
+    "config.yaml.example",
+    "bin/npm-wrapper.js",
+    "bin/rg",
+    "bin/rg.exe",
+    "src/**/*.py"
   ],
   "scripts": {
     "postinstall": "echo 'vmcode installed! Run with: vmcode'",
