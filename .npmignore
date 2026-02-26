@@ -1,8 +1,11 @@
+# Python cache
+__pycache__/
+**/__pycache__/
+
 # Node.js
 node_modules/
 
-# Python
-__pycache__/
+# Python compiled
 *.py[cod]
 *$py.class
 *.so
@@ -37,6 +40,7 @@ Thumbs.db
 # Git
 .git/
 .gitignore
+.gitattributes
 
 # Development files
 tests/
@@ -64,3 +68,6 @@ install.bat
 proxy/
 vercel/
 vmcode-proxy/
+
+# Scripts (install script removed)
+scripts/
