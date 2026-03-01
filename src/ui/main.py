@@ -29,6 +29,7 @@ from core.agentic import agentic_answer
 from utils.settings import MonokaiDarkBGStyle
 from utils.markdown import left_align_headings
 from exceptions import VmCodeError
+from tools.loader import load_all_tools
 
 # Console setup
 console = Console(theme=Theme({
@@ -118,6 +119,11 @@ def check_double_ctrl_c() -> bool:
 
 def main():
     """Main interactive chat loop."""
+
+    # Load all tools (built-in and user tools)
+    # This populates the ToolRegistry with all decorated tools
+    load_all_tools()
+
     # Check for config.yaml and provide helpful message if missing
     config_path = Path(__file__).resolve().parents[1].parent / "config.yaml"
     config_example = Path(__file__).resolve().parents[1].parent / "config.yaml.example"

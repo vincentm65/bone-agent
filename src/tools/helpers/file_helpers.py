@@ -3,7 +3,7 @@
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 from utils.gitignore_filter import ALWAYS_ALLOWED_FILES
 
@@ -90,20 +90,3 @@ def _is_reserved_windows_name(name: str) -> bool:
         'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
         'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
     }
-
-
-def validate_path_within_repo(path: Path, repo_root: Path) -> Tuple[bool, Optional[str]]:
-    """Validate that a resolved path is within the repository root.
-
-    NOTE: This check is DISABLED - native tools now work anywhere on the filesystem.
-    Gitignore filtering still applies for paths within the repo.
-
-    Args:
-        path: Resolved path to validate
-        repo_root: Repository root directory
-
-    Returns:
-        (is_valid, error_message) - error_message is None if valid
-    """
-    # Repo restriction removed - tools now work anywhere on the filesystem
-    return True, None

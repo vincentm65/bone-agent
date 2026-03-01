@@ -2,6 +2,7 @@
 
 import os
 import shlex
+from llm.config import ALLOWED_COMMANDS
 
 
 # Commands that overlap with native tools (blocked - use the tool instead)
@@ -115,3 +116,31 @@ def check_command(command):
 
     # Allow all other commands
     return True, None
+
+
+def is_auto_approved_command(command):
+    """Check if a command should be auto-approved (safe, read-only commands).
+
+    Args:
+        command: Command string to validate
+
+    Returns:
+        bool: True if command is in ALLOWED_COMMANDS list (auto-approved)
+    """
+    command = command.strip()
+    if not command:
+        return False
+
+    # Strip "powershell " prefix if present (legacy support for Windows users)
+    if command.lower().startswith("powershell "):
+        command = command[len("powershell "):].strip()
+
+    # Tokenize and get command name
+    tokens = _tokenize_segment(command)
+    if not tokens:
+        return False
+
+    cmd_name = tokens[0].lower()
+
+    # Check if command is in the auto-approved list
+    return cmd_name in ALLOWED_COMMANDS

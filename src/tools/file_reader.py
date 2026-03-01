@@ -4,13 +4,14 @@ import os
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 
-from .file_helpers import (
+from .helpers.base import tool
+from .helpers.file_helpers import (
     _is_fast_ignored,
     _is_ignored_cached,
     _register_gitignore_spec,
     _is_reserved_windows_name
 )
-from .formatters import format_file_result
+from .helpers.formatters import format_file_result
 
 
 def _validate_read_path(
@@ -253,6 +254,20 @@ def _read_file_content(
     return _read_partial_file(file_path, start_line, max_lines)
 
 
+@tool(
+    name="read_file",
+    description="Read file contents using Python file reader. Use this to view a file (or a specific line range). Prefer this over rg when you already know the file path. Works on any file in the filesystem.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "path_str": {"type": "string", "description": "Path to read (works anywhere on filesystem)"},
+            "max_lines": {"type": "integer", "description": "Max lines to read (omit for full file)"},
+            "start_line": {"type": "integer", "description": "1-based starting line number (default: 1). Use with max_lines to read a specific excerpt."}
+        },
+        "required": ["path_str"]
+    },
+    allowed_modes=["learn", "plan", "edit"]
+)
 def read_file(
     path_str: str,
     repo_root: Path,

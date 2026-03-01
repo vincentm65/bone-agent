@@ -5,12 +5,13 @@ import os
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
-from .file_helpers import (
+from .helpers.base import tool
+from .helpers.file_helpers import (
     _is_fast_ignored,
     _is_ignored_cached,
     _register_gitignore_spec
 )
-from .formatters import format_file_result
+from .helpers.formatters import format_file_result
 
 # Directory listing truncation thresholds
 TRUNCATION_THRESHOLD = 100  # Total items to trigger truncation
@@ -165,6 +166,22 @@ def _validate_directory_path(
         return None, str(e)
 
 
+@tool(
+    name="list_directory",
+    description="List directory contents using Python file lister (preferred over PowerShell). Works on any directory in the filesystem.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "path_str": {"type": "string", "description": "Path to list (default: '.', works anywhere on filesystem)"},
+            "recursive": {"type": "boolean", "description": "List recursively (default: false)"},
+            "show_files": {"type": "boolean", "description": "Include files (default: true)"},
+            "show_dirs": {"type": "boolean", "description": "Include directories (default: true)"},
+            "pattern": {"type": "string", "description": "Glob pattern to filter results (e.g., \"*.py\")"}
+        },
+        "required": ["path_str"]
+    },
+    allowed_modes=["learn", "plan", "edit"]
+)
 def list_directory(
     path_str: str,
     repo_root: Path,
@@ -284,7 +301,7 @@ def list_directory(
                                     line_count = 0
                                 _add_item("FILE", rel_path, size, entry_path, line_count)
                             else:
-                                _add_item("DIR ", rel_path, "          ", entry_path)
+                                _add_item("DIR ", rel_path, "          ", entry_path, line_count=0)
                                 stack.append(entry_path)
                 except PermissionError:
                     continue
@@ -319,7 +336,7 @@ def list_directory(
                             line_count = 0
                         _add_item("FILE", rel_path, size, entry_path, line_count)
                     else:
-                        _add_item("DIR ", rel_path, "          ", entry_path)
+                        _add_item("DIR ", rel_path, "          ", entry_path, line_count=0)
 
         # Sort: directories first, then alphabetically
         items.sort(key=lambda x: (0 if x[0] == "DIR " else 1, x[1]))

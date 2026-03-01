@@ -68,4 +68,3 @@ def run_web_search(arguments, console):
             f"Failed to perform web search",
             details={"query": query, "original_error": str(e)}
         )
-

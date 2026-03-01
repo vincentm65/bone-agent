@@ -5,8 +5,10 @@ ThreadPoolExecutor for I/O-bound operations like file reads and web searches.
 """
 
 import concurrent.futures
-from typing import List, Dict, Callable, Any, Tuple
+from typing import List, Tuple
 from dataclasses import dataclass
+
+from .base import ToolRegistry, build_context
 
 
 @dataclass
@@ -16,7 +18,7 @@ class ToolCall:
     Attributes:
         tool_id: Unique identifier for this tool call
         function_name: Name of the tool function to execute
-        arguments: Dict of arguments to pass to the tool handler
+        arguments: Dictionary of arguments to pass to the tool handler
         call_index: Index in original tool_calls array (for order preservation)
     """
     tool_id: str
@@ -36,6 +38,7 @@ class ToolResult:
         result: String result from tool execution (if successful)
         error: Error message (if failed)
         should_exit: Whether the tool requested the orchestration loop to exit
+        requires_approval: Whether this tool requires user approval (for orchestrator)
     """
     tool_id: str
     call_index: int
@@ -43,6 +46,7 @@ class ToolResult:
     result: str
     error: str = None
     should_exit: bool = False
+    requires_approval: bool = False
 
 
 class ParallelToolExecutor:
@@ -67,22 +71,20 @@ class ParallelToolExecutor:
     def execute_tools(
         self,
         tool_calls: List[ToolCall],
-        handler_map: Dict[str, Callable],
         context: dict
     ) -> Tuple[List[ToolResult], bool]:
         """Execute multiple tools concurrently.
 
         Args:
             tool_calls: List of ToolCall objects
-            handler_map: Dict mapping function_name to handler callable
-            context: Dict containing repo_root, console, chat_manager, etc.
+            context: Dictionary containing repo_root, console, chat_manager, etc.
 
         Returns:
             Tuple of (results in call_index order, had_any_errors)
         """
         if len(tool_calls) == 1:
             # Fast path for single tool (no threading overhead)
-            return self._execute_single(tool_calls[0], handler_map, context)
+            return self._execute_single(tool_calls[0], context)
 
         # Parallel execution for multiple tools
         results = []
@@ -95,7 +97,6 @@ class ParallelToolExecutor:
                 executor.submit(
                     self._execute_single_tool,
                     tool_call,
-                    handler_map,
                     context
                 ): tool_call
                 for tool_call in tool_calls
@@ -127,69 +128,106 @@ class ParallelToolExecutor:
     def _execute_single(
         self,
         tool_call: ToolCall,
-        handler_map: Dict[str, Callable],
         context: dict
     ) -> Tuple[List[ToolResult], bool]:
         """Execute single tool (fast path, no threading overhead).
 
         Args:
             tool_call: Single ToolCall to execute
-            handler_map: Handler function mapping
             context: Execution context dict
 
         Returns:
             Tuple of (single-element result list, had_errors)
         """
-        result = self._execute_single_tool(tool_call, handler_map, context)
+        result = self._execute_single_tool(tool_call, context)
         return [result], not result.success
 
     def _execute_single_tool(
         self,
         tool_call: ToolCall,
-        handler_map: Dict[str, Callable],
         context: dict
     ) -> ToolResult:
         """Execute a single tool call with error handling.
 
         Args:
             tool_call: ToolCall to execute
-            handler_map: Handler function mapping
             context: Execution context dict
 
         Returns:
             ToolResult with execution outcome
         """
-        handler = handler_map.get(tool_call.function_name)
+        tool = ToolRegistry.get(tool_call.function_name)
+        if tool:
+            try:
+                # For tools requiring approval, return preview without executing
+                # The orchestrator will handle the approval workflow
+                if tool.requires_approval:
+                    # Build context from context dict
+                    cm = context.get('chat_manager')
+                    interaction_mode = getattr(cm, 'interaction_mode', 'edit') if cm else 'edit'
 
-        if not handler:
-            return ToolResult(
-                tool_id=tool_call.tool_id,
-                call_index=tool_call.call_index,
-                success=False,
-                result="",
-                error=f"Unknown tool '{tool_call.function_name}'"
-            )
+                    tool_context = build_context(
+                        repo_root=context.get('repo_root'),
+                        console=context.get('console'),
+                        gitignore_spec=context.get('gitignore_spec'),
+                        debug_mode=context.get('debug_mode', False),
+                        interaction_mode=interaction_mode,
+                        chat_manager=cm,
+                        rg_exe_path=context.get('rg_exe_path'),
+                        panel_updater=context.get('panel_updater')
+                    )
 
-        try:
-            should_exit, tool_result = handler(
-                tool_call.tool_id,
-                tool_call.arguments,
-                context.get('thinking_indicator')
-            )
+                    # For edit_file: return preview (orchestrator handles approval)
+                    if tool_call.function_name == "edit_file":
+                        tool_result = tool.execute(tool_call.arguments, tool_context)
+                        return ToolResult(
+                            tool_id=tool_call.tool_id,
+                            call_index=tool_call.call_index,
+                            success=True,
+                            result=tool_result,
+                            should_exit=False,
+                            requires_approval=True  # Flag for orchestrator to handle
+                        )
+                    # Other approval-required tools would go here in the future
 
-            return ToolResult(
-                tool_id=tool_call.tool_id,
-                call_index=tool_call.call_index,
-                success=True,
-                result=tool_result,
-                should_exit=should_exit
-            )
+                # Normal execution for tools without approval
+                # Build context from context dict
+                cm = context.get('chat_manager')
+                interaction_mode = getattr(cm, 'interaction_mode', 'edit') if cm else 'edit'
 
-        except Exception as e:
-            return ToolResult(
-                tool_id=tool_call.tool_id,
-                call_index=tool_call.call_index,
-                success=False,
-                result="",
-                error=str(e)
-            )
+                tool_context = build_context(
+                    repo_root=context.get('repo_root'),
+                    console=context.get('console'),
+                    gitignore_spec=context.get('gitignore_spec'),
+                    debug_mode=context.get('debug_mode', False),
+                    interaction_mode=interaction_mode,
+                    chat_manager=cm,
+                    rg_exe_path=context.get('rg_exe_path'),
+                    panel_updater=context.get('panel_updater')
+                )
+
+                tool_result = tool.execute(tool_call.arguments, tool_context)
+                return ToolResult(
+                    tool_id=tool_call.tool_id,
+                    call_index=tool_call.call_index,
+                    success=True,
+                    result=tool_result,
+                    should_exit=False
+                )
+            except Exception as e:
+                return ToolResult(
+                    tool_id=tool_call.tool_id,
+                    call_index=tool_call.call_index,
+                    success=False,
+                    result="",
+                    error=f"Error executing tool '{tool_call.function_name}': {str(e)}"
+                )
+
+        # Tool not found in registry
+        return ToolResult(
+            tool_id=tool_call.tool_id,
+            call_index=tool_call.call_index,
+            success=False,
+            result="",
+            error=f"Unknown tool '{tool_call.function_name}'"
+        )

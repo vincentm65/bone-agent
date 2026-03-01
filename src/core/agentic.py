@@ -12,15 +12,13 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 from rich.live import Live
+from prompt_toolkit.formatted_text import HTML
 from utils.markdown import left_align_headings
 from llm.config import TOOLS_REQUIRE_CONFIRMATION, WEB_SEARCH_REQUIRE_CONFIRMATION
 from utils.settings import MAX_TOOL_CALLS, MAX_COMMAND_OUTPUT_LINES, MonokaiDarkBGStyle
 from utils.validation import check_for_duplicate, check_command
-from utils.tools import (
-    run_shell_command,
+from tools import (
     confirm_tool,
-    run_edit_file,
-    preview_edit_file,
     read_file,
     list_directory,
     create_file,
@@ -51,33 +49,6 @@ def _get_exit_code(tool_result):
         except ValueError:
             return None
     return None
-
-
-def _is_truncated_result(tool_result):
-    if not isinstance(tool_result, str):
-        return False
-    first_line = tool_result.splitlines()[0] if tool_result else ""
-    return "truncated=true" in first_line
-
-
-def _coerce_bool(value, default=None):
-    """Best-effort coercion of tool arguments to boolean.
-
-    Returns None if value is None and default is None.
-    """
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "1", "yes", "y", "on"}:
-            return True
-        if normalized in {"false", "0", "no", "n", "off"}:
-            return False
-    return default
 
 
 def _print_or_append(text, console, panel_updater, markup=True):
@@ -132,28 +103,6 @@ _LEXER_MAP = {
     'r': 'r',
 }
 MAX_TASK_TITLE_LEN = 80
-
-
-def _coerce_int(value):
-    """Best-effort coercion of tool arguments to int.
-
-    Returns (int_value, error_message). error_message is None on success.
-    """
-    if value is None:
-        return None, "Missing required integer value."
-    if isinstance(value, bool):
-        return None, "Value must be an integer, not a boolean."
-    if isinstance(value, int):
-        return value, None
-    if isinstance(value, str):
-        text = value.strip()
-        if text == "":
-            return None, "Value must be a non-empty integer."
-        try:
-            return int(text), None
-        except ValueError:
-            return None, "Value must be an integer."
-    return None, "Value must be an integer."
 
 
 def _format_task_list(task_list, title=None):
@@ -217,6 +166,43 @@ def _build_read_file_label(path, start_line=None, max_lines=None, with_colon=Fal
     separator = ': ' if with_colon else ' '
     label = f"read_file{separator}{path}"
     return label
+
+
+def _build_tool_label(function_name, arguments):
+    """Build tool label with arguments for display.
+
+    Args:
+        function_name: Name of the tool function
+        arguments: Dictionary of tool arguments
+
+    Returns:
+        str: Formatted label with arguments (e.g., "read_file: path/to/file", "rg: search_pattern")
+    """
+    if function_name == "rg":
+        pattern = arguments.get('pattern', '')
+        # Truncate long patterns for display
+        return f"rg: {pattern[:40]}" if pattern else "rg"
+    elif function_name == "read_file":
+        path = arguments.get('path_str', '')
+        return _build_read_file_label(path, with_colon=True)
+    elif function_name == "list_directory":
+        path = arguments.get('path_str', '')
+        return f"list_directory: {path}"
+    elif function_name == "create_file":
+        path = arguments.get('path_str', '')
+        return f"create_file: {path}"
+    elif function_name == "edit_file":
+        path = arguments.get('path', '')
+        return f"edit_file: {path}"
+    elif function_name == "web_search":
+        query = arguments.get('query', '')
+        return f"web search | {query}"
+    elif function_name == "execute_command":
+        command = arguments.get('command', '')
+        # Truncate long commands for display
+        return f"execute_command: {command[:80]}" if command else "execute_command"
+    else:
+        return function_name
 
 
 def _handle_create_file_feedback(tool_result, console, panel_updater):
@@ -298,21 +284,24 @@ def _handle_list_directory_feedback(tool_result, console, panel_updater):
     if content_start is not None and items_count > 0:
         content_lines = lines[content_start:]
 
-        # Parse entries: kind, size, name
+        # Parse entries: kind, path, line_count, size
+        # Format: FILE  path/to/file.py       123 lines  12345 bytes
+        #         DIR   path/to/dir/             0 lines
         entries = []
         for line in content_lines:
-            parts = line.split()
-            if len(parts) >= 3:
-                kind = parts[0]
+            # Use regex to extract parts - handles paths with spaces
+            # Pattern: <KIND>  <path>  <line_count> lines  [<size> bytes]
+            file_match = re.match(r'^(FILE|DIR)\s+(.+?)\s+(\d+)\s+lines(?:\s+(\d+)\s+bytes)?$', line)
+            if file_match:
+                kind = file_match.group(1)
+                path = file_match.group(2).strip()
+                line_count = file_match.group(3)
+                size = file_match.group(4) if file_match.group(4) else None
+
                 if kind == "FILE":
-                    # FILE  12345 bytes  path/to/file.py
-                    size = parts[1]
-                    name = ' '.join(parts[3:])  # everything after "bytes"
-                    entries.append(("FILE", name, size))
-                elif kind == "DIR":
-                    # DIR              path/to/dir/
-                    name = ' '.join(parts[1:])
-                    entries.append(("DIR", name))
+                    entries.append(("FILE", path, size if size else "?"))
+                else:  # DIR
+                    entries.append(("DIR", path))
 
         # Sort: directories first, then alphabetically
         entries.sort(key=lambda x: (0 if x[0] == "DIR" else 1, x[1]))
@@ -477,21 +466,31 @@ def _display_tool_feedback(command, tool_result, console, indent=False, panel_up
             console.print()
         return
 
-    # For rg: parse matches/files from second line
+    # For rg: parse matches/files from result
     if command.startswith("rg"):
         lines = tool_result.split('\n')
-        if len(lines) > 1:
+        prefix = "╰─ " if not panel_updater else ""
+        message = None
+
+        # Check for "No matches found" message (0 results)
+        if any("No matches found" in line for line in lines):
+            message = f"{prefix}[dim]No matches found[/dim]"
+        # Check for matches=N or files=N pattern
+        elif len(lines) > 1:
             match = re.search(r'(matches|files)=(\d+)', lines[1])
             if match:
                 count = int(match.group(2))
                 label = match.group(1)
-                # Only add prefix for console, not for panel_updater
-                prefix = "╰─ " if not panel_updater else ""
                 if count == 0:
                     message = f"{prefix}[dim]No {label} found[/dim]"
                 else:
                     message = f"{prefix}[dim]Found {count} {label}[/dim]"
-                _print_or_append(message, console, panel_updater)
+        # Fallback: if exit_code=1 but no other info, show no matches
+        elif any("exit_code=1" in line for line in lines):
+            message = f"{prefix}[dim]No matches found[/dim]"
+
+        if message:
+            _print_or_append(message, console, panel_updater)
         if not panel_updater:
             console.print()
         return
@@ -511,6 +510,24 @@ def _display_tool_feedback(command, tool_result, console, indent=False, panel_up
         _handle_execute_command_feedback(tool_result, console, panel_updater)
         return
 
+    # For web_search: display results count
+    if command.startswith("web search"):
+        lines = tool_result.split('\n')
+        if lines:
+            # Extract results_found from first line
+            match = re.search(r'results_found=(\d+)', lines[0])
+            if match:
+                count = int(match.group(1))
+                # Only add prefix for console, not for panel_updater
+                prefix = "╰─ " if not panel_updater else ""
+                if count == 0:
+                    message = f"{prefix}[dim]No results found[/dim]"
+                else:
+                    message = f"{prefix}[dim]Found {count} result{'s' if count != 1 else ''}[/dim]"
+                _print_or_append(message, console, panel_updater)
+        if not panel_updater:
+            console.print()
+        return
 
 
 def _handle_empty_response(empty_response_count, console):
@@ -731,8 +748,15 @@ class SubAgentPanel:
                         message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ Found {count} {label}[/dim]"
                 else:
                     message = f"[grey]rg {pattern}[/grey]"
+            elif any("exit_code=1" in line for line in lines):
+                # Fallback for no matches with minimal output
+                message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ No matches found[/dim]"
             else:
                 message = f"[grey]rg {pattern}[/grey]"
+            
+            # Fallback: if exit_code=1 but no footer, add no matches
+            if tool_result and "exit_code=1" in tool_result and "╰─" not in message:
+                message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ No matches found[/dim]"
         
         elif tool_name == "list_directory":
             # Extract path from command if available
@@ -766,8 +790,23 @@ class SubAgentPanel:
                     parts = command.split(" | ", 1)
                     if len(parts) > 1:
                         query = parts[1]
+
+            # Parse results_found from tool_result
+            lines = tool_result.split('\n')
+            results_count = None
+            if lines:
+                match = re.search(r'results_found=(\d+)', lines[0])
+                if match:
+                    results_count = int(match.group(1))
+
             if query:
-                message = f"[bold cyan]web search | {query}[/bold cyan]\n[dim]╰─ Search completed[/dim]"
+                if results_count is not None:
+                    if results_count == 0:
+                        message = f"[bold cyan]web search | {query}[/bold cyan]\n[dim]╰─ No results found[/dim]"
+                    else:
+                        message = f"[bold cyan]web search | {query}[/bold cyan]\n[dim]╰─ Found {results_count} result{'s' if results_count != 1 else ''}[/dim]"
+                else:
+                    message = f"[bold cyan]web search | {query}[/bold cyan]\n[dim]╰─ Search completed[/dim]"
             else:
                 message = f"[bold cyan]web_search[/bold cyan]\n[dim]╰─ Search completed[/dim]"
         
@@ -827,9 +866,16 @@ class SubAgentPanel:
         """
         self._show_spinner = False  # Stop spinner
 
-        # Update panel with green complete title showing total tool calls
+        # Build title with token usage if available
+        if usage and usage.get('total_tokens'):
+            total_tokens = usage.get('total_tokens', 0)
+            title = f"[green]✓ Sub-Agent Complete ({self.total_tool_calls}) - {total_tokens:,} tokens[/green]"
+        else:
+            title = f"[green]✓ Sub-Agent Complete ({self.total_tool_calls})[/green]"
+
+        # Update panel with green complete title showing total tool calls and tokens
         self._live.update(self._render_panel(
-            title=f"[green]✓ Sub-Agent Complete ({self.total_tool_calls})[/green]",
+            title=title,
             border_style="green"
         ))
 
@@ -968,7 +1014,8 @@ class AgenticOrchestrator:
             if not allowed_tools:
                 self.console.print("[red]Error: allowed_tools is empty[/red]")
                 return None
-            tools = [tool for tool in TOOLS if tool["function"]["name"] in allowed_tools]
+            # TOOLS is a function, call it to get the list
+            tools = [tool for tool in TOOLS() if tool["function"]["name"] in allowed_tools]
             # Log filtered tools for debugging
             if self.debug_mode:
                 tool_names = [t["function"]["name"] for t in tools]
@@ -1153,7 +1200,7 @@ class AgenticOrchestrator:
                 tool_msg = {
                     "role": "tool",
                     "tool_call_id": tool_id,
-                    "content": tool_result
+                    "content": str(tool_result)
                 }
                 self.chat_manager.messages.append(tool_msg)
                 # Log tool result
@@ -1179,27 +1226,13 @@ class AgenticOrchestrator:
         tool_calls = response.get("tool_calls")
         if not tool_calls:
             return False
-        from utils.tools.parallel_executor import ParallelToolExecutor, ToolCall
+        from tools.parallel_executor import ParallelToolExecutor, ToolCall
 
         # Suppress console output in handlers during parallel execution
         # We'll display results ourselves in order below
         self._parallel_context['console'] = None
 
         try:
-            # Build handler map
-            handler_map = {
-                "rg": self._handle_rg,
-                "read_file": self._handle_read_file,
-                "list_directory": self._handle_list_directory,
-                "create_file": self._handle_create_file,
-                "edit_file": self._handle_edit_file,
-                "web_search": self._handle_web_search,
-                "sub_agent": self._handle_sub_agent,
-                "create_task_list": self._handle_create_task_list,
-                "complete_task": self._handle_complete_task,
-                "show_task_list": self._handle_show_task_list,
-            }
-
             # Prepare context
             context = {
                 'thinking_indicator': thinking_indicator,
@@ -1208,6 +1241,7 @@ class AgenticOrchestrator:
                 'rg_exe_path': self.rg_exe_path,
                 'debug_mode': self.debug_mode,
                 'gitignore_spec': self.gitignore_spec,
+                'panel_updater': self.panel_updater,
             }
 
             # Convert to ToolCall objects
@@ -1246,7 +1280,6 @@ class AgenticOrchestrator:
             # Execute in parallel
             results, had_errors = executor.execute_tools(
                 tool_call_objs,
-                handler_map,
                 context
             )
 
@@ -1263,13 +1296,13 @@ class AgenticOrchestrator:
                     label_builders = {
                         "rg": lambda a: f"rg: {a.get('pattern', '')[:40]}",
                         "read_file": lambda a: _build_read_file_label(
-                            a.get('path', ''),
+                            a.get('path_str', ''),
                             a.get('start_line'),
                             a.get('max_lines'),
                             with_colon=True
                         ),
-                        "list_directory": lambda a: f"list_directory: {a.get('path', '')}",
-                        "create_file": lambda a: f"create_file: {a.get('path', '')}",
+                        "list_directory": lambda a: f"list_directory: {a.get('path_str', '')}",
+                        "create_file": lambda a: f"create_file: {a.get('path_str', '')}",
                         "web_search": lambda a: f"web search | {a.get('query', '')}",
                         "create_task_list": lambda a: "create_task_list",
                         "complete_task": lambda a: "complete_task",
@@ -1299,8 +1332,99 @@ class AgenticOrchestrator:
 
                     # Display feedback immediately after label (no buffering)
                     try:
-                        if function_name == "edit_file":
-                            pass  # Edit results displayed by preview
+                        if function_name == "edit_file" and result.requires_approval:
+                            # Handle approval workflow for edit_file in parallel mode
+                            # Display the preview diff
+                            from rich.text import Text
+
+                            # Check if result is a Text object (new format with styling)
+                            if isinstance(result.result, Text):
+                                # Extract the first line to check exit code
+                                plain = str(result.result).split('\n')[0] if result.result else ""
+                                if plain.startswith("exit_code=0"):
+                                    # Display the Rich Text object directly
+                                    self.console.print(result.result)
+                                    self.console.print()
+
+                                    # Request user approval
+                                    # Stop thinking indicator while waiting for user input
+                                    thinking_indicator = context.get('thinking_indicator')
+                                    if thinking_indicator:
+                                        thinking_indicator.stop()
+
+                                    # Create confirmation prompt session with toolbar
+                                    prompt_session = create_confirmation_prompt_session(
+                                        self.chat_manager,
+                                        lambda: HTML("[bold white]Approve edit? (y/n/guidance):[/]")
+                                    )
+
+                                    action, guidance = confirm_tool(
+                                        f"edit_file: {args_dict.get('path', '')}",
+                                        self.console,
+                                        reason="Apply file edit with above changes",
+                                        requires_approval=True,
+                                        prompt_session=prompt_session
+                                    )
+                            elif result.result.startswith("exit_code=0"):
+                                # Legacy string format - parse and display
+                                lines = result.result.split('\n')
+                                preview_lines = [line for line in lines if not line.startswith("exit_code=")]
+                                preview = '\n'.join(preview_lines).strip()
+
+                                # Display preview to user
+                                self.console.print(preview)
+                                self.console.print()
+
+                                # Request user approval
+                                # Stop thinking indicator while waiting for user input
+                                thinking_indicator = context.get('thinking_indicator')
+                                if thinking_indicator:
+                                    thinking_indicator.stop()
+
+                                # Create confirmation prompt session with toolbar
+                                prompt_session = create_confirmation_prompt_session(
+                                    self.chat_manager,
+                                    lambda: HTML("[bold white]Approve edit? (y/n/guidance):[/]")
+                                )
+
+                                action, guidance = confirm_tool(
+                                    f"edit_file: {args_dict.get('path', '')}",
+                                    self.console,
+                                    reason="Apply file edit with above changes",
+                                    requires_approval=True,
+                                    prompt_session=prompt_session
+                                )
+
+                                if action == "execute":
+                                    # User approved - call edit_file_execute
+                                    from tools.base import ToolRegistry
+                                    execute_tool = ToolRegistry.get("edit_file_execute")
+                                    if execute_tool:
+                                        # Rebuild context for execution
+                                        execute_context = build_context(
+                                            repo_root=self.repo_root,
+                                            console=self.console,
+                                            gitignore_spec=self.gitignore_spec,
+                                            debug_mode=self.debug_mode,
+                                            interaction_mode=self.chat_manager.interaction_mode,
+                                            chat_manager=self.chat_manager,
+                                            rg_exe_path=self.rg_exe_path,
+                                            panel_updater=self.panel_updater
+                                        )
+                                        final_result = execute_tool.execute(args_dict, execute_context)
+                                        # Replace result with final result
+                                        result.result = final_result
+                                elif action == "reject":
+                                    result.result = "exit_code=1\nEdit rejected by user."
+                                elif action == "guide":
+                                    result.result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
+
+                                # Restart thinking indicator after user input
+                                if thinking_indicator:
+                                    thinking_indicator.start()
+                            else:
+                                # Error occurred during preview - just show it
+                                self.console.print(result.result)
                         elif label:
                             _display_tool_feedback(label, result.result, self.console, panel_updater=self.panel_updater)
                             # Force flush to ensure immediate output
@@ -1347,7 +1471,7 @@ class AgenticOrchestrator:
                     tool_msg = {
                         "role": "tool",
                         "tool_call_id": result.tool_id,
-                        "content": result.result
+                        "content": str(result.result)
                     }
                     self.chat_manager.messages.append(tool_msg)
                     # Log tool result
@@ -1401,917 +1525,206 @@ class AgenticOrchestrator:
         except (json.JSONDecodeError, TypeError):
             return False, "Error: Invalid JSON arguments."
 
-        # Route to appropriate handler
-        handler = self._get_tool_handler(function_name)
-        if handler:
-            return handler(tool_id, arguments, thinking_indicator)
-        else:
-            return False, f"Error: Unknown tool '{function_name}'."
+        # Create SubAgentPanel for sub_agent tool calls
+        panel_to_use = self.panel_updater
+        if function_name == "sub_agent":
+            query = arguments.get("query", "")
+            panel_to_use = SubAgentPanel(query, self.console)
 
-    def _get_tool_handler(self, function_name):
-        """Return handler function for given tool name.
+        # Execute via tool registry
+        from tools.base import ToolRegistry, build_context
 
-        Args:
-            function_name: Name of the tool function
-
-        Returns:
-            Handler method or None
-        """
-        handlers = {
-            "rg": self._handle_rg,
-            "execute_command": self._handle_execute_command,
-            "read_file": self._handle_read_file,
-            "list_directory": self._handle_list_directory,
-            "create_file": self._handle_create_file,
-            "edit_file": self._handle_edit_file,
-            "web_search": self._handle_web_search,
-            "sub_agent": self._handle_sub_agent,
-            "create_task_list": self._handle_create_task_list,
-            "complete_task": self._handle_complete_task,
-            "show_task_list": self._handle_show_task_list,
-        }
-        return handlers.get(function_name)
-
-    def _handle_rg(self, tool_id, arguments, thinking_indicator):
-        """Handle rg (ripgrep) tool call.
-
-        Args:
-            tool_id: Tool call ID
-            arguments: Tool arguments dict
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        pattern = arguments.get("pattern", "")
-        if not isinstance(pattern, str) or not pattern.strip():
-            return False, "exit_code=1\nrg requires a non-empty 'pattern' argument."
-
-        # Build rg command from arguments
-        cmd_parts = ["rg"]
-
-        # Add --line-number for all searches
-        cmd_parts.append("--line-number")
-
-        # Add max-filesize if specified
-        if arguments.get("max_filesize"):
-            cmd_parts.append(f"--max-filesize={arguments['max_filesize']}")
-
-        # Add context if specified
-        context = arguments.get("context")
-        if context:
-            if context.startswith("before:"):
-                try:
-                    n = int(context.split(":", 1)[1])
-                    cmd_parts.append(f"--before-context={n}")
-                except (ValueError, IndexError):
-                    pass
-            elif context.startswith("after:"):
-                try:
-                    n = int(context.split(":", 1)[1])
-                    cmd_parts.append(f"--after-context={n}")
-                except (ValueError, IndexError):
-                    pass
-            elif context.startswith("both:"):
-                try:
-                    n = int(context.split(":", 1)[1])
-                    cmd_parts.append(f"--context={n}")
-                except (ValueError, IndexError):
-                    pass
-
-        # Add file type filter if specified
-        file_type = arguments.get("type")
-        if file_type:
-            cmd_parts.append(f"--type={file_type}")
-
-        # Add files-with-matches flag if specified
-        files_with_matches = _coerce_bool(arguments.get("files_with_matches"), default=False)
-        if files_with_matches:
-            cmd_parts.append("--files-with-matches")
-
-        # Add pattern - quote if it contains spaces to prevent splitting by shlex
-        import shlex
-        if " " in pattern:
-            cmd_parts.append(shlex.quote(pattern))
-        else:
-            cmd_parts.append(pattern)
-
-        # Add path (default to current directory)
-        path = arguments.get("path") or "."
-        cmd_parts.append(path)
-
-        # Build command string
-        command = " ".join(cmd_parts)
-
-        # Check for duplicates
-        is_duplicate, redirect_msg = check_for_duplicate(self.chat_manager, command)
-        if is_duplicate:
-            if self.debug_mode:
-                self._safe_print("[yellow]Duplicate command[/yellow]")
-            return False, redirect_msg
-
-        # Execute the rg command (skip full output, show summary only)
-        should_exit, tool_result = self._execute_approved_command(command, indent=self.is_sub_agent, skip_full_output=True)
-
-        return should_exit, tool_result
-
-    def _handle_execute_command(self, tool_id, arguments, thinking_indicator):
-        """Handle execute_command tool call.
-
-        Args:
-            tool_id: Tool call ID
-            arguments: Tool arguments dict
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        if "command" not in arguments:
-            return False, "Error: Missing 'command' argument."
-
-        command = arguments["command"]
-        if not isinstance(command, str) or not command.strip():
-            return False, "Error: 'command' argument must be a non-empty string."
-
-        # Check for duplicates
-        is_duplicate, redirect_msg = check_for_duplicate(self.chat_manager, command)
-        if is_duplicate:
-            if self.debug_mode:
-                self.console.print("[yellow]Duplicate command[/yellow]")
-            return False, redirect_msg
-
-        # Validate command (check_command allows git, rg, file operations)
-        is_safe, reason = check_command(command)
-
-        if not is_safe:
-            return False, reason
-
-        # All shell and file operation commands require approval
-        # Strip "powershell " prefix for command name detection
-        cmd_for_check = command.strip()
-        if cmd_for_check.lower().startswith("powershell "):
-            cmd_for_check = cmd_for_check[11:].strip()
-
-        # Tokenize to get command name
-        import shlex
-        use_posix = os.name != "nt"
-        tokens = shlex.split(cmd_for_check, posix=use_posix) if cmd_for_check else []
-        cmd_name = tokens[0].lower() if tokens else ""
-
-        # Path traversal warnings (show but don't block)
-        if self.debug_mode:
-            # Detect absolute paths outside common safe directories
-            abs_paths = []
-            for token in tokens:
-                # Unix absolute paths
-                if token.startswith('/') and not token.startswith(('/home', '/tmp', '/var/log')):
-                    abs_paths.append(token)
-                # Windows absolute paths
-                elif len(token) >= 3 and token[1:3] == ':\\' and not token[:3].lower().startswith(('c:\\users', 'd:\\users', 'e:\\users')):
-                    abs_paths.append(token)
-            
-            if abs_paths:
-                self.console.print(f"[yellow]⚠ Path traversal detected: {abs_paths[0]}[/yellow]")
-            
-            # Warn about && chaining
-            if "&&" in command:
-                self.console.print("[dim]→ Using && for conditional chaining[/dim]")
-
-        # Check if command requires approval (whitelist: only safe commands don't require approval)
-        from llm.config import ALLOWED_COMMANDS
-
-        requires_approval = (
-            cmd_name not in ALLOWED_COMMANDS
-        )
-
-        # Special case: git status, diff, log, show, blame are auto-approved
-        # branch is allowed for listing, but not deleting
-        if cmd_name == "git" and requires_approval:
-            git_subcommand = tokens[1].lower() if len(tokens) > 1 else ""
-            if git_subcommand in ("status", "diff", "log", "show", "blame"):
-                requires_approval = False
-            elif git_subcommand == "branch" and not any(arg in tokens for arg in ("-d", "-D", "--delete")):
-                requires_approval = False
-
-        if requires_approval:
-            # Require approval for all commands not in the allowed whitelist
-            return self._handle_command_confirmation(command, None, thinking_indicator, requires_approval)
-        else:
-            # Allowed commands execute without approval
-            return self._execute_approved_command(command, indent=self.is_sub_agent, skip_full_output=False)
-
-    def _execute_approved_command(self, command, indent=False, skip_full_output=False):
-        """Execute an approved command.
-
-        Args:
-            command: Command string to execute
-            indent: If True, prefix output with '│ ' (for sub-agent mode)
-            skip_full_output: If True, skip displaying full command output (for rg in single-tool mode)
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        # Get console respecting parallel context
-        console = self._get_console()
-
-        if self.panel_updater:
-            # Extract tool name from command
-            tool_name = "execute_command"
-            if command.strip().startswith("rg"):
-                tool_name = "rg"
-            # Note: _display_tool_feedback will add formatted message
-        elif console:
-            # Print to console in normal mode (only if not suppressed)
-            console.print(f"[grey]{command}[/grey]", highlight=False)
-        try:
-            tool_result = run_shell_command(
-                command, self.repo_root, self.rg_exe_path,
-                self.console, self.debug_mode
-            )
-            # Only display feedback if console is available (not in parallel mode)
-            if console:
-                if skip_full_output:
-                    # For rg in single-tool mode: display summary only, not full output
-                    _display_tool_feedback(command, tool_result, console, indent=indent, panel_updater=self.panel_updater)
-                else:
-                    # For execute_command tool: display full output with truncation
-                    label = f"execute_command {command}"
-                    _display_tool_feedback(label, tool_result, console, indent=indent, panel_updater=self.panel_updater)
-        except CommandExecutionError as e:
-            tool_result = f"exit_code=1\nError: {e}"
-            if self.panel_updater:
-                self.panel_updater.append(f"[red]Command failed: {e}[/red]")
-            elif console:
-                console.print(f"Command failed: {e}", style="red")
-
-        # Only add blank line for non-rg commands (rg commands are compact)
-        is_rg_command = command.strip().startswith("rg")
-        if not is_rg_command:
-            if self.panel_updater:
-                self.panel_updater.append("")  # Blank line in panel
-            elif console:
-                console.print()
-        return False, tool_result
-
-    def _handle_command_confirmation(self, command, reason, thinking_indicator, requires_approval=True):
-        """Handle command confirmation workflow.
-
-        Args:
-            command: Command string
-            reason: Reason for confirmation required
-            thinking_indicator: Optional ThinkingIndicator instance
-            requires_approval: Whether this command specifically requires approval
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        if thinking_indicator:
-            thinking_indicator.pause()
-        confirmation_result, user_guidance = confirm_tool(command, self.console, reason, requires_approval=requires_approval, prompt_session=None)
-        if thinking_indicator:
-            thinking_indicator.resume()
-
-        if confirmation_result == "execute":
-            return self._execute_approved_command(command, skip_full_output=False)
-        elif confirmation_result == "reject":
-            return True, f"Tool request denied by user.\nCommand: {command}"
-        elif confirmation_result == "guide":
-            # Guidance mode - return tool result with user guidance
-            # OpenAI API requires a tool response for every tool_call_id
-            return False, f"User provided guidance: {user_guidance}"
-
-    def _handle_read_file(self, tool_id, arguments, thinking_indicator):
-        """Handle read_file tool call."""
-        path = arguments.get("path", "")
-        if not isinstance(path, str) or not path.strip():
-            return False, "exit_code=1\nread_file requires a non-empty 'path' argument."
-
-        # Validate path doesn't contain JSON-like syntax or invalid characters
-        # This catches cases where malformed arguments are passed as file paths
-        invalid_chars = '[]{}"\n\r\t'
-        if any(char in path for char in invalid_chars):
-            return False, f"exit_code=1\nread_file 'path' contains invalid characters. Got: {path}"
-
-        max_lines = arguments.get("max_lines")
-        if max_lines is not None:
+        tool = ToolRegistry.get(function_name)
+        if tool:
             try:
-                max_lines = int(max_lines)
-            except (ValueError, TypeError):
-                return False, "exit_code=1\nread_file 'max_lines' must be an integer."
-
-        start_line = arguments.get("start_line")
-        if start_line is not None:
-            try:
-                start_line = int(start_line)
-            except (ValueError, TypeError):
-                return False, "exit_code=1\nread_file 'start_line' must be an integer (1-based)."
-        else:
-            start_line = 1
-
-        requested_mode = "partial" if max_lines is not None else "full"
-
-        label = _build_read_file_label(path, start_line, max_lines)
-        self._safe_print(f"[grey]{label}[/grey]", indent=self.is_sub_agent)
-
-        tool_result = read_file(
-            path,
-            self.repo_root,
-            max_lines=max_lines,
-            start_line=start_line,
-            gitignore_spec=self.gitignore_spec,
-        )
-        console = self._get_console()
-        if console:
-            _display_tool_feedback(label, tool_result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
-
-        if self.debug_mode:
-            console = self._get_console()
-            if console:
-                console.print()
-                console.print(f"[dim]→ AI receives:\n\n{tool_result}\n\n[/dim]")
-
-        exit_code = _get_exit_code(tool_result)
-        return False, tool_result
-
-    def _handle_list_directory(self, tool_id, arguments, thinking_indicator):
-        """Handle list_directory tool call."""
-        path = arguments.get("path") or "."
-        if not isinstance(path, str):
-            return False, "exit_code=1\nlist_directory 'path' must be a string."
-
-        # Validate path doesn't contain JSON-like syntax or invalid characters
-        invalid_chars = '[]{}"\n\r\t'
-        if any(char in path for char in invalid_chars):
-            return False, f"exit_code=1\nlist_directory 'path' contains invalid characters. Got: {path}"
-
-        recursive = _coerce_bool(arguments.get("recursive"), default=False)
-        show_files = _coerce_bool(arguments.get("show_files"), default=True)
-        show_dirs = _coerce_bool(arguments.get("show_dirs"), default=True)
-        pattern = arguments.get("pattern")
-
-        label = f"list_directory {path}"
-        if recursive:
-            label = f"{label} -recursive"
-        self._safe_print(f"[grey]{label}[/grey]", indent=self.is_sub_agent)
-
-        tool_result = list_directory(
-            path,
-            self.repo_root,
-            recursive=bool(recursive),
-            show_files=bool(show_files),
-            show_dirs=bool(show_dirs),
-            pattern=pattern,
-            gitignore_spec=self.gitignore_spec,
-        )
-        console = self._get_console()
-        if console:
-            _display_tool_feedback(label, tool_result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
-
-        if self.debug_mode:
-            console = self._get_console()
-            if console:
-                console.print()
-                console.print(f"[dim]→ AI receives:\n\n{tool_result}\n\n[/dim]")
-
-        return False, tool_result
-
-    def _handle_create_file(self, tool_id, arguments, thinking_indicator):
-        """Handle create_file tool call.
-
-        Args:
-            tool_id: Tool call ID
-            arguments: Tool arguments dict
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        path = arguments.get("path", "")
-        if not isinstance(path, str) or not path.strip():
-            return False, "exit_code=1\ncreate_file requires a non-empty 'path' argument."
-
-        # Validate path doesn't contain JSON-like syntax or invalid characters
-        invalid_chars = '[]{}"\n\r\t'
-        if any(char in path for char in invalid_chars):
-            return False, f"exit_code=1\ncreate_file 'path' contains invalid characters. Got: {path}"
-
-        content = arguments.get("content")
-
-        label = f"create_file {path}"
-        self._safe_print(f"[grey]{label}[/grey]")
-
-        tool_result = create_file(
-            path,
-            self.repo_root,
-            content=content,
-            gitignore_spec=self.gitignore_spec
-        )
-        console = self._get_console()
-        if console:
-            _display_tool_feedback(label, tool_result, console)
-
-        if self.debug_mode:
-            console = self._get_console()
-            if console:
-                console.print()
-                console.print(f"[dim]→ AI receives:\n\n{tool_result}\n\n[/dim]")
-
-        return False, tool_result
-
-    def _handle_create_task_list(self, tool_id, arguments, thinking_indicator):
-        """Handle create_task_list tool call."""
-        if self.chat_manager.interaction_mode == "plan":
-            return False, "exit_code=1\nerror: Task lists are disabled in PLAN mode. Switch to EDIT mode.\n\n"
-
-        tasks = arguments.get("tasks")
-        if not isinstance(tasks, list):
-            return False, "exit_code=1\nerror: 'tasks' must be an array of strings.\n\n"
-
-        title = arguments.get("title")
-        if title is not None and not isinstance(title, str):
-            return False, "exit_code=1\nerror: 'title' must be a string.\n\n"
-        title = title.strip() if isinstance(title, str) else None
-        if title:
-            title = title[:MAX_TASK_TITLE_LEN]
-
-        normalized = []
-        for i, task in enumerate(tasks):
-            if not isinstance(task, str):
-                return False, f"exit_code=1\nerror: Task at index {i} must be a string.\n\n"
-            trimmed = task.strip()
-            if not trimmed:
-                return False, f"exit_code=1\nerror: Task at index {i} must be non-empty.\n\n"
-            if len(trimmed) > MAX_TASK_LEN:
-                return False, (
-                    f"exit_code=1\nerror: Task at index {i} exceeds MAX_TASK_LEN={MAX_TASK_LEN}.\n\n"
-                )
-            normalized.append(trimmed)
-
-        if len(normalized) == 0:
-            return False, "exit_code=1\nerror: Provide at least one non-empty task.\n\n"
-        if len(normalized) > MAX_TASKS:
-            return False, f"exit_code=1\nerror: Too many tasks (max {MAX_TASKS}).\n\n"
-
-        self.chat_manager.task_list = [
-            {"description": t, "completed": False}
-            for t in normalized
-        ]
-        self.chat_manager.task_list_title = title or None
-
-        label = "create_task_list"
-        tool_result = _format_task_list(self.chat_manager.task_list, self.chat_manager.task_list_title)
-        console = self._get_console()
-        if console:
-            _display_tool_feedback(label, tool_result, console, panel_updater=self.panel_updater)
-        return False, tool_result
-
-    def _handle_complete_task(self, tool_id, arguments, thinking_indicator):
-        """Handle complete_task tool call."""
-        if self.chat_manager.interaction_mode == "plan":
-            return False, "exit_code=1\nerror: Task lists are disabled in PLAN mode. Switch to EDIT mode.\n\n"
-
-        task_id_raw = arguments.get("task_id")
-        task_ids_raw = arguments.get("task_ids")
-
-        # Normalize to list: prefer task_ids if both provided
-        if task_ids_raw is not None:
-            ids_raw = task_ids_raw
-        elif task_id_raw is not None:
-            ids_raw = [task_id_raw]
-        else:
-            return False, "exit_code=1\nerror: Either 'task_id' or 'task_ids' must be provided.\n\n"
-
-        if not isinstance(ids_raw, list):
-            return False, "exit_code=1\nerror: IDs must be an array of integers.\n\n"
-
-        task_list = getattr(self.chat_manager, "task_list", None) or []
-        if not task_list:
-            return False, "exit_code=1\nerror: No task list exists. Use create_task_list first.\n\n"
-
-        # Validate all IDs
-        valid_ids = []
-        for i, tid in enumerate(ids_raw):
-            tid_int, error = _coerce_int(tid)
-            if error:
-                return False, f"exit_code=1\nerror: ID at index {i}: {error}\n\n"
-            if tid_int < 0:
-                return False, f"exit_code=1\nerror: ID at index {i} must be non-negative.\n\n"
-            if tid_int >= len(task_list):
-                return False, f"exit_code=1\nerror: ID {tid_int} (index {i}) is out of range (0-{len(task_list) - 1}).\n\n"
-            valid_ids.append(tid_int)
-
-        # Mark tasks as complete
-        for tid in valid_ids:
-            task_list[tid]["completed"] = True
-
-        label = "complete_task"
-        tool_result = _format_task_list(task_list, self.chat_manager.task_list_title)
-        console = self._get_console()
-        if console:
-            _display_tool_feedback(label, tool_result, console, panel_updater=self.panel_updater)
-        return False, tool_result
-
-    def _handle_show_task_list(self, tool_id, arguments, thinking_indicator):
-        """Handle show_task_list tool call."""
-        if self.chat_manager.interaction_mode == "plan":
-            return False, "exit_code=1\nerror: Task lists are disabled in PLAN mode. Switch to EDIT mode.\n\n"
-
-        task_list = getattr(self.chat_manager, "task_list", None) or []
-        title = getattr(self.chat_manager, "task_list_title", None)
-
-        label = "show_task_list"
-        tool_result = _format_task_list(task_list, title)
-        console = self._get_console()
-        if console:
-            _display_tool_feedback(label, tool_result, console, panel_updater=self.panel_updater)
-        return False, tool_result
-
-    def _handle_edit_file(self, tool_id, arguments, thinking_indicator):
-        """Handle edit_file tool call.
-
-        Args:
-            tool_id: Tool call ID
-            arguments: Tool arguments dict
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        path = arguments.get("path", "")
-        
-        # Validate path doesn't contain JSON-like syntax or invalid characters
-        invalid_chars = '[]{}"\n\r\t'
-        if any(char in path for char in invalid_chars):
-            return False, f"exit_code=1\nedit_file 'path' contains invalid characters. Got: {path}"
-        
-
-
-        # Preview edit
-        try:
-            preview_status, preview_diff = preview_edit_file(arguments, self.repo_root, self.gitignore_spec)
-        except FileEditError as e:
-            tool_result = f"exit_code=1\n{e}"
-            self.console.print(f"Edit preview failed: {e}", style="red")
-            return False, tool_result
-
-        if preview_status != "exit_code=0":
-            return False, preview_status
-
-        # Display preview
-        self.console.print(Text.from_ansi(preview_diff))
-        self.console.print()
-
-        search_text = arguments.get("search", "")
-        search_preview = search_text[:50] + "..." if len(search_text) > 50 else search_text
-        command_label = f"edit {path} (search: {search_preview})"
-
-        # Check auto-edit mode
-        if self.chat_manager.approve_mode == "accept_edits":
-            return self._execute_edit(arguments, command_label)
-
-        return self._handle_edit_confirmation(arguments, command_label, thinking_indicator)
-
-    def _execute_edit(self, arguments, command_label):
-        """Execute the edit operation.
-
-        Args:
-            arguments: Edit arguments dict
-            command_label: Label for the edit operation
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        try:
-            tool_result = run_edit_file(
-                arguments, self.repo_root, self.console,
-                self.debug_mode, self.gitignore_spec
-            )
-        except FileEditError as e:
-            tool_result = f"exit_code=1\n{e}"
-            self.console.print(f"Edit failed: {e}", style="red")
-
-        return False, tool_result
-
-    def _handle_edit_confirmation(self, arguments, command_label, thinking_indicator):
-        """Handle edit confirmation workflow.
-
-        Args:
-            arguments: Edit arguments dict
-            command_label: Label for the edit operation
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        if thinking_indicator:
-            thinking_indicator.pause()
-
-        # Simple title line
-        self.console.print("[cyan]───[/][bold white] Edit Confirmation [/][cyan]───[/]")
-
-        # Create dynamic message function that updates when mode changes
-        def get_prompt_message():
-            from prompt_toolkit.formatted_text import HTML
-            return HTML('Approve edit? (y/n/guidance):')
-
-        # Create prompt session with key bindings and toolbar
-        session = create_confirmation_prompt_session(self.chat_manager, get_prompt_message)
-
-        user_input = session.prompt().strip().lower()
-        self.console.print()
-
-        if thinking_indicator:
-            thinking_indicator.resume()
-
-        if user_input in ("y", "yes", "approve"):
-            return self._execute_edit(arguments, command_label)
-        elif user_input in ("n", "no"):
-            return True, f"exit_code=1\nEdit cancelled by user."
-        else:
-            # Guidance mode - return tool result with user guidance
-            # OpenAI API requires a tool response for every tool_call_id
-            return False, f"User provided guidance: {user_input}"
-
-    def _handle_web_search(self, tool_id, arguments, thinking_indicator):
-        """Handle web_search tool call.
-
-        Args:
-            tool_id: Tool call ID
-            arguments: Tool arguments dict
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        query = arguments.get("query", "")
-
-        if WEB_SEARCH_REQUIRE_CONFIRMATION:
-            return self._handle_web_search_confirmation(arguments, query, thinking_indicator)
-        else:
-            return self._execute_web_search(arguments, query)
-
-    def _execute_web_search(self, arguments, query):
-        """Execute the web search.
-
-        Args:
-            arguments: Search arguments dict
-            query: Search query string
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        # Get console respecting parallel context
-        console = self._get_console()
-
-        if console:
-            console.print(f"[bold cyan]web search | {query}[/bold cyan]", highlight=False)
-        try:
-            tool_result = run_web_search(arguments, self.console)
-            if console:
-                _display_tool_feedback(f"web search | {query}", tool_result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
-        except LLMConnectionError as e:
-            tool_result = f"exit_code=1\nWeb search failed: {e}"
-            if self.panel_updater:
-                self.panel_updater.append(f"[red]Web search failed: {e}[/red]")
-            elif console:
-                console.print(f"Web search failed: {e}", style="red")
-            # Don't cache errors
-            return False, tool_result
-
-        return False, tool_result
-
-    def _handle_web_search_confirmation(self, arguments, query, thinking_indicator):
-        """Handle web search confirmation workflow.
-
-        Args:
-            arguments: Search arguments dict
-            query: Search query string
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        # Note: label will be displayed by _execute_web_search
-
-        # Simple title line
-        self.console.print("[cyan]───[/][bold white] Search Confirmation [/][cyan]───[/]")
-
-        # Create dynamic message function that updates when mode changes
-        def get_prompt_message():
-            from prompt_toolkit.formatted_text import HTML
-            return HTML('Approve search? (y/n/guide):')
-
-        # Create prompt session with key bindings and toolbar
-        session = create_confirmation_prompt_session(self.chat_manager, get_prompt_message)
-
-        user_input = session.prompt().strip().lower()
-        self.console.print()
-
-        if user_input in ("y", "yes", "approve"):
-            return self._execute_web_search(arguments, query)
-        elif user_input in ("n", "no"):
-            return True, f"exit_code=1\nWeb search cancelled by user."
-        else:
-            # Guidance mode - return tool result with user guidance
-            # OpenAI API requires a tool response for every tool_call_id
-            return False, f"User provided guidance: {user_input}"
-
-    def _calculate_line_range(self, start_line: int, end_line: int) -> int:
-        """Calculate max_lines from start and end line numbers.
-        
-        Args:
-            start_line: Starting line number (1-based, inclusive)
-            end_line: Ending line number (1-based, inclusive)
-            
-        Returns:
-            Number of lines in the range
-        """
-        return end_line - start_line + 1
-
-    def _handle_sub_agent(self, tool_id, arguments, thinking_indicator):
-        """Handle sub_agent tool call.
-
-        Args:
-            tool_id: Tool call ID
-            arguments: Tool arguments dict
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            Tuple of (should_exit, tool_result)
-        """
-        query = arguments.get("query", "")
-        if not query or not isinstance(query, str) or not query.strip():
-            return False, "exit_code=1\nsub_agent requires a non-empty 'query' argument."
-
-        if thinking_indicator:
-            thinking_indicator.pause()
-
-        try:
-            from core.sub_agent import run_sub_agent
-
-            # Use live panel for streaming tool output
-            with SubAgentPanel(query, self.console) as panel:
-                sub_agent_data = run_sub_agent(
-                    task_query=query,
+                context = build_context(
                     repo_root=self.repo_root,
-                    rg_exe_path=self.rg_exe_path,
                     console=self.console,
-                    panel_updater=panel,
+                    gitignore_spec=self.gitignore_spec,
+                    debug_mode=self.debug_mode,
+                    interaction_mode=self.chat_manager.interaction_mode,
+                    chat_manager=self.chat_manager,
+                    rg_exe_path=self.rg_exe_path,
+                    panel_updater=panel_to_use
                 )
 
-                # Check for errors
-                if sub_agent_data.get('error'):
-                    panel.set_error(sub_agent_data['error'])
-                    return False, f"exit_code=1\n{sub_agent_data['error']}"
+                # Check if tool requires approval
+                if tool.requires_approval:
+                    # For edit_file: generate preview and request approval
+                    if function_name == "edit_file":
+                        from rich.text import Text
 
-                # Track usage for billing
-                usage = sub_agent_data.get('usage', {})
-                if usage:
-                    self.chat_manager.token_tracker.add_usage(usage)
-                    # Mark panel as complete with token info
-                    panel.set_complete({
-                        'prompt': usage.get('prompt_tokens', 0),
-                        'completion': usage.get('completion_tokens', 0),
-                        'total': usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0)
-                    })
+                        result = tool.execute(arguments, context)
 
-                # Display sub-agent result summary (NOT shown to user, used for context)
-                raw_result = sub_agent_data.get('result', '')
+                        # Display preview
+                        console = self._get_console()
+                        if console:
+                            # Check if result is a Text object (new format with styling)
+                            if isinstance(result, Text):
+                                # Extract the first line to check exit code
+                                plain = str(result).split('\n')[0] if result else ""
+                                if plain.startswith("exit_code=0"):
+                                    # Display the Rich Text object directly
+                                    console.print(result)
+                                    console.print()
 
-                # --- PARSE AND INJECT FILES ---
+                                    # Request user approval
+                                    # Stop thinking indicator while waiting for user input
+                                    if thinking_indicator:
+                                        thinking_indicator.stop()
 
-                injected_files_content = []
+                                    # Create confirmation prompt session with toolbar
+                                    prompt_session = create_confirmation_prompt_session(
+                                        self.chat_manager,
+                                        lambda: HTML("[bold white]Approve edit? (y/n/guidance):[/]")
+                                    )
 
-                # Regex to find explicit citation patterns (bracketed notation only for safety)
-                # Matches: - [src/main.py] (lines 10-20)
-                # Matches: - [src/utils.py] (full)
-                # Matches: lines 10-20 in [src/main.py]
-                # Matches: [src/main.py]:10-20
-                # Matches: [src/main.py]:10 (single line)
-                # Matches: [src/main.py] (full)
-                # NOTE: Only bracketed formats are accepted to prevent false positives in code/comments
-                import re
-                file_pattern = re.compile(
-                    r"(?:-\s+\[(.*?)\]\s+\((?:lines\s+)?(\d+)-(\d+)(?:\s*lines)?|full)\)|"  # - [file] (N-M) or (full)
-                    r"(?:lines\s+(\d+)-(\d+)\s+in\s+\[(.*?)\])|"  # lines N-M in [file]
-                    r"(?:\[(.*?)\]:(\d+)-(\d+))|"  # [file]:N-M
-                    r"(?:\[(.*?)\]:(\d+))|"  # [file]:N (single line)
-                    r"(?:\[(.*?)\](?![:(]))"  # [file] (no line numbers, read full)
-                )
+                                    action, guidance = confirm_tool(
+                                        f"edit_file: {arguments.get('path', '')}",
+                                        console,
+                                        reason="Apply file edit with above changes",
+                                        requires_approval=True,
+                                        prompt_session=prompt_session
+                                    )
 
-                for line in raw_result.split('\n'):
-                    match = file_pattern.search(line)
-                    if match:
-                        # Handle multiple possible match groups from regex patterns
-                        # Pattern 1: - [file] (N-M) or (full) -> groups: (1=file, 2=N, 3=M)
-                        # Pattern 2: lines N-M in [file] -> groups: (4=start, 5=end, 6=file)
-                        # Pattern 3: [file]:N-M -> groups: (7=file, 8=N, 9=M)
-                        # Pattern 4: [file]:N (single line) -> groups: (10=file, 11=N)
-                        # Pattern 5: [file] (full) -> groups: (12=file)
+                                    if action == "execute":
+                                        # User approved - call edit_file_execute
+                                        execute_tool = ToolRegistry.get("edit_file_execute")
+                                        if execute_tool:
+                                            result = execute_tool.execute(arguments, context)
+                                    elif action == "reject":
+                                        result = "exit_code=1\nEdit rejected by user."
+                                    elif action == "guide":
+                                        result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
 
-                        # Extract path and range from whichever pattern matched
-                        if match.group(1):
-                            # Pattern 1: - [file] (N-M) or (full)
-                            rel_path = match.group(1).strip()
-                            if match.group(2) and match.group(3):
-                                # It's a range N-M
-                                start_line = int(match.group(2))
-                                end_line = int(match.group(3))
-                                max_lines = self._calculate_line_range(start_line, end_line)
+                                    # Restart thinking indicator after user input
+                                    if thinking_indicator:
+                                        thinking_indicator.start()
+                            # Show the preview diff
+                            elif result.startswith("exit_code=0"):
+                                # Extract and display the diff preview
+                                lines = result.split('\n')
+                                preview_lines = [line for line in lines if not line.startswith("exit_code=")]
+                                preview = '\n'.join(preview_lines).strip()
+
+                                # Display preview to user
+                                console.print(preview)
+                                console.print()
+
+                                # Request user approval
+                                # Stop thinking indicator while waiting for user input
+                                if thinking_indicator:
+                                    thinking_indicator.stop()
+
+                                # Create confirmation prompt session with toolbar
+                                prompt_session = create_confirmation_prompt_session(
+                                    self.chat_manager,
+                                    lambda: HTML("[bold white]Approve edit? (y/n/guidance):[/]")
+                                )
+
+                                action, guidance = confirm_tool(
+                                    f"edit_file: {arguments.get('path', '')}",
+                                    console,
+                                    reason="Apply file edit with above changes",
+                                    requires_approval=True,
+                                    prompt_session=prompt_session
+                                )
+
+                                if action == "execute":
+                                    # User approved - call edit_file_execute
+                                    execute_tool = ToolRegistry.get("edit_file_execute")
+                                    if execute_tool:
+                                        result = execute_tool.execute(arguments, context)
+                                elif action == "reject":
+                                    result = "exit_code=1\nEdit rejected by user."
+                                elif action == "guide":
+                                    result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
+
+                                # Restart thinking indicator after user input
+                                if thinking_indicator:
+                                    thinking_indicator.start()
                             else:
-                                # It's "full"
-                                start_line = 1
-                                max_lines = None
-                        elif match.group(4) and match.group(5) and match.group(6):
-                            # Pattern 2: lines N-M in [file]
-                            start_line = int(match.group(4))
-                            end_line = int(match.group(5))
-                            rel_path = match.group(6).strip()
-                            max_lines = self._calculate_line_range(start_line, end_line)
-                        elif match.group(7) and match.group(8) and match.group(9):
-                            # Pattern 3: [file]:N-M
-                            rel_path = match.group(7).strip()
-                            start_line = int(match.group(8))
-                            end_line = int(match.group(9))
-                            max_lines = self._calculate_line_range(start_line, end_line)
-                        elif match.group(10) and match.group(11):
-                            # Pattern 4: [file]:N (single line)
-                            rel_path = match.group(10).strip()
-                            start_line = int(match.group(11))
-                            max_lines = 1
-                        elif match.group(12):
-                            # Pattern 5: [file] (full)
-                            rel_path = match.group(12).strip()
-                            start_line = 1
-                            max_lines = None
-                        else:
-                            continue  # No valid match
+                                # Error occurred during preview - just show it
+                                if console:
+                                    console.print(result)
+                        return False, str(result)
+                    elif function_name == "execute_command":
+                        # Get console for approval prompt
+                        console = self._get_console()
+                        
+                        # Check if command should be auto-approved
+                        from utils.validation import is_auto_approved_command
+                        command = arguments.get('command', '')
+                        auto_approve = is_auto_approved_command(command)
 
-                        try:
-                            # Import read_file locally to bypass duplicate check for sub-agent
-                            from utils.tools.file_reader import read_file as read_file_with_bypass
+                        # Request user approval (unless auto-approved)
+                        if not auto_approve:
+                            # Stop thinking indicator while waiting for user input
+                            if thinking_indicator:
+                                thinking_indicator.stop()
 
-                            tool_result = read_file_with_bypass(
-                                rel_path,
-                                self.repo_root,
-                                max_lines=max_lines,
-                                start_line=start_line,
-                                gitignore_spec=self.gitignore_spec,
+                            # Create confirmation prompt session with toolbar
+                            prompt_session = create_confirmation_prompt_session(
+                                self.chat_manager,
+                                lambda: HTML("[bold white]Approve command? (y/n/guidance):[/]")
                             )
 
-                            exit_code = _get_exit_code(tool_result)
-                            if exit_code is not None and exit_code != 0:
-                                injected_files_content.append(f"### {rel_path} (Blocked or unavailable)")
-                                injected_files_content.append(tool_result.strip())
-                                injected_files_content.append("")
-                                continue
+                            action, guidance = confirm_tool(
+                                f"execute_command: {command[:80]}{'...' if len(command) > 80 else ''}",
+                                console,
+                                reason="Execute shell command",
+                                requires_approval=True,
+                                prompt_session=prompt_session
+                            )
 
-                            # Add to injected content (strip metadata line from formatted tool result)
-                            content_lines = tool_result.splitlines()[1:] if isinstance(tool_result, str) else []
-                            content = "\n".join(content_lines).rstrip()
+                            if action == "execute":
+                                result = tool.execute(arguments, context)
+                            elif action == "reject":
+                                result = "Command rejected by user."
+                            elif action == "guide":
+                                result = f"Command not executed. User guidance: {guidance}"
 
-                            # Parse actual lines_read and start_line from metadata to match main agent display format
-                            first_line = tool_result.split('\n')[0]
-                            lines_read_match = re.search(r'lines_read=(\d+)', first_line)
-                            start_line_match = re.search(r'start_line=(\d+)', first_line)
-                            
-                            if lines_read_match:
-                                actual_lines_read = int(lines_read_match.group(1))
-                                actual_start_line = int(start_line_match.group(1)) if start_line_match else start_line
-                                
-                                if actual_start_line > 1:
-                                    end_line = actual_start_line + actual_lines_read - 1
-                                    header_info = f"lines {actual_start_line}-{end_line} ({actual_lines_read} line{'s' if actual_lines_read != 1 else ''})"
-                                else:
-                                    header_info = f"lines {actual_start_line}-{actual_lines_read} ({actual_lines_read} line{'s' if actual_lines_read != 1 else ''})"
-                            else:
-                                header_info = "full"
-                            injected_files_content.append(f"### {rel_path} ({header_info})")
-                            injected_files_content.append("```")
-                            injected_files_content.append(content)
-                            injected_files_content.append("```\n")
-
-                        except Exception as e:
-                            injected_files_content.append(f"### {rel_path} (Error reading file: {e})")
-
-                # Combine raw result with injected content
-                if injected_files_content:
-                    final_result = raw_result + "\n\n## Injected File Contents\n\n" + "\n".join(injected_files_content)
+                            # Restart thinking indicator after user input
+                            if thinking_indicator:
+                                thinking_indicator.start()
+                        else:
+                            # Auto-approved command - execute without prompting
+                            result = tool.execute(arguments, context)
+                    else:
+                        # Other tools with requires_approval can be handled here in the future
+                        result = tool.execute(arguments, context)
                 else:
-                    final_result = raw_result
+                    # No approval required - execute normally
+                    # Pause thinking indicator for sub_agent (it has its own)
+                    if function_name == "sub_agent" and thinking_indicator:
+                        thinking_indicator.pause()
+                    
+                    result = tool.execute(arguments, context)
+                    
+                    # Resume thinking indicator after sub_agent completes
+                    if function_name == "sub_agent" and thinking_indicator:
+                        thinking_indicator.resume()
 
-                # Return result WITHOUT displaying to user (panel already handled display)
-                return False, final_result
+                # Display result for registry tools
+                console = self._get_console()
+                if console:
+                    # Build label with arguments for better display
+                    label = _build_tool_label(function_name, arguments)
 
-        except Exception as e:
-            # Show error in panel
-            with SubAgentPanel(query, self.console) as panel:
-                panel.set_error(f"Sub-agent failed: {e}")
-            return False, f"exit_code=1\nSub-agent failed: {e}"
-        finally:
-            if thinking_indicator:
-                thinking_indicator.resume()
+                    # Print label first (like parallel mode)
+                    label_text = f"[grey]{label}[/grey]" if not function_name.startswith("web search") else f"[bold cyan]{label}[/bold cyan]"
+                    if not self.panel_updater:
+                        console.print(label_text, highlight=False)
+                        console.file.flush()
 
+                    # Then display feedback
+                    _display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
+
+                return False, str(result)
+            except Exception as e:
+                return False, f"Error executing tool '{function_name}': {str(e)}"
+
+        return False, f"Error: Unknown tool '{function_name}'."
 
 def agentic_answer(chat_manager, user_input, console, repo_root, rg_exe_path, debug_mode, thinking_indicator=None, pre_tool_planning_enabled=False):
     """Main agent loop using OpenAI-style function calling.

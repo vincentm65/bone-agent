@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from utils.settings import MAX_FILE_PREVIEW_LINES
-from .file_helpers import (
+from .helpers.base import tool
+from .helpers.file_helpers import (
     _is_fast_ignored,
     _is_ignored_cached,
     _register_gitignore_spec,
     _is_reserved_windows_name
 )
-from .formatters import format_file_result
+from .helpers.formatters import format_file_result
 
 
 def _validate_create_path(
@@ -66,6 +67,19 @@ def _validate_create_path(
         return None, str(e)
 
 
+@tool(
+    name="create_file",
+    description="Create a new file with optional initial content. File must not exist. For small files, include content directly. Creates a preview of the written content (up to 200 lines) with syntax highlighting. Works on any path in the filesystem.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "path_str": {"type": "string", "description": "Path to create (works anywhere on filesystem)"},
+            "content": {"type": "string", "description": "Initial content (omit for empty file)"}
+        },
+        "required": ["path_str"]
+    },
+    allowed_modes=["edit"]
+)
 def create_file(
     path_str: str,
     repo_root: Path,

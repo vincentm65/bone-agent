@@ -163,7 +163,7 @@ class ChatManager:
                 self.context_token_estimate = message_tokens
                 return
             else:
-                from utils.tools import _tools_for_mode
+                from tools import _tools_for_mode
                 tools = _tools_for_mode(self.interaction_mode)
 
         if tools:
@@ -502,7 +502,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                 return f"Search failed: '{cmd[:30]}...'"
 
         elif fn_name == "read_file":
-            path = args.get('path', '')
+            path = args.get('path_str', '')
             lines = self._extract_metadata_from_result(tool_result, 'lines_read')
             start_line = self._extract_metadata_from_result(tool_result, 'start_line')
 
@@ -516,7 +516,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                 return f"Read {path}"
 
         elif fn_name == "list_directory":
-            path = args.get('path', '.')
+            path = args.get('path_str', '.')
             items = self._extract_metadata_from_result(tool_result, 'items_count')
             recursive = args.get('recursive', False)
 

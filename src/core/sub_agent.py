@@ -6,7 +6,6 @@ and read-only tools to execute generic delegated tasks.
 
 from pathlib import Path
 
-from core.agentic import AgenticOrchestrator
 from core.chat_manager import ChatManager
 from llm.prompts import build_sub_agent_prompt
 from utils.settings import sub_agent_settings
@@ -90,8 +89,16 @@ def run_sub_agent(
     if panel_updater is not None and not hasattr(panel_updater, 'append'):
         panel_updater = None
 
+    # If no panel_updater provided, create a simple no-op one
+    if panel_updater is None:
+        from tools.sub_agent import SimplePanelUpdater
+        panel_updater = SimplePanelUpdater(console)
+
     # Create fresh ChatManager for sub-agent
     temp_chat_manager = _create_chat_manager()
+
+    # Import here to avoid circular import with core.agentic
+    from core.agentic import AgenticOrchestrator
 
     # Create orchestrator (reuses existing implementation)
     orchestrator = AgenticOrchestrator(
@@ -134,6 +141,8 @@ def run_sub_agent(
             allowed_tools=SUB_AGENT_TOOLS
         )
     except Exception as e:
+        import traceback
+        error_details = f"{e}\n\nTraceback:\n{traceback.format_exc()}"
         return {
             "result": "",
             "usage": {
@@ -141,7 +150,7 @@ def run_sub_agent(
                 "completion_tokens": 0,
                 "total_tokens": 0
             },
-            "error": str(e)
+            "error": error_details
         }
 
     # Get final token usage (no need for delta calculation on fresh instance)
@@ -157,11 +166,7 @@ def run_sub_agent(
             break
 
     # Format with usage at end
-    result = (
-        f"{final_content}\n\n"
-        f"---\n"
-        f"Sub-agent used: {delta_prompt} prompt tokens, {delta_completion} completion tokens ({delta_total} total)"
-    )
+    result = final_content
 
     return {
         "result": result,
