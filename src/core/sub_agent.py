@@ -110,7 +110,6 @@ def run_sub_agent(
         suppress_result_display=True,
         is_sub_agent=True,
         panel_updater=panel_updater,
-        pre_tool_planning_enabled=False,
         force_parallel_execution=True  # Enable parallel execution for read-only tools
     )
 

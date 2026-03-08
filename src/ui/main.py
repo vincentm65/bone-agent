@@ -243,7 +243,6 @@ def main():
                                 RG_EXE_PATH,
                                 DEBUG_MODE_CONTAINER['debug'],
                                 thinking_indicator=thinking_indicator,
-                                pre_tool_planning_enabled=chat_manager.pre_tool_planning_enabled,
                             )
                             chat_manager._update_context_tokens()
                         except KeyboardInterrupt:

@@ -60,7 +60,6 @@ def show_help_table(console):
     table.add_row("/debug", "Toggle debug")
     table.add_row("/mode", "Toggle Plan/Edit/Learn mode")
     table.add_row("/logging", "Toggle conversation logging")
-    table.add_row("/preplan", "Toggle pre-tool planning")
     table.add_row("/config", "Show all configuration settings")
     table.add_row("/provider [name]", "Switch provider or show provider table")
     table.add_row("/key <key>", "Set API key for current provider")
@@ -106,8 +105,6 @@ def show_config_overview(chat_manager, console, debug_mode_container, current_pr
     runtime_table = Table("Setting", "Status", title="Runtime Settings", box=box.SIMPLE_HEAD)
     debug_status = "[green]ON[/green]" if debug_mode_container.get('debug') else "[dim]OFF[/dim]"
     runtime_table.add_row("Debug Mode", debug_status)
-    preplan_status = "[green]ON[/green]" if chat_manager.pre_tool_planning_enabled else "[dim]OFF[/dim]"
-    runtime_table.add_row("Pre-tool Planning", preplan_status)
     logging_status = "[green]ON[/green]" if chat_manager.markdown_logger else "[dim]OFF[/dim]"
     runtime_table.add_row("Conversation Logging", logging_status)
     mode_labels = {"edit": "EDIT", "plan": "PLAN", "learn": "LEARN"}
@@ -161,7 +158,7 @@ def show_config_overview(chat_manager, console, debug_mode_container, current_pr
     # ===== Quick Commands Reference =====
     console.print()
     help_text = """[bold cyan]Commands:[/bold cyan] /provider <name>  /model <path>  /key <key>
-[cyan]         :[/cyan] /usage [provider] [in|out] <$>  /debug  /mode  /logging  /preplan"""
+[cyan]         :[/cyan] /usage [provider] [in|out] <$>  /debug  /mode  /logging """
     console.print(Panel(help_text, title="[cyan]Quick Reference[/cyan]"))
     console.print()
 

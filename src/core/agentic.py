@@ -901,7 +901,7 @@ class AgenticOrchestrator:
     with tool calling, providing a cleaner, more maintainable structure.
     """
 
-    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, pre_tool_planning_enabled=False, force_parallel_execution=False):
+    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, force_parallel_execution=False):
         """Initialize the orchestrator.
 
         Args:
@@ -913,7 +913,6 @@ class AgenticOrchestrator:
             suppress_result_display: If True, suppress final LLM response display (for research agent)
             is_sub_agent: If True, running as sub-agent (for visual framing)
             panel_updater: Optional SubAgentPanel callback for live panel updates
-            pre_tool_planning_enabled: If True, enable pre-tool planning step
             force_parallel_execution: If True, force parallel execution (for sub-agent)
         """
         self.chat_manager = chat_manager
@@ -924,7 +923,6 @@ class AgenticOrchestrator:
         self.suppress_result_display = suppress_result_display
         self.is_sub_agent = is_sub_agent
         self.panel_updater = panel_updater
-        self.pre_tool_planning_enabled = pre_tool_planning_enabled
         self.force_parallel_execution = force_parallel_execution
         self.tool_calls_count = 0
         self.empty_response_count = 0
@@ -1825,7 +1823,7 @@ class AgenticOrchestrator:
 
         return False, f"Error: Unknown tool '{function_name}'."
 
-def agentic_answer(chat_manager, user_input, console, repo_root, rg_exe_path, debug_mode, thinking_indicator=None, pre_tool_planning_enabled=False):
+def agentic_answer(chat_manager, user_input, console, repo_root, rg_exe_path, debug_mode, thinking_indicator=None):
     """Main agent loop using OpenAI-style function calling.
 
     This is a convenience wrapper that creates an AgenticOrchestrator
@@ -1839,7 +1837,6 @@ def agentic_answer(chat_manager, user_input, console, repo_root, rg_exe_path, de
         rg_exe_path: Path to rg.exe
         debug_mode: Whether to show debug output
         thinking_indicator: Optional ThinkingIndicator instance
-        pre_tool_planning_enabled: If True, enable pre-tool planning step
     """
     orchestrator = AgenticOrchestrator(
         chat_manager=chat_manager,
@@ -1847,7 +1844,6 @@ def agentic_answer(chat_manager, user_input, console, repo_root, rg_exe_path, de
         rg_exe_path=rg_exe_path,
         console=console,
         debug_mode=debug_mode,
-        pre_tool_planning_enabled=pre_tool_planning_enabled,
     )
     orchestrator.run(user_input, thinking_indicator)
 

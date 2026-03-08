@@ -117,21 +117,7 @@ def _handle_logging(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_preplan(chat_manager, console, debug_mode_container, args):
-    """Handle pre-tool planning toggle command."""
-    new_state = not chat_manager.pre_tool_planning_enabled
-    chat_manager.pre_tool_planning_enabled = new_state
-    config_manager.set_pre_tool_planning(new_state)
 
-    # Update system prompt to reflect the change
-    chat_manager.update_system_prompt()
-
-    if new_state:
-        console.print("[cyan]Pre-tool planning: enabled[/cyan]")
-    else:
-        console.print("[dim]Pre-tool planning: disabled[/dim]")
-
-    return CommandResult(status="handled")
 
 
 def _handle_config(chat_manager, console, debug_mode_container, args):
@@ -453,7 +439,6 @@ _COMMAND_HANDLERS = {
     "/usage": _handle_usage,
     "/model": _handle_model,
     "/key": _handle_key,
-    "/preplan": _handle_preplan,
 }
 
 

@@ -14,7 +14,6 @@ from pathlib import Path
 from llm.token_tracker import TokenTracker
 from utils.settings import server_settings, context_settings
 from utils.logger import MarkdownConversationLogger
-from core.config_manager import ConfigManager
 
 # Token counting constants
 MESSAGE_OVERHEAD_TOKENS = 4  # Approximate tokens for JSON structure: braces, quotes, colons, commas
@@ -55,10 +54,6 @@ class ChatManager:
                 conversations_dir=context_settings.conversations_dir
             )
 
-        # Pre-tool planning toggle (loaded from config)
-        config_manager = ConfigManager()
-        self.pre_tool_planning_enabled = config_manager.get_pre_tool_planning()
-
         self._init_messages(reset_totals=True)
 
     def _init_messages(self, reset_totals: bool = True):
@@ -97,13 +92,13 @@ class ChatManager:
 
     def _build_system_prompt(self) -> str:
         """Build system prompt with mode-specific rules."""
-        # Build prompt using modular composition with optional learn_submode, plan_type, or pre_tool_planning
+        # Build prompt using modular composition with optional learn_submode or plan_type
         if self.interaction_mode == "learn":
-            return build_system_prompt(self.interaction_mode, self.learning_mode, pre_tool_planning_enabled=self.pre_tool_planning_enabled)
+            return build_system_prompt(self.interaction_mode, self.learning_mode)
         elif self.interaction_mode == "plan":
-            return build_system_prompt(self.interaction_mode, plan_type=self.plan_type, pre_tool_planning_enabled=self.pre_tool_planning_enabled)
+            return build_system_prompt(self.interaction_mode, plan_type=self.plan_type)
         else:
-            return build_system_prompt(self.interaction_mode, pre_tool_planning_enabled=self.pre_tool_planning_enabled)
+            return build_system_prompt(self.interaction_mode)
 
     def update_system_prompt(self):
         """Rebuild system prompt after mode change."""

@@ -186,27 +186,6 @@ class ConfigManager:
         key = provider_keys[provider_name]
         return self.update_field(key, api_key)
 
-    def get_pre_tool_planning(self) -> bool:
-        """Get the pre-tool planning enabled state.
-
-        Returns:
-            True if pre-tool planning is enabled, False otherwise.
-            Defaults to False if not set in config.
-        """
-        config_data = self.load()
-        return bool(config_data.get('PRE_TOOL_PLANNING', False))
-
-    def set_pre_tool_planning(self, enabled: bool) -> Optional[Path]:
-        """Set the pre-tool planning enabled state.
-
-        Args:
-            enabled: True to enable pre-tool planning, False to disable.
-
-        Returns:
-            Backup path if backup was created, None otherwise.
-        """
-        return self.update_field('PRE_TOOL_PLANNING', enabled)
-
     def get_model_price(self, model_name: str) -> Dict[str, float]:
         """Get pricing for a specific model.
 
