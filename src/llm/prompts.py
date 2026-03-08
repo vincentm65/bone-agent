@@ -179,6 +179,10 @@ Respond WITHOUT tools for:
 
 Not every question needs code exploration.""",
 
+    "ask_questions": """## Ask Questions
+
+When you need user input on architectural decisions or design choices, use the question tool to ask 1-5 questions. This works in any mode (learn, edit, plan).""",
+
     "tool_preferences": """## Tool Preferences
 
 **Prefer native tools over execute_command:**
@@ -502,6 +506,7 @@ def build_system_prompt(mode: str, learn_submode: str = None, plan_type: str = N
         BASE_SECTIONS["editing_pattern"],
         BASE_SECTIONS["task_lists_pattern"],
         BASE_SECTIONS["casual_interactions"],
+        BASE_SECTIONS["ask_questions"],
         BASE_SECTIONS["tool_preferences"],
         BASE_SECTIONS["computer_agent_capabilities"],
         BASE_SECTIONS["when_to_use_sub_agent"],

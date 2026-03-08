@@ -1793,29 +1793,35 @@ class AgenticOrchestrator:
                 else:
                     # No approval required - execute normally
                     # Pause thinking indicator for sub_agent (it has its own)
-                    if function_name == "sub_agent" and thinking_indicator:
+                    # Also pause for select_option (needs stdin access)
+                    if function_name in ("sub_agent", "select_option") and thinking_indicator:
                         thinking_indicator.pause()
+                        # Force print to clear the status line
+                        temp_console = self._get_console()
+                        temp_console.print()
                     
                     result = tool.execute(arguments, context)
                     
-                    # Resume thinking indicator after sub_agent completes
-                    if function_name == "sub_agent" and thinking_indicator:
+                    # Resume thinking indicator after sub_agent or select_option completes
+                    if function_name in ("sub_agent", "select_option") and thinking_indicator:
                         thinking_indicator.resume()
 
                 # Display result for registry tools
-                console = self._get_console()
-                if console:
-                    # Build label with arguments for better display
-                    label = _build_tool_label(function_name, arguments)
+                # Skip display for select_option (it shows its own UI)
+                if function_name != "select_option":
+                    console = self._get_console()
+                    if console:
+                        # Build label with arguments for better display
+                        label = _build_tool_label(function_name, arguments)
 
-                    # Print label first (like parallel mode)
-                    label_text = f"[grey]{label}[/grey]" if not function_name.startswith("web search") else f"[bold cyan]{label}[/bold cyan]"
-                    if not self.panel_updater:
-                        console.print(label_text, highlight=False)
-                        console.file.flush()
+                        # Print label first (like parallel mode)
+                        label_text = f"[grey]{label}[/grey]" if not function_name.startswith("web search") else f"[bold cyan]{label}[/bold cyan]"
+                        if not self.panel_updater:
+                            console.print(label_text, highlight=False)
+                            console.file.flush()
 
-                    # Then display feedback
-                    _display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
+                        # Then display feedback
+                        _display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
 
                 return False, str(result)
             except Exception as e:

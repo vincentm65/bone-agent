@@ -42,6 +42,7 @@ from . import shell  # shell.py now contains both core logic and @tool decorator
 from . import web_search
 from . import sub_agent
 from . import task_list
+from . import select_option
 
 # Tool schema exports (now in helpers/base.py, merged from definitions.py)
 from .helpers.base import TOOLS, _tools_for_mode
