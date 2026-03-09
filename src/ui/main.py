@@ -124,7 +124,7 @@ class ThinkingIndicator:
             "Rolling for perception ...",
             "Pinging ...",
             "Ponging ...",
-            "Programming HTLM ...",
+            "Programming HTML ...",
             "Leaking memory ...",
             "Cooking ...",
             "Mining ...",

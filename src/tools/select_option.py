@@ -33,29 +33,20 @@ class SelectionPanel:
         """
         return html.escape(text, quote=False)
 
-    def __init__(self, question: str, options: List[Dict[str, str]], questions=None):
+    def __init__(self, questions: List[Dict[str, Any]]):
         """Initialize the selection panel.
 
         Args:
-            question: The question to ask the user (for single question mode)
-            options: List of option dicts with 'value', 'text', and optional 'description' (for single question mode)
-            questions: List of question dicts for multi-question mode (overrides question/options)
+            questions: List of question dicts with 'question', 'options' (each with 'value', 'text', optional 'description')
         """
         self.questions = questions
-        self._user_response = None
         self._showing_summary = False
 
-        # Single question mode
-        if questions is None:
-            self.question = question
-            self.options = options
-            self.selected_index = 0
-        # Multi-question mode
-        else:
-            self.current_question_idx = 0
-            self.selections = [None] * len(questions)
-            # Initialize selected_index for each question
-            self.selected_indices = [0] * len(questions)
+        # Initialize for multi-question mode (handles both single and multiple questions)
+        self.current_question_idx = 0
+        self.selections = [None] * len(questions)
+        # Initialize selected_index for each question
+        self.selected_indices = [0] * len(questions)
 
     def _get_display_text(self) -> HTML:
         """Get the formatted text to display.
@@ -65,29 +56,39 @@ class SelectionPanel:
         """
         lines = []
 
-        # Single question mode
-        if self.questions is None:
+        # Single question mode (1 item in array)
+        if len(self.questions) == 1:
             # Check if showing summary
             if self._showing_summary:
                 lines.append("<b>Selection Summary</b>")
                 lines.append("")
 
-                selected_opt = next((opt for opt in self.options if opt.get("value") == self._user_response), None)
-                selected_text = selected_opt.get("text", self._user_response) if selected_opt else self._user_response
+                question = self.questions[0].get("question", "")
+                selected_value = self.selections[0] if self.selections else None
+                options = self.questions[0].get("options", [])
 
-                lines.append(f"<b>Question:</b> {self._escape_html(self.question)}")
+                # Find the option text for the selected value
+                selected_opt = next((opt for opt in options if opt.get("value") == selected_value), None)
+                selected_text = selected_opt.get("text", selected_value) if selected_opt else selected_value
+
+                lines.append(f"<b>Question:</b> {self._escape_html(question)}")
                 lines.append(f'<style fg="gray">  Selected: {self._escape_html(str(selected_text))}</style>')
                 lines.append("")
             else:
-                lines.append(f"<b>{self._escape_html(self.question)}</b>")
+                question = self.questions[0]
+                question_text = question.get("question", "")
+                options = question.get("options", [])
+
+                # Show single question
+                lines.append(f"<b>{self._escape_html(question_text)}</b>")
                 lines.append("")
 
-                # Render each option
-                for idx, opt in enumerate(self.options):
+                # Render options
+                for o_idx, opt in enumerate(options):
                     text = opt.get("text", "")
                     description = opt.get("description", "")
 
-                    if idx == self.selected_index:
+                    if o_idx == self.selected_indices[0]:
                         # Selected option - show cursor and highlight in bold white
                         lines.append(f'<style fg="white" bold="true">{self._CURSOR}{self._escape_html(text)}</style>')
                         if description:
@@ -101,8 +102,7 @@ class SelectionPanel:
                 # Add help text
                 lines.append("")
                 lines.append('<style fg="gray">Use ↑↓ to navigate, Enter to confirm, Esc to cancel</style>')
-
-        # Multi-question mode - sequential (one question at a time)
+        # Multi-question mode (multiple items in array)
         else:
             # Check if showing summary
             if self._showing_summary:
@@ -171,14 +171,9 @@ class SelectionPanel:
             """Move selection up."""
             if self._showing_summary:
                 return  # Disable navigation when showing summary
-            if self.questions is None:
-                # Single question mode
-                if self.selected_index > 0:
-                    self.selected_index -= 1
-            else:
-                # Multi-question mode - move within current question
-                if self.selected_indices[self.current_question_idx] > 0:
-                    self.selected_indices[self.current_question_idx] -= 1
+            # Multi-question mode - move within current question (works for single question too)
+            if self.selected_indices[self.current_question_idx] > 0:
+                self.selected_indices[self.current_question_idx] -= 1
             event.app.invalidate()
 
         @bindings.add(Keys.Down)
@@ -186,33 +181,28 @@ class SelectionPanel:
             """Move selection down."""
             if self._showing_summary:
                 return  # Disable navigation when showing summary
-            if self.questions is None:
-                # Single question mode
-                if self.selected_index < len(self.options) - 1:
-                    self.selected_index += 1
-            else:
-                # Multi-question mode - move within current question
-                current_options = self.questions[self.current_question_idx].get("options", [])
-                if self.selected_indices[self.current_question_idx] < len(current_options) - 1:
-                    self.selected_indices[self.current_question_idx] += 1
+            # Multi-question mode - move within current question (works for single question too)
+            current_options = self.questions[self.current_question_idx].get("options", [])
+            if self.selected_indices[self.current_question_idx] < len(current_options) - 1:
+                self.selected_indices[self.current_question_idx] += 1
             event.app.invalidate()
 
         @bindings.add(Keys.Left)
         def prev_question(event):
-            """Go to previous question (multi-question mode)."""
+            """Go to previous question (multi-question mode only)."""
             if self._showing_summary:
                 return  # Disable navigation when showing summary
-            if self.questions is not None:
+            if self.questions is not None and len(self.questions) > 1:
                 if self.current_question_idx > 0:
                     self.current_question_idx -= 1
                 event.app.invalidate()
 
         @bindings.add(Keys.Right)
         def next_question(event):
-            """Go to next question (multi-question mode)."""
+            """Go to next question (multi-question mode only)."""
             if self._showing_summary:
                 return  # Disable navigation when showing summary
-            if self.questions is not None:
+            if self.questions is not None and len(self.questions) > 1:
                 if self.current_question_idx < len(self.questions) - 1:
                     self.current_question_idx += 1
                 event.app.invalidate()
@@ -220,23 +210,21 @@ class SelectionPanel:
         @bindings.add(Keys.Enter)
         def select(event):
             """Confirm selection or move to next question."""
-            if self.questions is None:
-                # Single question mode - show summary then auto-exit
-                if self._showing_summary:
-                    event.app.exit(result=self._user_response)
-                else:
-                    self._user_response = self.options[self.selected_index].get("value")
-                    self._showing_summary = True
-                    event.app.invalidate()
-                    # Auto-exit after 1 second
-                    Timer(1.0, lambda: event.app.exit(result=self._user_response)).start()
-            else:
-                # Multi-question mode - sequential
-                # Store current selection
-                current_options = self.questions[self.current_question_idx].get("options", [])
-                if current_options and self.selected_indices[self.current_question_idx] < len(current_options):
-                    self.selections[self.current_question_idx] = current_options[self.selected_indices[self.current_question_idx]].get("value")
+            # Multi-question mode - sequential
+            # Store current selection
+            current_options = self.questions[self.current_question_idx].get("options", [])
+            if current_options and self.selected_indices[self.current_question_idx] < len(current_options):
+                self.selections[self.current_question_idx] = current_options[self.selected_indices[self.current_question_idx]].get("value")
 
+            # Single question mode (1 item in array)
+            if len(self.questions) == 1:
+                # All questions answered - show summary then auto-exit
+                self._showing_summary = True
+                event.app.invalidate()
+                # Auto-exit after 1 second
+                Timer(1.0, lambda: event.app.exit(result=self.selections[0])).start()
+            # Multi-question mode (multiple items in array)
+            else:
                 # Move to next question or show summary if done
                 if self.current_question_idx < len(self.questions) - 1:
                     # More questions - move to next
@@ -284,30 +272,13 @@ class SelectionPanel:
 
 @tool(
     name="select_option",
-    description="Ask the user a question with selectable options using arrow keys. Displays an inline panel where the user navigates with arrow keys and presses Enter to select. Useful for clarifying requirements, making decisions, or getting user preferences. Supports both single question and multi-question forms.",
+    description="Ask the user a question with selectable options using arrow keys. Displays an inline panel where the user navigates with arrow keys and presses Enter to select. Useful for clarifying requirements, making decisions, or getting user preferences. Supports both single question and multi-question forms (single question = array with 1 item).",
     parameters={
         "type": "object",
         "properties": {
-            "question": {
-                "type": "string",
-                "description": "The question to ask the user (for single question mode)"
-            },
-            "options": {
-                "type": "array",
-                "description": "List of selectable options (for single question mode)",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "value": {"type": "string", "description": "Value to return if this option is selected"},
-                        "text": {"type": "string", "description": "Display text shown to the user for this option"},
-                        "description": {"type": "string", "description": "Optional detailed description shown below the option text"}
-                    },
-                    "required": ["value", "text"]
-                }
-            },
             "questions": {
                 "type": "array",
-                "description": "List of questions for multi-question mode (overrides question/options)",
+                "description": "List of questions. Single question mode: array with 1 item. Multi-question mode: array with multiple items.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -330,15 +301,13 @@ class SelectionPanel:
                 }
             }
         },
-        "required": []
+        "required": ["questions"]
     },
     allowed_modes=["edit", "plan", "learn"],
     requires_approval=False
 )
 def select_option(
-    question: Optional[str] = None,
-    options: Optional[List[Dict[str, str]]] = None,
-    questions: Optional[List[Dict[str, Any]]] = None
+    questions: List[Dict[str, Any]]
 ) -> str:
     """Present an inline selection panel to the user.
 
@@ -346,95 +315,61 @@ def select_option(
     options with arrow keys and select by pressing Enter. Pressing Esc cancels.
 
     Args:
-        question: The question to ask the user (for single question mode)
-        options: List of option objects, each containing:
-            - value: The value to return if selected
-            - text: Display text for the option
-            - description: Optional detailed description
-        questions: List of question objects for multi-question mode, each containing:
+        questions: List of question objects, each containing:
             - question: The question text
-            - options: List of option objects
+            - options: List of option objects with value, text, and optional description
 
     Returns:
         str: Formatted tool result with exit_code and selected value(s):
-            - "exit_code=0\\n{value}" for single question mode (value is the selected option's value)
-            - "exit_code=0\\n{value1, value2, ...}" for multi-question mode (comma-separated list)
+            - "exit_code=0\\n{value}" for single question (1 item in array)
+            - "exit_code=0\\n{value1, value2, ...}" for multi-question (comma-separated list)
             - "exit_code=1\\n{error_message}" for user cancellation or validation errors
     """
     try:
-        # Validate that either single or multi-question mode is provided
-        if questions is None:
-            # Single question mode - validate question and options
-            if not question:
-                return "exit_code=1\n'question' is required for single question mode"
+        # Validate questions parameter
+        if not isinstance(questions, list):
+            return "exit_code=1\nQuestions must be a list"
 
-            if not options or not isinstance(options, list):
-                return "exit_code=1\nOptions must be a non-empty list"
+        if not questions:
+            return "exit_code=1\nQuestions list cannot be empty"
 
-            # Validate each option
-            for opt in options:
+        # Validate each question
+        for q_idx, q in enumerate(questions):
+            if not isinstance(q, dict):
+                return f"exit_code=1\nQuestion {q_idx + 1} must be an object"
+
+            question_text = q.get("question")
+            q_options = q.get("options")
+
+            if not question_text:
+                return f"exit_code=1\nQuestion {q_idx + 1} must have a 'question' field"
+
+            if not q_options or not isinstance(q_options, list):
+                return f"exit_code=1\nQuestion {q_idx + 1} must have a non-empty 'options' list"
+
+            # Validate each option in the question
+            for opt_idx, opt in enumerate(q_options):
                 if not isinstance(opt, dict):
-                    return "exit_code=1\nEach option must be an object"
+                    return f"exit_code=1\nOption {opt_idx + 1} in question {q_idx + 1} must be an object"
 
                 value = opt.get("value")
                 text = opt.get("text")
 
                 if not value or not text:
-                    return "exit_code=1\nEach option must have 'value' and 'text' fields"
+                    return f"exit_code=1\nOption {opt_idx + 1} in question {q_idx + 1} must have 'value' and 'text' fields"
 
-            # Create and run the selection panel
-            panel = SelectionPanel(question, options)
-            result = panel.run()
+        # Create and run the selection panel
+        panel = SelectionPanel(questions)
+        result = panel.run()
 
-            # Handle user cancellation
-            if result is None:
-                return "exit_code=1\nUser canceled selection"
+        # Handle user cancellation
+        if result is None:
+            return "exit_code=1\nUser canceled selection"
 
-            # Return the selected value
+        # Return the selected values (single string for 1 question, comma-separated for multiple)
+        if isinstance(result, str):
             return f"exit_code=0\n{result}"
-
         else:
-            # Multi-question mode
-            if not isinstance(questions, list):
-                return "exit_code=1\nQuestions must be a list"
-
-            if not questions:
-                return "exit_code=1\nQuestions list cannot be empty"
-
-            # Validate each question
-            for q_idx, q in enumerate(questions):
-                if not isinstance(q, dict):
-                    return f"exit_code=1\nQuestion {q_idx + 1} must be an object"
-
-                question_text = q.get("question")
-                q_options = q.get("options")
-
-                if not question_text:
-                    return f"exit_code=1\nQuestion {q_idx + 1} must have a 'question' field"
-
-                if not q_options or not isinstance(q_options, list):
-                    return f"exit_code=1\nQuestion {q_idx + 1} must have a non-empty 'options' list"
-
-                # Validate each option in the question
-                for opt_idx, opt in enumerate(q_options):
-                    if not isinstance(opt, dict):
-                        return f"exit_code=1\nOption {opt_idx + 1} in question {q_idx + 1} must be an object"
-
-                    value = opt.get("value")
-                    text = opt.get("text")
-
-                    if not value or not text:
-                        return f"exit_code=1\nOption {opt_idx + 1} in question {q_idx + 1} must have 'value' and 'text' fields"
-
-            # Create and run the selection panel
-            panel = SelectionPanel(None, None, questions=questions)
-            result = panel.run()
-
-            # Handle user cancellation
-            if result is None:
-                return "exit_code=1\nUser canceled selection"
-
-            # Return the selected values (list)
             return f"exit_code=0\n{', '.join(str(r) for r in result)}"
 
     except Exception as e:
