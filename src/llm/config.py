@@ -348,6 +348,7 @@ __all__ = [
     "get_provider_config",
     "generate_config_template",
     "reload_config",
+    "STATUS_BAR_SETTINGS",
 ]
 
 
@@ -363,6 +364,16 @@ def generate_config_template():
 TOOLS_ENABLED = True
 TOOLS_REQUIRE_CONFIRMATION = False
 WEB_SEARCH_REQUIRE_CONFIRMATION = False
+
+# Status bar configuration
+STATUS_BAR_SETTINGS = {
+    "show_curr_tokens": _CONFIG.get("STATUS_BAR_SETTINGS", {}).get("show_curr_tokens", True),
+    "show_in_tokens": _CONFIG.get("STATUS_BAR_SETTINGS", {}).get("show_in_tokens", True),
+    "show_out_tokens": _CONFIG.get("STATUS_BAR_SETTINGS", {}).get("show_out_tokens", True),
+    "show_total_tokens": _CONFIG.get("STATUS_BAR_SETTINGS", {}).get("show_total_tokens", True),
+    "show_cost": _CONFIG.get("STATUS_BAR_SETTINGS", {}).get("show_cost", True),
+    "show_completed": _CONFIG.get("STATUS_BAR_SETTINGS", {}).get("show_completed", True),
+}
 
 # Tool approval modes
 APPROVE_MODES = ("safe", "accept_edits")

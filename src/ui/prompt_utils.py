@@ -4,7 +4,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
-from llm.config import get_provider_config, APPROVE_MODE_LABELS, LEARNING_MODE_LABELS, PLAN_TYPE_LABELS
+from llm.config import get_provider_config, APPROVE_MODE_LABELS, LEARNING_MODE_LABELS, PLAN_TYPE_LABELS, STATUS_BAR_SETTINGS
 
 
 def get_bottom_toolbar_text(chat_manager):
@@ -33,6 +33,12 @@ def get_bottom_toolbar_text(chat_manager):
     cost_out = provider_cfg.get("cost_out", 0.0)
     cost_info = chat_manager.token_tracker.calculate_session_cost(cost_in, cost_out)
     total_cost = cost_info.get("total_cost", 0.0)
+    
+    # Import LAST_COMPLETION_TIME from main
+    import importlib
+    main_module = importlib.import_module('ui.main')
+    last_completion = getattr(main_module, 'LAST_COMPLETION_TIME', None)
+    format_time = getattr(main_module, 'format_time', lambda s: f"{int(s)}s")
 
     # Format model name (take last part if path)
     if "\\" in model or "/" in model:
@@ -57,23 +63,29 @@ def get_bottom_toolbar_text(chat_manager):
         colors = {"safe": "green", "accept_edits": "yellow"}
         mode_val_colored = f'<style fg="{colors.get(chat_manager.approve_mode, "white")}">{val}</style>'
 
-    return HTML(
-        '<style fg="white">Model: {} | {}: </style>{}'
-        '<style fg="white"> | </style><style fg="cyan">curr</style><style fg="white">: {:,} | </style>'
-        '<style fg="cyan">in</style><style fg="white">: {:,} | </style>'
-        '<style fg="cyan">out</style><style fg="white">: {:,} | </style>'
-        '<style fg="cyan">total</style><style fg="white">: {:,} | </style>'
-        '<style fg="cyan">cost</style><style fg="white">: ${:.4f}</style>'.format(
-            model_display or provider_name,
-            mode_label,
-            mode_val_colored,
-            tokens_curr,
-            tokens_in,
-            tokens_out,
-            tokens_total,
-            total_cost
-        )
-    )
+    # Build toolbar string based on configuration
+    # Model and mode are always shown
+    parts = [f'<style fg="white">Model: {model_display or provider_name} | {mode_label}: </style>{mode_val_colored}']
+    
+    # Conditionally add token counts
+    if STATUS_BAR_SETTINGS.get("show_curr_tokens", True):
+        parts.append(f'<style fg="white"> | </style><style fg="cyan">curr</style><style fg="white">: {tokens_curr:,}</style>')
+    if STATUS_BAR_SETTINGS.get("show_in_tokens", True):
+        parts.append(f'<style fg="white"> | </style><style fg="cyan">in</style><style fg="white">: {tokens_in:,}</style>')
+    if STATUS_BAR_SETTINGS.get("show_out_tokens", True):
+        parts.append(f'<style fg="white"> | </style><style fg="cyan">out</style><style fg="white">: {tokens_out:,}</style>')
+    if STATUS_BAR_SETTINGS.get("show_total_tokens", True):
+        parts.append(f'<style fg="white"> | </style><style fg="cyan">total</style><style fg="white">: {tokens_total:,}</style>')
+    
+    # Conditionally add cost
+    if STATUS_BAR_SETTINGS.get("show_cost", True):
+        parts.append(f'<style fg="white"> | </style><style fg="cyan">cost</style><style fg="white">: ${total_cost:.4f}</style>')
+    
+    # Conditionally add completion time
+    if STATUS_BAR_SETTINGS.get("show_completed", True) and last_completion is not None:
+        parts.append(f'<style fg="white"> | </style><style fg="green">completed</style><style fg="white">: {format_time(last_completion)}</style>')
+    
+    return HTML('\n' + ''.join(parts))
 
 
 TOOLBAR_STYLE = Style.from_dict({

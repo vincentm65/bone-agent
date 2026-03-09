@@ -3,6 +3,8 @@
 import os
 import sys
 import time
+import random
+import threading
 from pathlib import Path
 
 # Add src directory to Python path so we can import llm, core, utils modules
@@ -72,25 +74,216 @@ class ThinkingIndicator:
         self.console = console
         self.message = message
         self.spinner = spinner
+        self._last_word_change = 0
+        self._word_change_interval = 5.0  # Change word every 5 seconds
+        
+        self._common_words = [
+            "Thinking ...",
+            "Chunking ...",
+            "Completing ...",
+            "Computing ...",
+            "Programming ...",
+            "Understanding ..."
+            "Vibing ...",
+            "Perpetuating ...",
+            "Analyzing ...",
+            "Evaluating ...",
+            "Synthesizing ...",
+            "Working ...",
+            "Debugging ...",
+            "Scrutinizing ...",
+            "Formulating ...",
+            "Predicting next token ...",
+            "Outsourcing ...",
+            "Checking vitals ...",
+            "Scanning fingerpints ...",
+            "Rerouting ...",
+            "Refactoring ...",
+            "Burning tokens ...",
+            "Conjuring ...",
+            "Recalculating ...",
+            "Spinning ...",
+            "Pointing ...",
+            "Demateralizing ...",
+            "Compiling ...",
+            "Fetching ...",
+            "Buffering ...",
+            "Syncing ...",
+            "Caching ...",
+            "Connecting ...",
+            "Indexing ...",
+            "Authenticating ...",
+            "Validating ...",
+        ]
+        
+        self._rare_words = [
+            "\"Engineering\" ...",
+            "Deleting (jk) ...",
+            "Computer... Fix my program",
+            "Exiting VIM ...",
+            "Rolling for perception ...",
+            "Pinging ...",
+            "Ponging ...",
+            "Programming HTLM ...",
+            "Leaking memory ...",
+            "Cooking ...",
+            "Mining ...",
+            "Crafting ...",
+            "Pushing to prod ...",
+            "Checking with Altman ...",
+            "Collecting 200 ...",
+            "Rebooting...",
+            "Wasting water ...",
+            "Asking Stack Overflow ...",
+            "Reading the docs ...",
+            "Asking ChatGPT ...",
+            "Reading the docs ...",
+            "Binging it ...",
+            "Googling it ...",
+            "Dockerizing ...",
+            "Forking it ...",
+            "Checking the logs ...",
+            "Checking the backup ...",
+            "Performing vLookup ...",
+            "Downloading more RAM ...",
+            "Performing SumIf ...",
+            "Spinning up servers ...",
+            "Getting chat completion ...",
+            "Merging conflicts ...",
+            "Feature creeping ...",
+        ]
+        
+        self._legendary_words = [
+            "I'm confused ...",
+            "Running in O(n²) ...",
+            "Checking Jira ...",
+            "Gaining consciousness ...",
+            "Mining Bitcoin ...",
+            "Accessing null pointer ...",
+            "FIXING ME ...",
+            "READING ME ..."
+            "Converting to PDF and back ...",
+            "Rewriting in Rust ...",
+            "Rewriting in JavaScript ...",
+            "Recursively calling myself ...",
+            "Contacting AWS Support ...",
+            "Reviewing footage ...",
+            "Dedotating wam ...",
+            "Pondeing the orb ...",
+            "Computer... ENHANCE ...",
+            "Consulting council ...",
+            "Releasing the files ...",
+            "Redacting the files ...",
+            "Uhhhh ...",
+            "Selling data ...",
+            "Okeyyy lets go ...",
+
+        ]
+
         self._status = None
         self._active = False
+        self._start_time = None
+        self._timer_thread = None
+        self._stop_timer = threading.Event()
+        self._elapsed_before_pause = 0.0
+        self._has_been_started = False
+
+    def _select_random_word(self):
+        """Select a random word from weighted word lists."""
+        roll = random.random()
+        
+        if roll < 0.60:
+            return random.choice(self._common_words)
+        elif roll < 0.90:
+            return random.choice(self._rare_words)
+        else:
+            return random.choice(self._legendary_words)
+
+    @staticmethod
+    def _format_time(seconds):
+        """Format seconds as whole seconds or minutes:seconds."""
+        if seconds >= 60:
+            mins = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{mins}m {secs}s"
+        else:
+            return f"{int(seconds)}s"
 
     def start(self):
-        if self._status is None:
-            self._status = self.console.status(self.message, spinner=self.spinner, spinner_style="cyan")
-        if not self._active:
-            self._status.start()
-            self._active = True
+        # Select initial word
+        self.message = self._select_random_word()
+        
+        # Initialize timer (reset only on first start)
+        if not self._has_been_started:
+            self._elapsed_before_pause = 0.0
+            self._has_been_started = True
+            self._last_word_change = 0
+        
+        self._start_time = time.time()
+        self._stop_timer.clear()
+        
+        # Always recreate and restart status with new message
+        if self._status and self._active:
+            self._status.stop()
+        self._status = self.console.status(self.message, spinner=self.spinner, spinner_style="cyan")
+        self._status.start()
+        self._active = True
+        
+        # Start background timer thread
+        self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
+        self._timer_thread.start()
+    
+    def _update_timer(self):
+        """Background thread: update status message with elapsed time."""
+        while not self._stop_timer.is_set() and self._status and self._active:
+            # Calculate elapsed time including previous pauses
+            elapsed = self._elapsed_before_pause + (time.time() - self._start_time)
 
-    def stop(self):
+            # Change word every 5 seconds
+            if elapsed - self._last_word_change >= self._word_change_interval:
+                self.message = self._select_random_word()
+                self._last_word_change = elapsed
+
+            # Format elapsed time (e.g., "Thinking ... (1s)" or "Thinking ... (1m 30s)")
+            time_str = f"({self._format_time(elapsed)})"
+            updated_message = f"{self.message} {time_str}"
+
+            # Update the status message
+            if self._status:
+                self._status.update(updated_message)
+            
+            self._stop_timer.wait(0.1)  # Update every 100ms
+
+    def stop(self, show_completion=False):
+        # Calculate and store elapsed time (including accumulated pauses)
+        elapsed_time = None
+        if self._start_time:
+            elapsed_time = self._elapsed_before_pause + (time.time() - self._start_time)
+            self._elapsed_before_pause = elapsed_time
+        
+        # Stop timer thread
+        self._stop_timer.set()
+        if self._timer_thread:
+            self._timer_thread.join(timeout=0.5)
+        
         if self._status and self._active:
             self._status.stop()
             self._active = False
+        
+        # Display final elapsed time only on true completion
+        if show_completion and elapsed_time is not None:
+            # Reset state after true completion
+            self._has_been_started = False
+            self._elapsed_before_pause = 0.0
+        
+        self._start_time = None
 
     def pause(self):
-        self.stop()
+        # Stop without showing completion time (accumulates elapsed time)
+        self.stop(show_completion=False)
 
     def resume(self):
+        # Resume with timer continuing from accumulated time
         self.start()
 
 
@@ -208,12 +401,17 @@ def main():
                 prompt_kwargs = {
                     "bottom_toolbar": lambda: get_bottom_toolbar_text(chat_manager),
                 }
-                user_input = session.prompt(
+                raw_input = session.prompt(
                     lambda: get_prompt(chat_manager),
                     **prompt_kwargs,
-                ).strip()
+                )
+                user_input = raw_input.strip()
 
                 if not user_input:
+                    # Clear the empty input line to avoid multiple prompts stacking
+                    import sys
+                    sys.stdout.write("\033[F\033[K")  # Move up and clear line
+                    sys.stdout.flush()
                     continue
 
                 # Process commands
@@ -320,7 +518,7 @@ def main():
                         except Exception as e:
                             console.print(f"[red]Error during generation: {e}[/red]", markup=False)
                 finally:
-                    thinking_indicator.stop()
+                    thinking_indicator.stop(show_completion=True)
 
             except KeyboardInterrupt:
                 # Ctrl+C pressed while waiting for input

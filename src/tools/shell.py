@@ -94,6 +94,10 @@ def confirm_tool(command, console, reason=None, requires_approval=True, prompt_s
     if console is not None:
         console.print()
 
+    # Empty input (just pressed Enter) means do nothing
+    if not response:
+        return ("reject", None)
+    
     if response.lower() in ("y", "yes"):
         return ("execute", None)
     elif response.lower() in ("n", "no"):

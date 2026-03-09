@@ -1,4 +1,4 @@
-﻿"""Agent tool-calling loop."""
+"""Agent tool-calling loop."""
 
 import json
 import os
@@ -1248,10 +1248,17 @@ class AgenticOrchestrator:
 
             # Append tool result if not skipped (guidance mode)
             if tool_result is not None and tool_result is not False:
+                from rich.text import Text
+                # Add exit_code prefix for agent consumption
+                if isinstance(tool_result, Text):
+                    # Rich Text object = successful edit (exit_code=0)
+                    content_for_agent = f"exit_code=0\n{str(tool_result)}"
+                else:
+                    content_for_agent = str(tool_result)
                 tool_msg = {
                     "role": "tool",
                     "tool_call_id": tool_id,
-                    "content": str(tool_result)
+                    "content": content_for_agent
                 }
                 self.chat_manager.messages.append(tool_msg)
                 # Log tool result
@@ -1390,64 +1397,61 @@ class AgenticOrchestrator:
 
                             # Check if result is a Text object (new format with styling)
                             if isinstance(result.result, Text):
-                                # Extract the first line to check exit code
-                                plain = str(result.result).split('\n')[0] if result.result else ""
-                                if plain.startswith("exit_code=0"):
-                                    # Display the Rich Text object directly
-                                    self.console.print(result.result)
-                                    self.console.print()
+                                # Display the Rich Text object directly (exit_code is for agent only)
+                                self.console.print(result.result)
+                                self.console.print()
 
-                                    # Request user approval
-                                    # Stop thinking indicator while waiting for user input
-                                    thinking_indicator = context.get('thinking_indicator')
-                                    if thinking_indicator:
-                                        thinking_indicator.stop()
+                                # Request user approval
+                                # Stop thinking indicator while waiting for user input
+                                thinking_indicator = context.get('thinking_indicator')
+                                if thinking_indicator:
+                                    thinking_indicator.stop()
 
-                                    # Create confirmation prompt session with toolbar
-                                    prompt_session = create_confirmation_prompt_session(
-                                        self.chat_manager,
-                                        lambda: HTML("<b>Approve edit? (y/n/guidance): </b>")
+                                # Create confirmation prompt session with toolbar
+                                prompt_session = create_confirmation_prompt_session(
+                                    self.chat_manager,
+                                    lambda: HTML("<b>Approve edit? (y/n/guidance): </b>")
+                                )
+
+                                action, guidance = confirm_tool(
+                                    f"edit_file: {args_dict.get('path', '')}",
+                                    self.console,
+                                    reason=args_dict.get('reason', 'Apply file edit with above changes'),
+                                    requires_approval=True,
+                                    prompt_session=prompt_session,
+                                    approve_mode=self.chat_manager.approve_mode
+                                )
+
+                                if action == "execute":
+                                    # User approved - execute the edit
+                                    from tools.edit import _execute_edit_file
+                                    final_result = _execute_edit_file(
+                                        path=args_dict.get('path'),
+                                        search=args_dict.get('search'),
+                                        replace=args_dict.get('replace'),
+                                        repo_root=self.repo_root,
+                                        console=self.console,
+                                        gitignore_spec=self.gitignore_spec,
+                                        context_lines=args_dict.get('context_lines', 3)
                                     )
+                                    # Strip exit_code line from final result before displaying
+                                    if final_result and isinstance(final_result, str):
+                                        final_lines = [line for line in final_result.split('\n') if not line.startswith('exit_code=')]
+                                        result.result = '\n'.join(final_lines).strip()
+                                    else:
+                                        result.result = final_result
+                                elif action == "reject":
+                                    result.result = "exit_code=1\nEdit rejected by user."
+                                    # Show rejection to user
+                                    self.console.print("[dim]Edit rejected by user.[/dim]")
+                                elif action == "guide":
+                                    result.result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
+                                    # Show guidance to user
+                                    self.console.print(f"[dim]Edit not applied. User guidance: {guidance}[/dim]")
 
-                                    action, guidance = confirm_tool(
-                                        f"edit_file: {args_dict.get('path', '')}",
-                                        self.console,
-                                        reason=args_dict.get('reason', 'Apply file edit with above changes'),
-                                        requires_approval=True,
-                                        prompt_session=prompt_session,
-                                        approve_mode=self.chat_manager.approve_mode
-                                    )
-
-                                    if action == "execute":
-                                        # User approved - execute the edit
-                                        from tools.edit import _execute_edit_file
-                                        final_result = _execute_edit_file(
-                                            path=args_dict.get('path'),
-                                            search=args_dict.get('search'),
-                                            replace=args_dict.get('replace'),
-                                            repo_root=self.repo_root,
-                                            console=self.console,
-                                            gitignore_spec=self.gitignore_spec,
-                                            context_lines=args_dict.get('context_lines', 3)
-                                        )
-                                        # Strip exit_code line from final result before displaying
-                                        if final_result and isinstance(final_result, str):
-                                            final_lines = [line for line in final_result.split('\n') if not line.startswith('exit_code=')]
-                                            result.result = '\n'.join(final_lines).strip()
-                                        else:
-                                            result.result = final_result
-                                    elif action == "reject":
-                                        result.result = "exit_code=1\nEdit rejected by user."
-                                        # Show rejection to user
-                                        self.console.print("[dim]Edit rejected by user.[/dim]")
-                                    elif action == "guide":
-                                        result.result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
-                                        # Show guidance to user
-                                        self.console.print(f"[dim]Edit not applied. User guidance: {guidance}[/dim]")
-
-                                    # Restart thinking indicator after user input
-                                    if thinking_indicator:
-                                        thinking_indicator.start()
+                                # Restart thinking indicator after user input
+                                if thinking_indicator:
+                                    thinking_indicator.start()
                             elif result.result.startswith("exit_code=0"):
                                 # Legacy string format - parse and display
                                 lines = result.result.split('\n')
@@ -1554,10 +1558,16 @@ class AgenticOrchestrator:
                     if result.should_exit:
                         end_loop = True
 
+                    # Add exit_code prefix for agent consumption (Rich Text = success)
+                    from rich.text import Text
+                    if isinstance(result.result, Text):
+                        content_for_agent = f"exit_code=0\n{str(result.result)}"
+                    else:
+                        content_for_agent = str(result.result)
                     tool_msg = {
                         "role": "tool",
                         "tool_call_id": result.tool_id,
-                        "content": str(result.result)
+                        "content": content_for_agent
                     }
                     self.chat_manager.messages.append(tool_msg)
                     # Log tool result
@@ -1647,61 +1657,58 @@ class AgenticOrchestrator:
                         if console:
                             # Check if result is a Text object (new format with styling)
                             if isinstance(result, Text):
-                                # Extract the first line to check exit code
-                                plain = str(result).split('\n')[0] if result else ""
-                                if plain.startswith("exit_code=0"):
-                                    # Display the Rich Text object directly
-                                    console.print(result)
-                                    console.print()
+                                # Display the Rich Text object directly (exit_code is for agent only)
+                                console.print(result)
+                                console.print()
 
-                                    # Request user approval
-                                    # Stop thinking indicator while waiting for user input
-                                    if thinking_indicator:
-                                        thinking_indicator.stop()
+                                # Request user approval
+                                # Stop thinking indicator while waiting for user input
+                                if thinking_indicator:
+                                    thinking_indicator.stop()
 
-                                    # Create confirmation prompt session with toolbar
-                                    prompt_session = create_confirmation_prompt_session(
-                                        self.chat_manager,
-                                        lambda: HTML("<b>Approve edit? (y/n/guidance): </b>")
+                                # Create confirmation prompt session with toolbar
+                                prompt_session = create_confirmation_prompt_session(
+                                    self.chat_manager,
+                                    lambda: HTML("<b>Approve edit? (y/n/guidance): </b>")
+                                )
+
+                                action, guidance = confirm_tool(
+                                    f"edit_file: {arguments.get('path', '')}",
+                                    console,
+                                    reason=arguments.get('reason', 'Apply file edit with above changes'),
+                                    requires_approval=True,
+                                    prompt_session=prompt_session,
+                                    approve_mode=self.chat_manager.approve_mode
+                                )
+
+                                if action == "execute":
+                                    # User approved - execute the edit
+                                    from tools.edit import _execute_edit_file
+                                    result = _execute_edit_file(
+                                        path=arguments.get('path'),
+                                        search=arguments.get('search'),
+                                        replace=arguments.get('replace'),
+                                        repo_root=self.repo_root,
+                                        console=console,
+                                        gitignore_spec=self.gitignore_spec,
+                                        context_lines=arguments.get('context_lines', 3)
                                     )
+                                    # Strip exit_code line from final result before displaying
+                                    if result and isinstance(result, str):
+                                        result_lines = [line for line in result.split('\n') if not line.startswith('exit_code=')]
+                                        result = '\n'.join(result_lines).strip()
+                                elif action == "reject":
+                                    result = "exit_code=1\nEdit rejected by user."
+                                    # Show rejection to user
+                                    console.print("[dim]Edit rejected by user.[/dim]")
+                                elif action == "guide":
+                                    result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
+                                    # Show guidance to user
+                                    console.print(f"[dim]Edit not applied. User guidance: {guidance}[/dim]")
 
-                                    action, guidance = confirm_tool(
-                                        f"edit_file: {arguments.get('path', '')}",
-                                        console,
-                                        reason=arguments.get('reason', 'Apply file edit with above changes'),
-                                        requires_approval=True,
-                                        prompt_session=prompt_session,
-                                        approve_mode=self.chat_manager.approve_mode
-                                    )
-
-                                    if action == "execute":
-                                        # User approved - execute the edit
-                                        from tools.edit import _execute_edit_file
-                                        result = _execute_edit_file(
-                                            path=arguments.get('path'),
-                                            search=arguments.get('search'),
-                                            replace=arguments.get('replace'),
-                                            repo_root=self.repo_root,
-                                            console=console,
-                                            gitignore_spec=self.gitignore_spec,
-                                            context_lines=arguments.get('context_lines', 3)
-                                        )
-                                        # Strip exit_code line from final result before displaying
-                                        if result and isinstance(result, str):
-                                            result_lines = [line for line in result.split('\n') if not line.startswith('exit_code=')]
-                                            result = '\n'.join(result_lines).strip()
-                                    elif action == "reject":
-                                        result = "exit_code=1\nEdit rejected by user."
-                                        # Show rejection to user
-                                        console.print("[dim]Edit rejected by user.[/dim]")
-                                    elif action == "guide":
-                                        result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
-                                        # Show guidance to user
-                                        console.print(f"[dim]Edit not applied. User guidance: {guidance}[/dim]")
-
-                                    # Restart thinking indicator after user input
-                                    if thinking_indicator:
-                                        thinking_indicator.start()
+                                # Restart thinking indicator after user input
+                                if thinking_indicator:
+                                    thinking_indicator.start()
                                 # else: Text object with exit_code != 0 - don't show to user
                             elif result.startswith("exit_code=0"):
                                 # Extract and display the diff preview
@@ -1840,8 +1847,8 @@ class AgenticOrchestrator:
                         thinking_indicator.resume()
 
                 # Display result for registry tools
-                # Skip display for select_option (it shows its own UI)
-                if function_name != "select_option":
+                # Skip display for select_option and sub_agent (sub_agent has its own panel)
+                if function_name not in ("select_option", "sub_agent"):
                     console = self._get_console()
                     if console:
                         # Build label with arguments for better display

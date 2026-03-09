@@ -171,7 +171,7 @@ def _resolve_repo_path(path_str, repo_root, gitignore_spec=None):
     return resolved
 
 
-def _prepare_edit(arguments, repo_root, gitignore_spec=None):
+def _prepare_edit(arguments, repo_root, gitignore_spec=None) -> tuple[str, dict]:
     """Prepare edit operation with validation.
 
     Args:
@@ -180,7 +180,7 @@ def _prepare_edit(arguments, repo_root, gitignore_spec=None):
         gitignore_spec: Optional PathSpec for .gitignore filtering
 
     Returns:
-        Tuple of (status_string, payload_dict or None)
+        Tuple of (status_string, payload_dict)
 
     Raises:
         PathValidationError: If path is invalid or blocked by .gitignore
@@ -255,11 +255,11 @@ def _prepare_edit(arguments, repo_root, gitignore_spec=None):
     }
 
 
-def preview_edit_file(arguments, repo_root, gitignore_spec=None):
+def preview_edit_file(arguments, repo_root, gitignore_spec=None) -> tuple[str, Text]:
     """Build a line-numbered diff preview without writing changes.
 
     Returns:
-        Tuple of (status_string, diff_text or None)
+        Tuple of (status_string, diff_text)
 
     Raises:
         FileEditError: If edit validation fails
@@ -283,8 +283,12 @@ def preview_edit_file(arguments, repo_root, gitignore_spec=None):
     return "exit_code=0", diff_text
 
 
-def run_edit_file(arguments, repo_root, console, gitignore_spec=None):
-    """Apply search/replace edit to a file."""
+def run_edit_file(arguments, repo_root, console, gitignore_spec=None) -> str | Text:
+    """Apply search/replace edit to a file.
+
+    Returns:
+        Rich Text with diff for success, str with exit_code for errors
+    """
     try:
         status, payload = _prepare_edit(arguments, repo_root, gitignore_spec)
 
@@ -313,10 +317,8 @@ def run_edit_file(arguments, repo_root, console, gitignore_spec=None):
                 details={"path": str(payload["file_path"]), "original_error": str(e)}
             )
 
-        # Success - return Rich Text object with styled diff
+        # Success - return Rich Text object with styled diff (no exit_code prefix)
         result = Text()
-        result.append("exit_code=0\n\n")
-        result.append("Diff:\n", style="cyan bold")
         result.append(diff_text)
         result.append("\n")
         return result
@@ -377,7 +379,7 @@ def edit_file(
     chat_manager,
     gitignore_spec = None,
     context_lines: int = 3
-) -> str:
+) -> str | Text:
     """Apply search/replace edit to a file.
 
     Args:
@@ -417,10 +419,8 @@ def edit_file(
         if preview_status != "exit_code=0":
             return preview_status
 
-        # Build a Rich Text object with status and diff
+        # Build a Rich Text object with diff only (exit_code is for agent, not user display)
         result = Text()
-        result.append(preview_status)
-        result.append("\n")
         result.append(preview_diff)
         return result
 
@@ -438,7 +438,7 @@ def _execute_edit_file(
 	console,
 	gitignore_spec = None,
 	context_lines: int = 3
-) -> str:
+) -> str | Text:
 	"""Execute a confirmed edit operation (internal function).
 
 	Called after user confirmation to actually apply the edit.
@@ -454,7 +454,7 @@ def _execute_edit_file(
 		context_lines: Number of context lines in diff
 
 	Returns:
-		Edit result with diff
+		Edit result with diff (Rich Text for success, str with exit_code for errors)
 	"""
 	arguments = {
 		"path": path,

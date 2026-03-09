@@ -77,6 +77,19 @@ LOCAL_SERVER_PATH: "/path/to/llama.cpp/build/bin/llama-server"
 # =============================================================================
 
 # =============================================================================
+# STATUS BAR SETTINGS
+# =============================================================================
+
+# Status bar visibility settings (model and mode are always shown)
+STATUS_BAR_SETTINGS:
+  show_curr_tokens: true   # Show current context tokens
+  show_in_tokens: true      # Show total prompt tokens
+  show_out_tokens: true     # Show total completion tokens
+  show_total_tokens: true  # Show total session tokens
+  show_cost: true          # Show session cost
+  show_completed: true     # Show last completion time
+
+# =============================================================================
 # TOOL SETTINGS
 # =============================================================================
 
