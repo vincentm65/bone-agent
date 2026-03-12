@@ -75,7 +75,7 @@ class ThinkingIndicator:
         self.message = message
         self.spinner = spinner
         self._last_word_change = 0
-        self._word_change_interval = 5.0  # Change word every 5 seconds
+        self._word_change_interval = 15.0  # Change word every 5 seconds
         
         self._common_words = [
             "Thinking ...",
@@ -192,9 +192,9 @@ class ThinkingIndicator:
         """Select a random word from weighted word lists."""
         roll = random.random()
         
-        if roll < 0.60:
+        if roll < 0.80:
             return random.choice(self._common_words)
-        elif roll < 0.90:
+        elif roll < 0.95:
             return random.choice(self._rare_words)
         else:
             return random.choice(self._legendary_words)

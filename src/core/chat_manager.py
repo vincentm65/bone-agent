@@ -14,6 +14,7 @@ from pathlib import Path
 from llm.token_tracker import TokenTracker
 from utils.settings import server_settings, context_settings
 from utils.logger import MarkdownConversationLogger
+from utils.result_parsers import extract_exit_code, extract_metadata_from_result
 
 # Token counting constants
 MESSAGE_OVERHEAD_TOKENS = 4  # Approximate tokens for JSON structure: braces, quotes, colons, commas
@@ -427,45 +428,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                 tool_results.append(self.messages[i])
         return tool_results
 
-    def _extract_metadata_from_result(self, tool_result, key):
-        """Parse metadata like matches_found, lines_read, etc. from tool result.
-
-        Args:
-            tool_result: Tool result content string
-            key: Metadata key to extract (e.g., "matches_found", "lines_read")
-
-        Returns:
-            int or None: Extracted value or None if not found
-        """
-        if not isinstance(tool_result, str):
-            return None
-        for line in tool_result.split('\n'):
-            if line.startswith(f'{key}='):
-                try:
-                    return int(line.split('=')[1].split()[0])
-                except (ValueError, IndexError):
-                    return None
-        return None
-
-    def _extract_exit_code(self, tool_result):
-        """Parse exit_code from tool result.
-
-        Args:
-            tool_result: Tool result content string
-
-        Returns:
-            int or None: Exit code or None if not found
-        """
-        if not isinstance(tool_result, str):
-            return None
-        first_line = tool_result.split('\n')[0] if tool_result else ""
-        if first_line.startswith('exit_code='):
-            try:
-                return int(first_line.split('=')[1].split()[0])
-            except (ValueError, IndexError):
-                return None
-        return None
-
     def _summarize_tool_call(self, tool_call, tool_result):
         """Extract key info from a single tool call.
 
@@ -485,8 +447,8 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
         if fn_name == "execute_command":
             cmd = args.get('command', '')
-            exit_code = self._extract_exit_code(tool_result)
-            matches = self._extract_metadata_from_result(tool_result, 'matches_found')
+            exit_code = extract_exit_code(tool_result)
+            matches = extract_metadata_from_result(tool_result, 'matches_found')
 
             if exit_code == 0:
                 if matches is not None:
@@ -498,8 +460,8 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
         elif fn_name == "read_file":
             path = args.get('path_str', '')
-            lines = self._extract_metadata_from_result(tool_result, 'lines_read')
-            start_line = self._extract_metadata_from_result(tool_result, 'start_line')
+            lines = extract_metadata_from_result(tool_result, 'lines_read')
+            start_line = extract_metadata_from_result(tool_result, 'start_line')
 
             if lines is not None:
                 if start_line is not None and start_line > 1:
@@ -512,7 +474,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
         elif fn_name == "list_directory":
             path = args.get('path_str', '.')
-            items = self._extract_metadata_from_result(tool_result, 'items_count')
+            items = extract_metadata_from_result(tool_result, 'items_count')
             recursive = args.get('recursive', False)
 
             action = "Listed recursively" if recursive else "Listed"
@@ -528,7 +490,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
         elif fn_name == "web_search":
             query = args.get('query', '')
-            results = self._extract_metadata_from_result(tool_result, 'results_found')
+            results = extract_metadata_from_result(tool_result, 'results_found')
             if results is not None:
                 return f"Searched web for '{query[:40]}...' ({results} results)"
             return f"Searched web: '{query[:40]}...'"
@@ -655,7 +617,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                 skip_compaction = False
                 if not context_settings.tool_compaction.compact_failed_tools:
                     for tool_result in block_start['tool_results']:
-                        exit_code = self._extract_exit_code(tool_result)
+                        exit_code = extract_exit_code(tool_result)
                         if exit_code is not None and exit_code != 0:
                             skip_compaction = True
                             break

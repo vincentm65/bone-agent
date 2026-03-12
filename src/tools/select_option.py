@@ -1,6 +1,5 @@
 """Interactive selection tool for presenting multiple-choice questions to the user."""
 
-import html
 from threading import Timer
 from typing import Optional, List, Dict, Any, Union
 
@@ -12,6 +11,8 @@ from prompt_toolkit.layout import Layout, HSplit, Window
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.layout.controls import FormattedTextControl
 
+from ui.prompt_utils import get_bottom_toolbar_text, TOOLBAR_STYLE
+
 from .helpers.base import tool
 
 
@@ -20,18 +21,6 @@ class SelectionPanel:
 
     # Cursor indicator
     _CURSOR = "> "
-
-    @staticmethod
-    def _escape_html(text: str) -> str:
-        """Escape HTML special characters to prevent parsing errors.
-
-        Args:
-            text: Text to escape
-
-        Returns:
-            HTML-escaped text
-        """
-        return html.escape(text, quote=False)
 
     def __init__(self, questions: List[Dict[str, Any]]):
         """Initialize the selection panel.
@@ -71,8 +60,8 @@ class SelectionPanel:
                 selected_opt = next((opt for opt in options if opt.get("value") == selected_value), None)
                 selected_text = selected_opt.get("text", selected_value) if selected_opt else selected_value
 
-                lines.append(f"<b>Question:</b> {self._escape_html(question)}")
-                lines.append(f'<style fg="gray">  Selected: {self._escape_html(str(selected_text))}</style>')
+                lines.append(f"<b>Question:</b> {question}")
+                lines.append(f'<style fg="gray">  Selected: {str(selected_text)}</style>')
                 lines.append("")
             else:
                 question = self.questions[0]
@@ -80,7 +69,7 @@ class SelectionPanel:
                 options = question.get("options", [])
 
                 # Show single question
-                lines.append(f"<b>{self._escape_html(question_text)}</b>")
+                lines.append(f"<b>{question_text}</b>")
                 lines.append("")
 
                 # Render options
@@ -90,14 +79,14 @@ class SelectionPanel:
 
                     if o_idx == self.selected_indices[0]:
                         # Selected option - show cursor and highlight in bold white
-                        lines.append(f'<style fg="white" bold="true">{self._CURSOR}{self._escape_html(text)}</style>')
+                        lines.append(f'<style fg="white" bold="true">{self._CURSOR}{text}</style>')
                         if description:
-                            lines.append(f'<style fg="white">   {self._escape_html(description)}</style>')
+                            lines.append(f'<style fg="white">   {description}</style>')
                     else:
                         # Unselected option - dark grey
-                        lines.append(f'<style fg="gray">  {self._escape_html(text)}</style>')
+                        lines.append(f'<style fg="gray">  {text}</style>')
                         if description:
-                            lines.append(f'<style fg="gray">   {self._escape_html(description)}</style>')
+                            lines.append(f'<style fg="gray">   {description}</style>')
 
                 # Add help text
                 lines.append("")
@@ -118,8 +107,8 @@ class SelectionPanel:
                     selected_opt = next((opt for opt in options if opt.get("value") == selected_value), None)
                     selected_text = selected_opt.get("text", selected_value) if selected_opt else selected_value
 
-                    lines.append(f"<b>Question {q_idx + 1}:</b> {self._escape_html(question)}")
-                    lines.append(f'<style fg="gray">  Selected: {self._escape_html(str(selected_text))}</style>')
+                    lines.append(f"<b>Question {q_idx + 1}:</b> {question}")
+                    lines.append(f'<style fg="gray">  Selected: {str(selected_text)}</style>')
                     lines.append("")
             else:
                 question = self.questions[self.current_question_idx]
@@ -129,7 +118,7 @@ class SelectionPanel:
                 q_total = len(self.questions)
 
                 # Show only current question
-                lines.append(f"<b>Question {q_num}/{q_total}: {self._escape_html(question_text)}</b>")
+                lines.append(f"<b>Question {q_num}/{q_total}: {question_text}</b>")
                 lines.append("")
 
                 # Render options for current question only
@@ -139,14 +128,14 @@ class SelectionPanel:
 
                     if o_idx == self.selected_indices[self.current_question_idx]:
                         # Selected option - show cursor and highlight in bold white
-                        lines.append(f'<style fg="white" bold="true">{self._CURSOR}{self._escape_html(text)}</style>')
+                        lines.append(f'<style fg="white" bold="true">{self._CURSOR}{text}</style>')
                         if description:
-                            lines.append(f'<style fg="white">   {self._escape_html(description)}</style>')
+                            lines.append(f'<style fg="white">   {description}</style>')
                     else:
                         # Unselected option - dark grey
-                        lines.append(f'<style fg="gray">  {self._escape_html(text)}</style>')
+                        lines.append(f'<style fg="gray">  {text}</style>')
                         if description:
-                            lines.append(f'<style fg="gray">   {self._escape_html(description)}</style>')
+                            lines.append(f'<style fg="gray">   {description}</style>')
 
                 # Add help text
                 lines.append("")
@@ -156,8 +145,11 @@ class SelectionPanel:
 
 
 
-    def run(self) -> Optional[Union[str, List[str]]]:
+    def run(self, chat_manager=None) -> Optional[Union[str, List[str]]]:
         """Display the selection panel and wait for user input.
+
+        Args:
+            chat_manager: Optional ChatManager instance for toolbar display
 
         Returns:
             Single question mode: Selected value (str), or None if canceled
@@ -165,6 +157,17 @@ class SelectionPanel:
         """
         # Create key bindings for navigation
         bindings = KeyBindings()
+
+        # Shift+Tab binding for mode cycling
+        if chat_manager:
+            @bindings.add('s-tab')
+            def toggle_mode(event):
+                """Toggle between modes using Shift+Tab."""
+                if chat_manager.interaction_mode == "learn":
+                    chat_manager.cycle_learning_mode()
+                else:
+                    chat_manager.cycle_approve_mode()
+                event.app.invalidate()
 
         @bindings.add(Keys.Up)
         def move_up(event):
@@ -263,6 +266,8 @@ class SelectionPanel:
             full_screen=False,
             mouse_support=False,
             cursor=None,
+            style=TOOLBAR_STYLE,
+            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager) if chat_manager else None,
         )
 
         result = application.run()
@@ -307,7 +312,8 @@ class SelectionPanel:
     requires_approval=False
 )
 def select_option(
-    questions: List[Dict[str, Any]]
+    questions: List[Dict[str, Any]],
+    context: Dict[str, Any] = None
 ) -> str:
     """Present an inline selection panel to the user.
 
@@ -318,6 +324,7 @@ def select_option(
         questions: List of question objects, each containing:
             - question: The question text
             - options: List of option objects with value, text, and optional description
+        context: Tool execution context (contains chat_manager)
 
     Returns:
         str: Formatted tool result with exit_code and selected value(s):
@@ -359,8 +366,9 @@ def select_option(
                     return f"exit_code=1\nOption {opt_idx + 1} in question {q_idx + 1} must have 'value' and 'text' fields"
 
         # Create and run the selection panel
+        chat_manager = context.get("chat_manager") if context else None
         panel = SelectionPanel(questions)
-        result = panel.run()
+        result = panel.run(chat_manager=chat_manager)
 
         # Handle user cancellation
         if result is None:

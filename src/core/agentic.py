@@ -26,7 +26,8 @@ from tools import (
 )
 from utils.settings import tool_settings
 from utils.web_search import run_web_search
-from ui.prompt_utils import create_confirmation_prompt_session
+from utils.result_parsers import extract_exit_code
+from tools.task_list import _format_task_list
 from exceptions import (
     LLMError,
     LLMConnectionError,
@@ -34,20 +35,6 @@ from exceptions import (
     CommandExecutionError,
     FileEditError,
 )
-
-
-def _get_exit_code(tool_result):
-    if not isinstance(tool_result, str):
-        return None
-    first_line = tool_result.splitlines()[0] if tool_result else ""
-    if first_line.startswith("exit_code="):
-        try:
-            value = first_line.split("=", 1)[1].strip()
-            value = value.split()[0] if value else value
-            return int(value)
-        except ValueError:
-            return None
-    return None
 
 
 def _print_or_append(text, console, panel_updater, markup=True):
@@ -64,9 +51,6 @@ def _print_or_append(text, console, panel_updater, markup=True):
     else:
         console.print(text, markup=markup)
 
-
-MAX_TASKS = 50
-MAX_TASK_LEN = 200
 
 # File extension to Pygments lexer name mapping for syntax highlighting
 _LEXER_MAP = {
@@ -101,32 +85,6 @@ _LEXER_MAP = {
     'lua': 'lua',
     'r': 'r',
 }
-MAX_TASK_TITLE_LEN = 80
-
-
-def _format_task_list(task_list, title=None):
-    if not task_list:
-        return "exit_code=1\nerror: No task list exists. Use create_task_list first.\n\n"
-
-    safe_title = (title or "").strip() if isinstance(title, str) else ""
-    safe_title = safe_title[:MAX_TASK_TITLE_LEN] if safe_title else "untitled"
-
-    done_count = 0
-    lines = [f"Task list: {safe_title} (done={done_count} total={len(task_list)})"]
-
-    for i, task in enumerate(task_list):
-        is_done = bool(task.get("completed"))
-        if is_done:
-            done_count += 1
-        checkbox = "[x]" if is_done else "[ ]"
-        desc = str(task.get("description", ""))
-        if len(desc) > MAX_TASK_LEN:
-            desc = desc[:MAX_TASK_LEN - 3] + "..."
-        lines.append(f"{i}: {checkbox} {desc}")
-
-    # Update header with final done_count
-    lines[0] = f"Task list: {safe_title} (done={done_count} total={len(task_list)})"
-    return "\n".join(lines) + "\n\n"
 
 
 def _strip_leading_task_list_echo(content, task_list, title=None):
@@ -424,7 +382,7 @@ def _display_tool_feedback(command, tool_result, console, indent=False, panel_up
 
     # For task list tools: show the list (bounded by MAX_TASKS / MAX_TASK_LEN)
     if command.startswith(("create_task_list", "complete_task", "show_task_list")):
-        exit_code = _get_exit_code(tool_result)
+        exit_code = extract_exit_code(tool_result)
         if exit_code == 0 or exit_code is None:
             # Successful task list - display without exit_code line and without Rich markup parsing.
             rendered = tool_result
@@ -1244,7 +1202,21 @@ class AgenticOrchestrator:
             )
 
             if should_exit:
-                end_loop = True
+                # Cancel was selected - append this result and break immediately
+                if tool_result is not None and tool_result is not False:
+                    from rich.text import Text
+                    if isinstance(tool_result, Text):
+                        content_for_agent = f"exit_code=0\n{str(tool_result)}"
+                    else:
+                        content_for_agent = str(tool_result)
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": content_for_agent
+                    }
+                    self.chat_manager.messages.append(tool_msg)
+                    self.chat_manager.log_message(tool_msg)
+                return True  # Exit orchestration loop immediately
 
             # Append tool result if not skipped (guidance mode)
             if tool_result is not None and tool_result is not False:
@@ -1407,22 +1379,17 @@ class AgenticOrchestrator:
                                 if thinking_indicator:
                                     thinking_indicator.stop()
 
-                                # Create confirmation prompt session with toolbar
-                                prompt_session = create_confirmation_prompt_session(
-                                    self.chat_manager,
-                                    lambda: HTML("<b>Approve edit? (y/n/guidance): </b>")
-                                )
-
                                 action, guidance = confirm_tool(
                                     f"edit_file: {args_dict.get('path', '')}",
                                     self.console,
                                     reason=args_dict.get('reason', 'Apply file edit with above changes'),
                                     requires_approval=True,
-                                    prompt_session=prompt_session,
-                                    approve_mode=self.chat_manager.approve_mode
+                                    approve_mode=self.chat_manager.approve_mode,
+                                    is_edit_tool=True,
+                                    cycle_approve_mode=lambda: self.chat_manager.cycle_approve_mode()
                                 )
 
-                                if action == "execute":
+                                if action == "accept":
                                     # User approved - execute the edit
                                     from tools.edit import _execute_edit_file
                                     final_result = _execute_edit_file(
@@ -1440,14 +1407,16 @@ class AgenticOrchestrator:
                                         result.result = '\n'.join(final_lines).strip()
                                     else:
                                         result.result = final_result
-                                elif action == "reject":
-                                    result.result = "exit_code=1\nEdit rejected by user."
-                                    # Show rejection to user
-                                    self.console.print("[dim]Edit rejected by user.[/dim]")
-                                elif action == "guide":
-                                    result.result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
-                                    # Show guidance to user
-                                    self.console.print(f"[dim]Edit not applied. User guidance: {guidance}[/dim]")
+                                elif action == "advise":
+                                    result.result = f"exit_code=1\nEdit not applied. User advice: {guidance}"
+                                    # Show advise to user
+                                    self.console.print(f"[dim]Edit not applied. User advice: {guidance}[/dim]")
+                                elif action == "cancel":
+                                    result.result = "exit_code=1\nOperation canceled by user. Do not retry this operation."
+                                    # Show cancel to user
+                                    self.console.print("[dim]Operation canceled by user.[/dim]")
+                                    # Set should_exit to break the agentic loop
+                                    result.should_exit = True
 
                                 # Restart thinking indicator after user input
                                 if thinking_indicator:
@@ -1468,21 +1437,16 @@ class AgenticOrchestrator:
                                 if thinking_indicator:
                                     thinking_indicator.stop()
 
-                                # Create confirmation prompt session with toolbar
-                                prompt_session = create_confirmation_prompt_session(
-                                    self.chat_manager,
-                                    lambda: HTML("<b>Approve edit? (y/n/guidance): </b>")
-                                )
-
                                 action, guidance = confirm_tool(
                                     f"edit_file: {args_dict.get('path', '')}",
                                     self.console,
                                     reason=args_dict.get('reason', 'Apply file edit with above changes'),
                                     requires_approval=True,
-                                    prompt_session=prompt_session
+                                    is_edit_tool=True,
+                                    cycle_approve_mode=lambda: self.chat_manager.cycle_approve_mode()
                                 )
 
-                                if action == "execute":
+                                if action == "accept":
                                     # User approved - execute the edit
                                     from tools.edit import _execute_edit_file
                                     final_result = _execute_edit_file(
@@ -1500,14 +1464,16 @@ class AgenticOrchestrator:
                                         result.result = '\n'.join(final_lines).strip()
                                     else:
                                         result.result = final_result
-                                elif action == "reject":
-                                    result.result = "exit_code=1\nEdit rejected by user."
-                                    # Show rejection to user
-                                    self.console.print("[dim]Edit rejected by user.[/dim]")
-                                elif action == "guide":
-                                    result.result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
-                                    # Show guidance to user
-                                    self.console.print(f"[dim]Edit not applied. User guidance: {guidance}[/dim]")
+                                elif action == "advise":
+                                    result.result = f"exit_code=1\nEdit not applied. User advice: {guidance}"
+                                    # Show advise to user
+                                    self.console.print(f"[dim]Edit not applied. User advice: {guidance}[/dim]")
+                                elif action == "cancel":
+                                    result.result = "exit_code=1\nOperation canceled by user. Do not retry this operation."
+                                    # Show cancel to user
+                                    self.console.print("[dim]Operation canceled by user.[/dim]")
+                                    # Set should_exit to break the agentic loop
+                                    result.should_exit = True
 
                                 # Restart thinking indicator after user input
                                 if thinking_indicator:
@@ -1666,22 +1632,17 @@ class AgenticOrchestrator:
                                 if thinking_indicator:
                                     thinking_indicator.stop()
 
-                                # Create confirmation prompt session with toolbar
-                                prompt_session = create_confirmation_prompt_session(
-                                    self.chat_manager,
-                                    lambda: HTML("<b>Approve edit? (y/n/guidance): </b>")
-                                )
-
                                 action, guidance = confirm_tool(
                                     f"edit_file: {arguments.get('path', '')}",
                                     console,
                                     reason=arguments.get('reason', 'Apply file edit with above changes'),
                                     requires_approval=True,
-                                    prompt_session=prompt_session,
-                                    approve_mode=self.chat_manager.approve_mode
+                                    approve_mode=self.chat_manager.approve_mode,
+                                    is_edit_tool=True,
+                                    cycle_approve_mode=lambda: self.chat_manager.cycle_approve_mode()
                                 )
 
-                                if action == "execute":
+                                if action == "accept":
                                     # User approved - execute the edit
                                     from tools.edit import _execute_edit_file
                                     result = _execute_edit_file(
@@ -1691,20 +1652,22 @@ class AgenticOrchestrator:
                                         repo_root=self.repo_root,
                                         console=console,
                                         gitignore_spec=self.gitignore_spec,
-                                        context_lines=arguments.get('context_lines', 3)
+                                        context_lines=arguments.get('context_lines',3)
                                     )
                                     # Strip exit_code line from final result before displaying
                                     if result and isinstance(result, str):
                                         result_lines = [line for line in result.split('\n') if not line.startswith('exit_code=')]
                                         result = '\n'.join(result_lines).strip()
-                                elif action == "reject":
-                                    result = "exit_code=1\nEdit rejected by user."
-                                    # Show rejection to user
-                                    console.print("[dim]Edit rejected by user.[/dim]")
-                                elif action == "guide":
-                                    result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
-                                    # Show guidance to user
-                                    console.print(f"[dim]Edit not applied. User guidance: {guidance}[/dim]")
+                                elif action == "advise":
+                                    result = f"exit_code=1\nEdit not applied. User advice: {guidance}"
+                                    # Show advise to user
+                                    console.print(f"[dim]Edit not applied. User advice: {guidance}[/dim]")
+                                elif action == "cancel":
+                                    result = "exit_code=1\nOperation canceled by user. Do not retry this operation."
+                                    # Show cancel to user
+                                    console.print("[dim]Operation canceled by user.[/dim]")
+                                    # Break the agentic loop entirely
+                                    return True, result
 
                                 # Restart thinking indicator after user input
                                 if thinking_indicator:
@@ -1725,22 +1688,17 @@ class AgenticOrchestrator:
                                 if thinking_indicator:
                                     thinking_indicator.stop()
 
-                                # Create confirmation prompt session with toolbar
-                                prompt_session = create_confirmation_prompt_session(
-                                    self.chat_manager,
-                                    lambda: HTML("<b>Approve edit? (y/n/guidance): </b>")
-                                )
-
                                 action, guidance = confirm_tool(
                                     f"edit_file: {arguments.get('path', '')}",
                                     console,
                                     reason=arguments.get('reason', 'Apply file edit with above changes'),
                                     requires_approval=True,
-                                    prompt_session=prompt_session,
-                                    approve_mode=self.chat_manager.approve_mode
+                                    approve_mode=self.chat_manager.approve_mode,
+                                    is_edit_tool=True,
+                                    cycle_approve_mode=lambda: self.chat_manager.cycle_approve_mode()
                                 )
 
-                                if action == "execute":
+                                if action == "accept":
                                     # User approved - execute the edit
                                     from tools.edit import _execute_edit_file
                                     result = _execute_edit_file(
@@ -1756,16 +1714,18 @@ class AgenticOrchestrator:
                                     if result and isinstance(result, str):
                                         result_lines = [line for line in result.split('\n') if not line.startswith('exit_code=')]
                                         result = '\n'.join(result_lines).strip()
-                                elif action == "reject":
-                                    result = "exit_code=1\nEdit rejected by user."
-                                    # Show rejection to user
+                                elif action == "advise":
+                                    result = f"exit_code=1\nEdit not applied. User advice: {guidance}"
+                                    # Show advise to user
                                     if console:
-                                        console.print("[dim]Edit rejected by user.[/dim]")
-                                elif action == "guide":
-                                    result = f"exit_code=1\nEdit not applied. User guidance: {guidance}"
-                                    # Show guidance to user
+                                        console.print(f"[dim]Edit not applied. User advice: {guidance}[/dim]")
+                                elif action == "cancel":
+                                    result = "exit_code=1\nOperation canceled by user. Do not retry this operation."
+                                    # Show cancel to user
                                     if console:
-                                        console.print(f"[dim]Edit not applied. User guidance: {guidance}[/dim]")
+                                        console.print("[dim]Operation canceled by user.[/dim]")
+                                    # Break the agentic loop entirely
+                                    return True, result
 
                                 # Restart thinking indicator after user input
                                 if thinking_indicator:
@@ -1800,26 +1760,21 @@ class AgenticOrchestrator:
                             if thinking_indicator:
                                 thinking_indicator.stop()
 
-                            # Create confirmation prompt session with toolbar
-                            prompt_session = create_confirmation_prompt_session(
-                                self.chat_manager,
-                                lambda: HTML("<b>Approve command? (y/n/guidance): </b>")
-                            )
-
                             action, guidance = confirm_tool(
                                 f"execute_command: {command[:80]}{'...' if len(command) > 80 else ''}",
                                 console,
                                 reason=arguments.get('reason', 'Execute shell command'),
-                                requires_approval=True,
-                                prompt_session=prompt_session
+                                requires_approval=True
                             )
 
-                            if action == "execute":
+                            if action == "accept":
                                 result = tool.execute(arguments, context)
-                            elif action == "reject":
-                                result = "Command rejected by user."
-                            elif action == "guide":
-                                result = f"Command not executed. User guidance: {guidance}"
+                            elif action == "advise":
+                                result = f"Command not executed. User advice: {guidance}"
+                            elif action == "cancel":
+                                result = "Command canceled by user. Do not retry this operation."
+                                # Break the agentic loop entirely
+                                return True, result
 
                             # Restart thinking indicator after user input
                             if thinking_indicator:

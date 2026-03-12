@@ -10,6 +10,9 @@ from .shell import (
     run_shell_command,
 )
 
+# UI components
+from ui.tool_confirmation import ToolConfirmationPanel
+
 # File editing (now in edit.py)
 from .edit import (
     _resolve_repo_path,
@@ -51,6 +54,8 @@ __all__ = [
     # Command execution
     'confirm_tool',
     'run_shell_command',
+    # UI components
+    'ToolConfirmationPanel',
     # File editing
     '_resolve_repo_path',
     'preview_edit_file',

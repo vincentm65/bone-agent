@@ -35,26 +35,6 @@ class TokenTracker:
         self.conv_prompt_tokens += prompt_tokens
         self.conv_completion_tokens += completion_tokens
         self.conv_total_tokens += prompt_tokens + completion_tokens
-    def add_tool_call_usage(self, prompt_tokens=0, completion_tokens=0):
-        """Add token usage from tool calls.
-
-        Args:
-            prompt_tokens: Additional prompt tokens from tool calls
-            completion_tokens: Additional completion tokens from tool calls
-
-        DEPRECATED: Use add_usage({'prompt_tokens': X, 'completion_tokens': Y}) instead.
-        """
-        import warnings
-        warnings.warn(
-            "add_tool_call_usage() is deprecated, use add_usage() instead",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        self.add_usage({
-            'prompt_tokens': prompt_tokens,
-            'completion_tokens': completion_tokens
-        })
-
     def get_session_summary(self):
         """Return formatted session usage summary string."""
         return (

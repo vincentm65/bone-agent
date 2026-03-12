@@ -64,7 +64,7 @@ def display_startup_banner(approve_mode: str, interaction_mode: str = "edit"):
     # Add content
     grid.add_row(
         Text("vmCode", style="bold white"),
-        Text("v1.0.0", style="dim white")
+        Text("v1.0.3", style="dim white")
     )
 
     model_info = Text.assemble(

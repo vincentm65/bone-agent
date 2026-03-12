@@ -42,68 +42,45 @@ def normalize_command(command, rg_exe_path):
     return None, command, True
 
 
-def confirm_tool(command, console, reason=None, requires_approval=True, prompt_session=None, approve_mode="safe"):
+def confirm_tool(command, console, reason=None, requires_approval=True, approve_mode="safe", use_panel=True, is_edit_tool=False, cycle_approve_mode=None):
     """Prompt user for tool execution confirmation.
 
     Args:
         command: Command to execute
-        console: Rich console for output
+        console: Rich console for output (currently unused, kept for compatibility)
         reason: Optional reason for requiring confirmation
         requires_approval: Whether this command specifically requires approval (overrides global flag when True)
-        prompt_session: PromptSession instance for input (optional, for Linux compatibility)
         approve_mode: Approval mode setting - "safe" requires confirmation, "accept_edits" auto-approves edits
+        use_panel: When True, display interactive confirmation panel. When False, auto-cancel without UI (default: True)
+        is_edit_tool: Whether this is an edit tool (shows extra toggle option in panel)
+        cycle_approve_mode: Optional callback to cycle approve_mode
 
     Returns:
-        tuple: (action, guidance_text) where action is "execute", "reject", or "guide"
-               and guidance_text contains the user's input when action is "guide"
+        tuple: (action, guidance_text) where action is "accept", "advise", or "cancel"
+               and guidance_text contains the user's input when action is "advise"
     """
     # Skip confirmation only if: global flag is off AND command doesn't require approval
     if not TOOLS_REQUIRE_CONFIRMATION and not requires_approval:
-        return ("execute", None)
+        return ("accept", None)
 
     # Skip confirmation for edit operations in accept_edits mode
     # This only applies to file edits, not execute_command
     if approve_mode == "accept_edits" and requires_approval and "edit_file" in command:
-        return ("execute", None)
+        return ("accept", None)
 
     # Handle case where console is None (e.g., parallel execution)
     if console is None:
-        # Reject by default when console is unavailable
-        return ("reject", None)
+        # Cancel by default when console is unavailable
+        return ("cancel", None)
 
-    # Simple title line with tool details
-    console.print("[cyan]───[/] Tool Confirmation [cyan]───[/]")
-    if reason:
-        console.print(f"Tool request: {command}")
-        console.print(f"Details: {reason}")
-    else:
-        console.print(f"Tool request: {command}")
+    # Try to use interactive panel
+    if use_panel:
+        from ui.tool_confirmation import ToolConfirmationPanel
+        panel = ToolConfirmationPanel(command, reason, is_edit_tool=is_edit_tool, cycle_approve_mode=cycle_approve_mode)
+        return panel.run()
 
-    try:
-        # Use prompt_session.prompt() if available (for Linux compatibility)
-        if prompt_session:
-            response = prompt_session.prompt("Approve tool? (y/n/guidance): ").strip()
-        else:
-            response = input("Approve tool? (y/n/guidance): ").strip()
-    except (EOFError, OSError):
-        # stdin not available - reject command by default
-        if console is not None:
-            console.print("[red]User input not available - command rejected[/red]")
-        return ("reject", None)
-
-    if console is not None:
-        console.print()
-
-    # Empty input (just pressed Enter) means do nothing
-    if not response:
-        return ("reject", None)
-    
-    if response.lower() in ("y", "yes"):
-        return ("execute", None)
-    elif response.lower() in ("n", "no"):
-        return ("reject", None)
-    else:
-        return ("guide", response)
+    # Cancel by default if panel is disabled or fails
+    return ("cancel", None)
 
 
 def _prepare_execution_environment(repo_root, rg_exe_path):
