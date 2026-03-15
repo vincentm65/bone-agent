@@ -5,6 +5,17 @@ import re
 import difflib
 from rich.text import Text
 
+# Import constants module to access centralized values
+try:
+    from ..constants import (
+        DEFAULT_TERMINAL_WIDTH,
+        FORMATTER_MAX_LINES,
+    )
+except ImportError:
+    # Fallback for standalone usage
+    DEFAULT_TERMINAL_WIDTH = 80
+    FORMATTER_MAX_LINES = 100
+
 
 def _detect_newline(text):
     """Detect the newline character used in text."""
@@ -29,7 +40,7 @@ def _colorize_numbered_lines(lines, file_path=None):
     try:
         terminal_width = os.get_terminal_size().columns
     except (OSError, AttributeError):
-        terminal_width = 80  # Fallback default
+        terminal_width = DEFAULT_TERMINAL_WIDTH  # Fallback default
 
     result = Text()
     for line in lines:
@@ -210,7 +221,7 @@ def format_tool_result(result, command=None, is_rg=False, debug_mode=False):
     # For rg commands, apply smart truncation to prevent context explosion
     if is_rg:
         label = "files" if command and "--files-with-matches" in command.lower() else "matches"
-        MAX_LINES = 100  # Maximum lines of output to show
+        MAX_LINES = FORMATTER_MAX_LINES
 
         # Exit code 0: found matches, Exit code 1: no matches
         if result.returncode == 1:

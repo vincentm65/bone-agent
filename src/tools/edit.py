@@ -8,6 +8,7 @@ from exceptions import PathValidationError, FileEditError
 from rich.text import Text
 
 from .helpers.base import tool
+from .helpers.path_resolver import PathResolver
 from .helpers.formatters import _build_diff, _detect_newline, _normalize_search_replace_for_newlines
 
 
@@ -137,6 +138,9 @@ def _find_unique_span_with_fallbacks(content, search_text):
 def _resolve_repo_path(path_str, repo_root, gitignore_spec=None):
     """Resolve and validate a path for editing.
 
+    This function wraps PathResolver.resolve_and_validate() for the edit tool's
+    specific needs, adding file type validation.
+
     Args:
         path_str: Path string to resolve
         repo_root: Repository root directory
@@ -148,25 +152,27 @@ def _resolve_repo_path(path_str, repo_root, gitignore_spec=None):
     Raises:
         PathValidationError: If path is invalid or blocked by .gitignore
     """
-    raw_path = Path(path_str)
-    if not raw_path.is_absolute():
-        raw_path = repo_root / raw_path
-    resolved = raw_path.resolve()
+    # Use PathResolver for centralized validation
+    resolver = PathResolver(repo_root=repo_root, gitignore_spec=gitignore_spec)
+    resolved, error = resolver.resolve_and_validate(
+        path_str,
+        check_gitignore=True,
+        must_exist=True,
+        must_be_file=False  # We'll check this separately
+    )
 
-    # Check .gitignore (only applies to paths within repo)
-    if gitignore_spec is not None:
-        from utils.gitignore_filter import is_path_ignored, format_gitignore_error
-
-        is_ignored, matched_pattern = is_path_ignored(
-            resolved, repo_root, gitignore_spec
+    if error:
+        raise PathValidationError(
+            error,
+            details={"path": path_str}
         )
-        if is_ignored:
-            # Create descriptive error
-            error_msg = format_gitignore_error(resolved, repo_root, matched_pattern)
-            raise PathValidationError(
-                f"Path blocked by .gitignore: {error_msg}",
-                details={"path": str(resolved), "pattern": matched_pattern}
-            )
+
+    # Additional validation: path must be a file for editing
+    if not resolved.is_file():
+        raise PathValidationError(
+            f"Path is not a file: {resolved}",
+            details={"path": str(resolved)}
+        )
 
     return resolved
 
@@ -190,7 +196,7 @@ def _prepare_edit(arguments, repo_root, gitignore_spec=None) -> tuple[str, dict]
     if not path or not isinstance(path, str) or not path.strip():
         raise FileEditError("Missing or invalid 'path' parameter")
 
-    # Use updated _resolve_repo_path with gitignore checking
+    # Resolve and validate path using PathResolver
     try:
         file_path = _resolve_repo_path(path, repo_root, gitignore_spec)
     except PathValidationError as e:

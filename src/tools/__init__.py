@@ -33,6 +33,9 @@ from .directory import list_directory
 from .create_file import create_file
 from .file_reader import read_file
 
+# Constants
+from . import constants
+
 # Tool definitions
 # Import tool modules to trigger @tool decorator registration
 # These modules register themselves when imported
@@ -69,6 +72,8 @@ __all__ = [
     'read_file',
     'list_directory',
     'create_file',
+    # Constants
+    'constants',
     # Tool definitions
     'TOOLS',
     '_tools_for_mode',
@@ -117,18 +122,22 @@ sys.modules['tools.formatters'] = _formatters_module
 
 _file_helpers_module = ModuleType('tools.file_helpers')
 from .helpers.file_helpers import (
-    _is_fast_ignored,
-    _is_ignored_cached,
-    _register_gitignore_spec,
     _is_reserved_windows_name,
+    GitignoreFilter,
 )
 _file_helpers_module.__dict__.update({
-    '_is_fast_ignored': _is_fast_ignored,
-    '_is_ignored_cached': _is_ignored_cached,
-    '_register_gitignore_spec': _register_gitignore_spec,
     '_is_reserved_windows_name': _is_reserved_windows_name,
+    'GitignoreFilter': GitignoreFilter,
 })
 sys.modules['tools.file_helpers'] = _file_helpers_module
+
+# Path resolver module
+_path_resolver_module = ModuleType('tools.path_resolver')
+from .helpers.path_resolver import PathResolver
+_path_resolver_module.__dict__.update({
+    'PathResolver': PathResolver,
+})
+sys.modules['tools.path_resolver'] = _path_resolver_module
 
 _converters_module = ModuleType('tools.converters')
 from .helpers.converters import coerce_int, coerce_bool

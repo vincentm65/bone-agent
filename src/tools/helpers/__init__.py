@@ -22,11 +22,12 @@ from .base import (
 
 # File operation helpers
 from .file_helpers import (
-    _is_fast_ignored,
-    _is_ignored_cached,
-    _register_gitignore_spec,
     _is_reserved_windows_name,
+    GitignoreFilter,
 )
+
+# Path resolution helpers
+from .path_resolver import PathResolver
 
 # Result formatting helpers
 from .formatters import (
@@ -70,10 +71,10 @@ __all__ = [
     'TOOLS',
     '_tools_for_mode',
     # File operation helpers
-    '_is_fast_ignored',
-    '_is_ignored_cached',
-    '_register_gitignore_spec',
     '_is_reserved_windows_name',
+    'GitignoreFilter',
+    # Path resolution helpers
+    'PathResolver',
     # Result formatting helpers
     'format_tool_result',
     'format_file_result',

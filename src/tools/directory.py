@@ -6,17 +6,10 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
 from .helpers.base import tool
-from .helpers.file_helpers import (
-    _is_fast_ignored,
-    _is_ignored_cached,
-    _register_gitignore_spec
-)
+from .helpers.path_resolver import PathResolver
+from .helpers.file_helpers import GitignoreFilter
 from .helpers.formatters import format_file_result
-
-# Directory listing truncation thresholds
-TRUNCATION_THRESHOLD = 100  # Total items to trigger truncation
-MAX_FILES_PER_FOLDER = 10   # Max files to show per folder when truncating
-MAX_TOTAL_ITEMS = 500       # Hard upper limit for total items to collect (prevents context explosion)
+from . import constants
 
 
 def _group_items_by_directory(items, show_files, show_dirs) -> Dict:
@@ -74,7 +67,7 @@ def _apply_smart_truncation(items, show_files, show_dirs, hit_limit=False) -> Tu
     total_count = len(items)
 
     # Fast path: no truncation needed
-    if total_count < TRUNCATION_THRESHOLD:
+    if total_count < constants.TRUNCATION_THRESHOLD:
         return items, None
 
     # Group items by parent directory
@@ -99,7 +92,7 @@ def _apply_smart_truncation(items, show_files, show_dirs, hit_limit=False) -> Tu
         if show_files and group['files']:
             # Sort files alphabetically and take top N
             sorted_files = sorted(group['files'], key=lambda x: x[1])  # Sort by rel_path
-            files_to_show = sorted_files[:MAX_FILES_PER_FOLDER]
+            files_to_show = sorted_files[:constants.MAX_FILES_PER_FOLDER]
             truncated_items.extend(files_to_show)
 
             total_files_shown += len(files_to_show)
@@ -125,45 +118,29 @@ def _validate_directory_path(
 ) -> Tuple[Optional[Path], Optional[str]]:
     """Validate and resolve path for directory listing.
 
+    This function wraps PathResolver.resolve_and_validate() for the directory
+    tool's specific needs, ensuring the path is a directory.
+
     Args:
         path_str: Path string to validate
         repo_root: Repository root directory
 
     Returns:
         (resolved_path, error_message) - error_message is None if valid
-
-    Checks:
-    - Path resolution
-    - Path exists
-    - Path is a directory (not a file)
     """
-    try:
-        # Resolve path
-        raw_path = Path(path_str)
-        if not raw_path.is_absolute():
-            # If path is "." or "..", resolve relative to repo_root
-            if path_str == ".":
-                resolved = repo_root.resolve()
-            elif path_str == "..":
-                resolved = repo_root.parent.resolve()
-            else:
-                raw_path = repo_root / raw_path
-                resolved = raw_path.resolve()
-        else:
-            resolved = raw_path.resolve()
+    # Use PathResolver for centralized validation
+    resolver = PathResolver(repo_root=repo_root, gitignore_spec=None)
+    resolved, error = resolver.resolve_and_validate(
+        path_str,
+        check_gitignore=False,  # Directory listing shows everything
+        must_exist=True,
+        must_be_dir=True  # Must be a directory
+    )
 
-        # Check if it exists
-        if not resolved.exists():
-            return None, "Directory not found"
+    if error:
+        return None, error
 
-        # Check if it's a file (user error, show helpful message)
-        if resolved.is_file():
-            return None, "Path is a file, not a directory. Use read_file instead."
-
-        return resolved, None
-
-    except Exception as e:
-        return None, str(e)
+    return resolved, None
 
 
 @tool(
@@ -223,25 +200,23 @@ def list_directory(
                 return True
             return fnmatch.fnmatch(rel_path.as_posix(), pattern)
 
-        spec_key = _register_gitignore_spec(gitignore_spec) if gitignore_spec is not None else 0
+        # Create gitignore filter if spec is provided
+        gitignore_filter = GitignoreFilter(repo_root=repo_root, gitignore_spec=gitignore_spec) if gitignore_spec else None
 
         def _is_ignored(path: Path) -> bool:
             if path.name == ".gitignore":
                 return True
             if ".git" in path.parts:
                 return True
-            if gitignore_spec is None:
+            if gitignore_filter is None:
                 return False
-            # Fast-path check first
-            if _is_fast_ignored(path):
-                return True
-            # Use cached gitignore check
-            return _is_ignored_cached(str(path), str(repo_root), spec_key)
+            # Use GitignoreFilter for consistent behavior
+            return gitignore_filter.is_ignored(path)
 
         # Collect items
         items = []
         base_dir = resolved
-        hit_limit = False  # Track if we hit MAX_TOTAL_ITEMS
+        hit_limit = False  # Track if we hit constants.MAX_TOTAL_ITEMS
 
         def _count_lines(file_path: Path) -> int:
             """Count lines in a file efficiently."""
@@ -261,7 +236,7 @@ def list_directory(
                 return
             if hit_limit:
                 return
-            if len(items) >= MAX_TOTAL_ITEMS:
+            if len(items) >= constants.MAX_TOTAL_ITEMS:
                 hit_limit = True
                 return
             items.append((kind, str(rel_path), size_str, raw_path, line_count))
@@ -366,7 +341,7 @@ def list_directory(
             lines.append("")
             msg = f"[{truncation_info['files_omitted']} file(s) omitted ({truncation_info['shown']} shown from {truncation_info['total']} total items)]"
             if hit_limit:
-                msg += f"\n[WARNING: Listing stopped at {MAX_TOTAL_ITEMS} items to prevent context overflow. Use filters or specific paths to explore further.]"
+                msg += f"\n[WARNING: Listing stopped at {constants.MAX_TOTAL_ITEMS} items to prevent context overflow. Use filters or specific paths to explore further.]"
             lines.append(msg)
 
         content = "\n".join(lines)
@@ -374,7 +349,7 @@ def list_directory(
         # Update truncation info to indicate if we hit the hard limit
         if truncation_info and hit_limit:
             truncation_info['hit_limit'] = True
-            truncation_info['max_items'] = MAX_TOTAL_ITEMS
+            truncation_info['max_items'] = constants.MAX_TOTAL_ITEMS
 
         return format_file_result(
             exit_code=0,

@@ -8,10 +8,7 @@ from typing import Optional, List
 
 from .helpers.base import tool
 from .helpers.converters import coerce_int
-
-MAX_TASKS = 50
-MAX_TASK_LEN = 200
-MAX_TASK_TITLE_LEN = 80
+from . import constants
 
 
 def _format_task_list(task_list, title=None):
@@ -28,7 +25,7 @@ def _format_task_list(task_list, title=None):
         return "exit_code=1\nerror: No task list exists. Use create_task_list first.\n\n"
 
     safe_title = (title or "").strip() if isinstance(title, str) else ""
-    safe_title = safe_title[:MAX_TASK_TITLE_LEN] if safe_title else "untitled"
+    safe_title = safe_title[:constants.MAX_TASK_TITLE_LEN] if safe_title else "untitled"
 
     done_count = 0
     lines = [f"Task list: {safe_title} (done={done_count} total={len(task_list)})"]
@@ -39,8 +36,8 @@ def _format_task_list(task_list, title=None):
             done_count += 1
         checkbox = "[x]" if is_done else "[ ]"
         desc = str(task.get("description", ""))
-        if len(desc) > MAX_TASK_LEN:
-            desc = desc[:MAX_TASK_LEN - 3] + "..."
+        if len(desc) > constants.MAX_TASK_LEN:
+            desc = desc[:constants.MAX_TASK_LEN - 3] + "..."
         lines.append(f"{i}: {checkbox} {desc}")
 
     # Update header with final done_count
@@ -94,7 +91,7 @@ def create_task_list(
         return "exit_code=1\nerror: 'title' must be a string.\n\n"
     title = title.strip() if isinstance(title, str) else None
     if title:
-        title = title[:MAX_TASK_TITLE_LEN]
+        title = title[:constants.MAX_TASK_TITLE_LEN]
 
     # Normalize tasks
     normalized = []
@@ -104,16 +101,16 @@ def create_task_list(
         trimmed = task.strip()
         if not trimmed:
             return f"exit_code=1\nerror: Task at index {i} must be non-empty.\n\n"
-        if len(trimmed) > MAX_TASK_LEN:
+        if len(trimmed) > constants.MAX_TASK_LEN:
             return (
-                f"exit_code=1\nerror: Task at index {i} exceeds MAX_TASK_LEN={MAX_TASK_LEN}.\n\n"
+                f"exit_code=1\nerror: Task at index {i} exceeds MAX_TASK_LEN={constants.MAX_TASK_LEN}.\n\n"
             )
         normalized.append(trimmed)
 
     if len(normalized) == 0:
         return "exit_code=1\nerror: Provide at least one non-empty task.\n\n"
-    if len(normalized) > MAX_TASKS:
-        return f"exit_code=1\nerror: Too many tasks (max {MAX_TASKS}).\n\n"
+    if len(normalized) > constants.MAX_TASKS:
+        return f"exit_code=1\nerror: Too many tasks (max {constants.MAX_TASKS}).\n\n"
 
     # Set task list on chat_manager
     chat_manager.task_list = [

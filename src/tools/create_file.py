@@ -6,12 +6,7 @@ from typing import Optional, Tuple
 
 from utils.settings import MAX_FILE_PREVIEW_LINES
 from .helpers.base import tool
-from .helpers.file_helpers import (
-    _is_fast_ignored,
-    _is_ignored_cached,
-    _register_gitignore_spec,
-    _is_reserved_windows_name
-)
+from .helpers.path_resolver import PathResolver
 from .helpers.formatters import format_file_result
 
 
@@ -29,42 +24,13 @@ def _validate_create_path(
 
     Returns:
         (resolved_path, error_message) - error_message is None if valid
-
-    Checks:
-    - Windows filename validation (invalid chars, reserved names)
-    - Path resolution
-    - Gitignore filtering (only within repo)
     """
-    try:
-        # Windows validation
-        if os.name == 'nt':
-            invalid_chars = '<>:"|?*'
-            if any(char in path_str for char in invalid_chars):
-                return None, f"Filename contains invalid characters: {invalid_chars}"
-
-            filename = Path(path_str).name
-            if _is_reserved_windows_name(filename):
-                return None, f"Filename is a reserved Windows device name: {filename}"
-
-        # Resolve path
-        raw_path = Path(path_str)
-        if not raw_path.is_absolute():
-            raw_path = repo_root / raw_path
-        resolved = raw_path.resolve()
-
-        # Check gitignore (only applies to paths within repo)
-        if gitignore_spec is not None:
-            if _is_fast_ignored(resolved):
-                return None, f"File blocked by .gitignore: {resolved.relative_to(repo_root)}"
-
-            spec_key = _register_gitignore_spec(gitignore_spec)
-            if _is_ignored_cached(str(resolved), str(repo_root), spec_key):
-                return None, f"File blocked by .gitignore: {resolved.relative_to(repo_root)}"
-
-        return resolved, None
-
-    except Exception as e:
-        return None, str(e)
+    resolver = PathResolver(repo_root=repo_root, gitignore_spec=gitignore_spec)
+    return resolver.resolve_and_validate(
+        path_str,
+        check_gitignore=True,
+        must_exist=False  # File doesn't need to exist yet
+    )
 
 
 @tool(

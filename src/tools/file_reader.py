@@ -5,13 +5,9 @@ from pathlib import Path
 from typing import Optional, Dict, Tuple
 
 from .helpers.base import tool
-from .helpers.file_helpers import (
-    _is_fast_ignored,
-    _is_ignored_cached,
-    _register_gitignore_spec,
-    _is_reserved_windows_name
-)
+from .helpers.path_resolver import PathResolver
 from .helpers.formatters import format_file_result
+from . import constants
 
 
 def _validate_read_path(
@@ -28,51 +24,14 @@ def _validate_read_path(
 
     Returns:
         (resolved_path, error_message) - error_message is None if valid
-
-    Checks:
-    - Windows filename validation (invalid chars, reserved names)
-    - Path resolution (absolute vs relative)
-    - Gitignore filtering (only within repo)
-    - Path exists and is a file (not directory)
     """
-    try:
-        # Validate filename for invalid characters
-        if os.name == 'nt':  # Windows-specific validation
-            # Check for invalid characters (includes quotes, brackets that appear in JSON)
-            invalid_chars = '<>:"|?*[]{}"\n\r\t'
-            if any(char in path_str for char in invalid_chars):
-                return None, f"Filename contains invalid characters: {invalid_chars}"
-
-            # Check for reserved device names
-            filename = Path(path_str).name
-            if _is_reserved_windows_name(filename):
-                return None, f"Filename is a reserved Windows device name: {filename}"
-
-        # Resolve path
-        raw_path = Path(path_str)
-        if not raw_path.is_absolute():
-            raw_path = repo_root / raw_path
-        resolved = raw_path.resolve()
-
-        # Check .gitignore (only applies to paths within repo)
-        if gitignore_spec is not None:
-            # Fast-path check first
-            if _is_fast_ignored(resolved):
-                return None, f"File blocked by .gitignore"
-
-            # Use cached gitignore check
-            spec_key = _register_gitignore_spec(gitignore_spec)
-            if _is_ignored_cached(str(resolved), str(repo_root), spec_key):
-                return None, f"File blocked by .gitignore"
-
-        # Check if it's a directory
-        if resolved.is_dir():
-            return None, "Path is a directory, not a file. Use list_directory instead."
-
-        return resolved, None
-
-    except Exception as e:
-        return None, str(e)
+    resolver = PathResolver(repo_root=repo_root, gitignore_spec=gitignore_spec)
+    return resolver.resolve_and_validate(
+        path_str,
+        check_gitignore=True,
+        must_exist=True,
+        must_be_file=True
+    )
 
 
 def _validate_start_line(start_line: Optional[int]) -> int:
@@ -160,8 +119,8 @@ def _read_partial_file(file_path: Path, start_line: int, max_lines: int) -> Dict
     lines = []
     truncated = False
     lines_read = 0
-    chunk_size = 8192  # 8KB chunks for efficient streaming
-    max_buffer_size = 10_000_000  # 10MB limit to handle pathological files (very long single lines)
+    chunk_size = constants.FILE_READ_CHUNK_SIZE
+    max_buffer_size = constants.FILE_READ_MAX_BUFFER_SIZE
 
     # Use universal newlines so all newline types normalize to '\n' for parsing.
     with file_path.open("r", encoding="utf-8", errors="replace", newline=None) as f:
