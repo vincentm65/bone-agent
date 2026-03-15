@@ -11,7 +11,7 @@ from prompt_toolkit.layout import Layout, HSplit, Window
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.layout.controls import FormattedTextControl
 
-from ui.prompt_utils import get_bottom_toolbar_text, TOOLBAR_STYLE
+from ui.prompt_utils import TOOLBAR_STYLE
 
 from .helpers.base import tool
 
@@ -145,11 +145,8 @@ class SelectionPanel:
 
 
 
-    def run(self, chat_manager=None) -> Optional[Union[str, List[str]]]:
+    def run(self) -> Optional[Union[str, List[str]]]:
         """Display the selection panel and wait for user input.
-
-        Args:
-            chat_manager: Optional ChatManager instance for toolbar display
 
         Returns:
             Single question mode: Selected value (str), or None if canceled
@@ -157,17 +154,6 @@ class SelectionPanel:
         """
         # Create key bindings for navigation
         bindings = KeyBindings()
-
-        # Shift+Tab binding for mode cycling
-        if chat_manager:
-            @bindings.add('s-tab')
-            def toggle_mode(event):
-                """Toggle between modes using Shift+Tab."""
-                if chat_manager.interaction_mode == "learn":
-                    chat_manager.cycle_learning_mode()
-                else:
-                    chat_manager.cycle_approve_mode()
-                event.app.invalidate()
 
         @bindings.add(Keys.Up)
         def move_up(event):
@@ -267,7 +253,6 @@ class SelectionPanel:
             mouse_support=False,
             cursor=None,
             style=TOOLBAR_STYLE,
-            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager) if chat_manager else None,
         )
 
         result = application.run()
@@ -366,9 +351,8 @@ def select_option(
                     return f"exit_code=1\nOption {opt_idx + 1} in question {q_idx + 1} must have 'value' and 'text' fields"
 
         # Create and run the selection panel
-        chat_manager = context.get("chat_manager") if context else None
         panel = SelectionPanel(questions)
-        result = panel.run(chat_manager=chat_manager)
+        result = panel.run()
 
         # Handle user cancellation
         if result is None:
