@@ -99,7 +99,7 @@ def _strip_leading_task_list_echo(content, task_list, title=None):
     causes duplicate task list rendering in the CLI.
     """
     if not content or not isinstance(content, str) or not task_list:
-        return content
+        return content or ""
 
     expected = _format_task_list(task_list, title).strip()
     if not expected:

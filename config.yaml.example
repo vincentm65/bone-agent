@@ -57,7 +57,7 @@ KIMI_MODEL: moonshot-v1-8k
 KIMI_API_BASE: "https://api.moonshot.cn/v1"
 
 # MiniMax (Uses Anthropic-compatible API for Coding Plan)
-# Endpoint: https://api.minimax.io/anthropic/v1
+# Endpoint: https://api.minimax.io/anthropic/v1 (or https://api.minimaxi.com/anthropic/v1 for China)
 MINIMAX_API_KEY: "your-minimax-key-here"
 MINIMAX_MODEL: "MiniMax-M2"
 MINIMAX_API_BASE: "https://api.minimax.io/anthropic/v1"
