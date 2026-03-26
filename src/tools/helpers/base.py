@@ -27,7 +27,7 @@ class ToolDefinition:
     name: str
     description: str
     parameters: Dict[str, Any]
-    allowed_modes: List[str] = field(default_factory=lambda: ["edit", "plan", "learn"])
+    allowed_modes: List[str] = field(default_factory=lambda: ["edit", "plan"])
     requires_approval: bool = False
     handler: Optional[Callable] = None
 
@@ -50,7 +50,7 @@ class ToolDefinition:
         """Check if tool is allowed in given interaction mode.
 
         Args:
-            mode: Interaction mode ('edit', 'plan', or 'learn')
+            mode: Interaction mode ('edit' or 'plan')
 
         Returns:
             True if tool is allowed in this mode
@@ -144,7 +144,7 @@ class ToolRegistry:
         """Get tools allowed in a specific interaction mode.
 
         Args:
-            mode: Interaction mode ('edit', 'plan', or 'learn')
+            mode: Interaction mode ('edit' or 'plan')
 
         Returns:
             List of ToolDefinitions for that mode
@@ -211,7 +211,7 @@ def tool(
             name=name,
             description=description,
             parameters=parameters,
-            allowed_modes=allowed_modes or ["edit", "plan", "learn"],
+            allowed_modes=allowed_modes or ["edit", "plan"],
             requires_approval=requires_approval,
             handler=func
         )
@@ -286,7 +286,7 @@ def get_tools_for_mode(interaction_mode: str) -> list:
     """Get tool schemas filtered by interaction mode.
 
     Args:
-        interaction_mode: 'plan', 'edit', or 'learn'
+        interaction_mode: 'plan' or 'edit'
 
     Returns:
         List of tool schemas suitable for the mode
@@ -306,7 +306,7 @@ def _tools_for_mode(interaction_mode):
     """Filter tools based on interaction mode using the registry.
 
     Args:
-        interaction_mode: 'plan', 'edit', or 'learn'
+        interaction_mode: 'plan' or 'edit'
 
     Returns:
         List of tool definitions suitable for the mode

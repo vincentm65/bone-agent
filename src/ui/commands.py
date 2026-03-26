@@ -89,12 +89,10 @@ def _handle_mode(chat_manager, console, debug_mode_container, args):
     labels = {
             "edit": "EDIT (Full Access)",
             "plan": "PLAN (Read-Only)",
-            "learn": "LEARN (Read-Only)"
             }
     colors = {
             "edit": "green",
             "plan": "cyan",
-            "learn": "magenta"
             }
 
     label = labels.get(new_mode, new_mode.upper())

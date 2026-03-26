@@ -157,7 +157,7 @@ def _validate_directory_path(
         },
         "required": ["path_str"]
     },
-    allowed_modes=["learn", "plan", "edit"]
+    allowed_modes=["edit", "plan"]
 )
 def list_directory(
     path_str: str,

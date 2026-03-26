@@ -4,7 +4,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
-from llm.config import get_provider_config, APPROVE_MODE_LABELS, LEARNING_MODE_LABELS, PLAN_TYPE_LABELS, STATUS_BAR_SETTINGS
+from llm.config import get_provider_config, APPROVE_MODE_LABELS, PLAN_TYPE_LABELS, STATUS_BAR_SETTINGS
 
 
 def get_bottom_toolbar_text(chat_manager):
@@ -52,11 +52,6 @@ def get_bottom_toolbar_text(chat_manager):
         val = PLAN_TYPE_LABELS.get(chat_manager.plan_type, chat_manager.plan_type.upper())
         colors = {"feature": "cyan", "refactor": "green", "debug": "red", "optimize": "yellow"}
         mode_val_colored = f'<style fg="{colors.get(chat_manager.plan_type, "white")}">{val}</style>'
-    elif chat_manager.interaction_mode == "learn":
-        mode_label = "Learn"
-        val = LEARNING_MODE_LABELS.get(chat_manager.learning_mode, chat_manager.learning_mode.upper())
-        colors = {"succinct": "cyan", "balanced": "green", "verbose": "magenta"}
-        mode_val_colored = f'<style fg="{colors.get(chat_manager.learning_mode, "white")}">{val}</style>'
     else:
         mode_label = "Approval"
         val = APPROVE_MODE_LABELS.get(chat_manager.approve_mode, chat_manager.approve_mode.upper())
@@ -101,10 +96,7 @@ def setup_common_bindings(chat_manager):
     @bindings.add('s-tab')
     def toggle_approve_mode(event):
         """Toggle between modes using Shift+Tab."""
-        if chat_manager.interaction_mode == "learn":
-            chat_manager.cycle_learning_mode()
-        else:
-            chat_manager.cycle_approve_mode()
+        chat_manager.cycle_approve_mode()
         event.app.invalidate()
     
     return bindings

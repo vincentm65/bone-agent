@@ -58,7 +58,7 @@ def show_help_table(console):
     table.add_row("[bold cyan]/help[/bold cyan]", "Show help")
     table.add_row("[bold cyan]/exit[/bold cyan]", "Exit chat")
     table.add_row("[bold cyan]/debug[/bold cyan]", "Toggle debug")
-    table.add_row("[bold cyan]/mode[/bold cyan]", "Toggle Plan/Edit/Learn mode")
+    table.add_row("[bold cyan]/mode[/bold cyan]", "Toggle Plan/Edit mode")
     table.add_row("[bold cyan]/logging[/bold cyan]", "Toggle conversation logging")
     table.add_row("[bold cyan]/config[/bold cyan]", "Show all configuration settings")
     table.add_row("[bold cyan]/provider[/bold cyan] [name]", "Switch provider or show provider table")
@@ -77,8 +77,8 @@ def show_help_table(console):
     keybinds.add_column("Keybind", no_wrap=True)
     keybinds.add_column("Action")
 
-    keybinds.add_row("Tab", "Toggle Plan/Edit/Learn mode")
-    keybinds.add_row("Shift+Tab", "Cycle plan/approval/learning mode (mode-dependent)")
+    keybinds.add_row("Tab", "Toggle Plan/Edit mode")
+    keybinds.add_row("Shift+Tab", "Cycle plan/approval mode (mode-dependent)")
     keybinds.add_row("Ctrl+C", "Interrupt response")
     keybinds.add_row("Ctrl+C (2x)", "Exit program")
 
@@ -107,8 +107,8 @@ def show_config_overview(chat_manager, console, debug_mode_container, current_pr
     runtime_table.add_row("Debug Mode", debug_status)
     logging_status = "[green]ON[/green]" if chat_manager.markdown_logger else "[dim]OFF[/dim]"
     runtime_table.add_row("Conversation Logging", logging_status)
-    mode_labels = {"edit": "EDIT", "plan": "PLAN", "learn": "LEARN"}
-    mode_colors = {"edit": "green", "plan": "cyan", "learn": "magenta"}
+    mode_labels = {"edit": "EDIT", "plan": "PLAN"}
+    mode_colors = {"edit": "green", "plan": "cyan"}
     mode = chat_manager.interaction_mode
     mode_color = mode_colors.get(mode, "white")
     runtime_table.add_row("Interaction Mode", f"[{mode_color}]{mode_labels.get(mode, mode.upper())}[/{mode_color}]")

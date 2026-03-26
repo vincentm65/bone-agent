@@ -32,7 +32,6 @@ class ChatManager:
         self.command_history = []  # Track executed commands to prevent repeats
         self.approve_mode = "safe"
         self.interaction_mode = "edit"  # Default to edit mode
-        self.learning_mode = "balanced"  # Default learning mode (for learn interaction mode)
         self.plan_type = "feature"  # Default plan type (for plan interaction mode)
         self.token_tracker = TokenTracker()
         self.context_token_estimate = 0
@@ -93,10 +92,7 @@ class ChatManager:
 
     def _build_system_prompt(self) -> str:
         """Build system prompt with mode-specific rules."""
-        # Build prompt using modular composition with optional learn_submode or plan_type
-        if self.interaction_mode == "learn":
-            return build_system_prompt(self.interaction_mode, self.learning_mode)
-        elif self.interaction_mode == "plan":
+        if self.interaction_mode == "plan":
             return build_system_prompt(self.interaction_mode, plan_type=self.plan_type)
         else:
             return build_system_prompt(self.interaction_mode)
@@ -1045,12 +1041,12 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         return self.plan_type
 
     def toggle_interaction_mode(self) -> str:
-        """Toggle between plan/edit/learn modes.
+        """Toggle between plan/edit modes.
 
         Returns:
             str: The new interaction mode.
         """
-        modes = ("edit", "plan", "learn")
+        modes = ("edit", "plan")
         current_index = modes.index(self.interaction_mode)
         self.interaction_mode = modes[(current_index + 1) % len(modes)]
         self.update_system_prompt()
@@ -1058,26 +1054,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         self.sync_log()
         return self.interaction_mode
 
-    def cycle_learning_mode(self) -> str:
-        """Cycle to next learning mode (for Learn interaction mode).
-
-        Returns:
-            str: The new learning mode.
-        """
-        from llm.config import LEARNING_MODES
-        modes = LEARNING_MODES
-        try:
-            next_index = (modes.index(self.learning_mode) + 1) % len(modes)
-        except ValueError:
-            next_index = 0
-        self.learning_mode = modes[next_index]
-        # Update system prompt to reflect new learning mode
-        if self.interaction_mode == "learn":
-            self.update_system_prompt()
-            # Sync conversation log to reflect learning mode changes
-            self.sync_log()
-        return self.learning_mode
-       
     def reset_session(self):
         """Reset chat session (clear messages and history).
 

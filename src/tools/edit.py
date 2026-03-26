@@ -373,7 +373,7 @@ def run_edit_file(arguments, repo_root, console, gitignore_spec=None) -> str | T
         },
         "required": ["path", "search", "replace"]
     },
-    allowed_modes=["edit", "plan", "learn"],
+    allowed_modes=["edit", "plan"],
     requires_approval=True
 )
 def edit_file(

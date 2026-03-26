@@ -51,7 +51,7 @@ from .helpers.converters import coerce_bool, coerce_int
         },
         "required": ["pattern"]
     },
-    allowed_modes=["edit", "plan", "learn"],
+    allowed_modes=["edit", "plan"],
     requires_approval=False
 )
 def rg(

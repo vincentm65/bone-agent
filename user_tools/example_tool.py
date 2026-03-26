@@ -31,7 +31,7 @@ from tools.base import tool
         },
         "required": ["directory"]
     },
-    allowed_modes=["learn", "plan", "edit"],
+    allowed_modes=["edit", "plan"],
     requires_approval=False
 )
 def count_lines_in_files(
@@ -111,7 +111,7 @@ def count_lines_in_files(
         },
         "required": ["directory"]
     },
-    allowed_modes=["learn", "plan", "edit"],
+    allowed_modes=["edit", "plan"],
     requires_approval=False
 )
 def find_empty_files(

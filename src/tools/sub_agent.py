@@ -66,7 +66,7 @@ class SimplePanelUpdater:
         },
         "required": ["query"]
     },
-    allowed_modes=["edit", "plan", "learn"],
+    allowed_modes=["edit", "plan"],
     requires_approval=False
 )
 def sub_agent(

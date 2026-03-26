@@ -341,8 +341,7 @@ __all__ = [
     "APPROVE_MODE_LABELS",
     "INTERACTION_MODES",
     "INTERACTION_MODE_LABELS",
-    "LEARNING_MODES",
-    "LEARNING_MODE_LABELS",
+
     "PLAN_TYPES",
     "PLAN_TYPE_LABELS",
     "ALLOWED_COMMANDS",
@@ -384,19 +383,10 @@ APPROVE_MODE_LABELS = {
 }
 
 # Interaction modes
-INTERACTION_MODES = ("edit", "plan", "learn")
+INTERACTION_MODES = ("edit", "plan")
 INTERACTION_MODE_LABELS = {
     "edit": "Edit (Full Access)",
     "plan": "Plan (Read-Only)",
-    "learn": "Learn (Read-Only)"
-}
-
-# Learning modes (sub-modes for Learn interaction mode)
-LEARNING_MODES = ("succinct", "balanced", "verbose")
-LEARNING_MODE_LABELS = {
-    "succinct": "Succinct",
-    "balanced": "Balanced",
-    "verbose": "Verbose"
 }
 
 # Plan types (planning behavior options for Plan interaction mode)

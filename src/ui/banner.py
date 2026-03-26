@@ -40,7 +40,7 @@ def display_startup_banner(approve_mode: str, interaction_mode: str = "edit"):
 
     Args:
         approve_mode: Current approval mode setting.
-        interaction_mode: Current interaction mode ('plan', 'edit', or 'learn').
+        interaction_mode: Current interaction mode ('plan' or 'edit').
     """
     console.clear()
 

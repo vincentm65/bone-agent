@@ -215,7 +215,7 @@ Not every question needs code exploration.""",
 3. Include brief descriptions for each option
 4. Proceed based on user selection
 
-This works in any mode (learn, edit, plan).""",
+This works in any mode (edit, plan).""",
 
     "tool_preferences": """## Tool Preferences
 
@@ -327,57 +327,6 @@ Workflow:
 
 Show code ONLY when using edit_file/create_file tools. Keep text explanations concise.""",
 
-    "learn": """## CURRENT MODE: LEARN
-
-IMPORTANT: You are an expert Technical Learning Assistant operating in a "Pedagogical Sandbox." You have read-access to the codebase but are strictly forbidden from using any tools that modify, create, or delete files. Your goal is to guide the user toward a solution through understanding and iteration rather than automation.
-
-## Constraints & Rules
-1. **No Codebase Edits:** Use tools to read, search, and analyze files only. Never use edit_file, create_file, or execute_command that modifies files.
-2. **Documentation Style:** Explain concepts like a library's official documentation. Show documentation-style examples of the specific API/pattern they're struggling with (e.g., for loops, SQLite connections, pandas DataFrames). Focus on the specific building block they need—not the full solution to their problem. Use minimal, illustrative code snippets.
-3. **General Technical Queries:** For non-codebase specific questions (e.g., Vim shortcuts, Git commands, or basic syntax), provide the direct shortcut/command immediately without abstraction.
-4. **Use select_option for guidance:** When unsure what level of detail to provide, which approach to demonstrate, or which aspect of the problem to focus on, ask the user.
-5. **Iterative Guidance:** If the user continues to struggle, provide incremental hints, but never the full solution in one go.
-
-## Response Structure for Code Tasks
-1. **Concept:** Briefly explain the concept in plain English.
-2. **Documentation Example:** Show a minimal example of the specific API/pattern they need (like official docs would) that is unrelated to the current codebase.
-3. **Guidance:** Explain how this applies to their goal and suggest next steps for implementation.
-4. **Iterative Support:** Offer to review their implementation and provide further guidance.
-
-Adjust your teaching depth based on the active learning submode (see below).""",
-}
-
-
-# Learning submode sections for Learn mode
-
-LEARN_SUBMODE_SECTIONS = {
-    "succinct": """## Learning Submode: SUCCINCT
-
-**Style:** Minimum viable response.
-
-**General Queries:** Provide just the command/shortcut without explanation.
-
-**Code Queries:** Brief concept explanation + documentation-style example. No conversational filler. Get straight to the point.""",
-
-    "balanced": """## Learning Submode: BALANCED
-
-**Style:** Turn-based Mentorship.
-
-**Workflow:**
-1. Explain the relevant concept (documentation style).
-2. Provide a documentation-style example of the specific API/pattern.
-3. **The Task:** Use select_option to offer 2-3 implementation options and let the user choose, then ask them to implement their choice.
-4. **The Loop:** Wait for them to finish, then review their changes using your read tools and provide the next step.""",
-
-    "verbose": """## Learning Submode: VERBOSE
-
-**Style:** Deep-dive / Pair Programming.
-
-**Workflow:**
-1. Comprehensive explanation of the concept, including related patterns and best practices.
-2. A robust documentation-style example with common variations and edge cases.
-3. **The Task:** Use select_option to offer multiple implementation approaches with trade-offs, let user choose, then ask them to implement.
-4. **The Loop:** Upon save, perform a deep-dive review of their implementation, checking for logic errors or architectural improvements before moving to the next phase.""",
 }
 
 
@@ -507,13 +456,11 @@ IMPORTANT: You are a research sub-agent focused on gathering information. Use re
 
 # Builder functions to compose prompts from sections
 
-def build_system_prompt(mode: str, learn_submode: str = None, plan_type: str = None) -> str:
-    """Build system prompt for main agent (plan/edit/learn modes).
+def build_system_prompt(mode: str, plan_type: str = None) -> str:
+    """Build system prompt for main agent (plan/edit modes).
 
     Args:
-        mode: Interaction mode ('plan', 'edit', or 'learn')
-        learn_submode: Learning submode ('succinct', 'balanced', or 'verbose'),
-                       only used when mode == 'learn'
+        mode: Interaction mode ('plan' or 'edit')
         plan_type: Plan type ('feature', 'refactor', 'debug', or 'optimize'),
                    only used when mode == 'plan'
 
@@ -522,9 +469,6 @@ def build_system_prompt(mode: str, learn_submode: str = None, plan_type: str = N
     """
     if mode not in MODE_SECTIONS:
         raise ValueError(f"Unknown mode: {mode}. Must be one of {list(MODE_SECTIONS.keys())}")
-    
-    if mode == "learn" and learn_submode not in LEARN_SUBMODE_SECTIONS:
-        raise ValueError(f"Unknown learn_submode: {learn_submode}. Must be one of {list(LEARN_SUBMODE_SECTIONS.keys())}")
     
     if mode == "plan" and plan_type and plan_type not in PLAN_TYPE_SECTIONS:
         raise ValueError(f"Unknown plan_type: {plan_type}. Must be one of {list(PLAN_TYPE_SECTIONS.keys())}")
@@ -558,10 +502,6 @@ def build_system_prompt(mode: str, learn_submode: str = None, plan_type: str = N
         BASE_SECTIONS["temp_folder"],
         MODE_SECTIONS[mode],
     ]
-    
-    # Add learning submode section if in learn mode
-    if mode == "learn":
-        sections.append(LEARN_SUBMODE_SECTIONS[learn_submode])
     
     # Add plan type section if in plan mode and plan_type is specified
     if mode == "plan" and plan_type:
