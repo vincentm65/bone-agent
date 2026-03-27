@@ -23,13 +23,14 @@ def _configure_compaction():
         return ChatManager(compact_trigger_tokens=None)
 
 
-def _inject_system_prompt(chat_manager):
+def _inject_system_prompt(chat_manager, sub_agent_type: str = "research"):
     """Build sub-agent prompt and inject it with token usage info.
 
     Args:
         chat_manager: ChatManager instance to configure
+        sub_agent_type: Type of sub-agent ('research' or 'review').
     """
-    base_prompt = build_sub_agent_prompt()
+    base_prompt = build_sub_agent_prompt(sub_agent_type=sub_agent_type)
     token_usage = chat_manager.token_tracker.get_usage_for_prompt(
         context_limit=sub_agent_settings.soft_limit_tokens
     )
@@ -72,17 +73,20 @@ def _configure_isolation(chat_manager):
     chat_manager.interaction_mode = sub_agent_settings.interaction_mode
 
 
-def _create_chat_manager():
+def _create_chat_manager(sub_agent_type: str = "research"):
     """Create a fresh ChatManager instance for sub-agent use.
 
     Orchestrates compaction, prompt injection, codebase map loading,
     and isolation configuration.
 
+    Args:
+        sub_agent_type: Type of sub-agent ('research' or 'review').
+
     Returns:
         ChatManager: A new ChatManager instance with pre-configured system prompt
     """
     chat_manager = _configure_compaction()
-    _inject_system_prompt(chat_manager)
+    _inject_system_prompt(chat_manager, sub_agent_type=sub_agent_type)
     _load_codebase_map(chat_manager)
     _configure_isolation(chat_manager)
     return chat_manager
@@ -94,6 +98,8 @@ def run_sub_agent(
     rg_exe_path: str,
     console=None,
     panel_updater=None,
+    sub_agent_type: str = "research",
+    initial_context: str = None,
 ) -> dict:
     """Run sub-agent using existing AgenticOrchestrator for delegated tasks.
 
@@ -103,6 +109,9 @@ def run_sub_agent(
         rg_exe_path: Path to rg executable
         console: Optional Rich console for output
         panel_updater: Optional SubAgentPanel for live panel updates
+        sub_agent_type: Type of sub-agent ('research' or 'review').
+        initial_context: Optional string injected as context before the task query
+            (e.g., a git diff for review mode).
 
     Returns:
         Dict with:
@@ -120,7 +129,16 @@ def run_sub_agent(
         panel_updater = SimplePanelUpdater(console)
 
     # Create fresh ChatManager for sub-agent
-    temp_chat_manager = _create_chat_manager()
+    temp_chat_manager = _create_chat_manager(sub_agent_type=sub_agent_type)
+
+    # Inject initial context as a user/assistant exchange if provided
+    if initial_context:
+        temp_chat_manager.messages.append(
+            {"role": "user", "content": initial_context}
+        )
+        temp_chat_manager.messages.append(
+            {"role": "assistant", "content": "I've received the context. I'll analyze it and use the available tools to gather additional information as needed."}
+        )
 
     # Import here to avoid circular import with core.agentic
     from core.agentic import AgenticOrchestrator

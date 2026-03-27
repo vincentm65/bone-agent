@@ -27,6 +27,8 @@ class SettingOption:
     max_val: Union[int, float] = None
     step: Union[int, float] = None
     validate_fn: Callable[[Any], bool] = None  # Custom validator
+    on_text: str = ""   # Custom label when value is truthy (e.g. "Active")
+    off_text: str = ""  # Custom label when value is falsy (e.g. "-")
 
     def __post_init__(self):
         if self.options is None:
@@ -37,7 +39,7 @@ class SettingOption:
 class SettingCategory:
     """A category containing related settings."""
     title: str
-    icon: str = ">"
+    icon: str = ""
     settings: List[SettingOption] = field(default_factory=list)
 
 
@@ -56,7 +58,9 @@ class SettingSelector:
         self,
         categories: List[SettingCategory],
         title: str = "Settings",
-        on_change: Callable[[str, str, Any], None] = None  # Called on value change
+        on_change: Callable[[str, str, Any], None] = None,  # Called on value change
+        on_activate: Callable[[str, Any], None] = None,  # Called on Enter for nav items
+        show_save: bool = True,  # Whether to show the Save button
     ):
         """Initialize the setting selector.
 
@@ -64,10 +68,14 @@ class SettingSelector:
             categories: List of SettingCategory objects with settings
             title: Panel title
             on_change: Callback(key, action, value) when setting changes
+            on_activate: Callback(key, value) when Enter pressed on nav-type item
+            show_save: Whether to display the Save button
         """
         self.categories = categories
         self.title = title
         self.on_change = on_change
+        self.on_activate = on_activate
+        self.show_save = show_save
 
         self.current_cat_idx = 0
         self.current_setting_idx = 0
@@ -90,7 +98,11 @@ class SettingSelector:
 
     def _format_value(self, setting: SettingOption) -> str:
         """Format a setting value for display."""
-        if setting.input_type == "boolean":
+        if setting.input_type in ("boolean", "nav"):
+            if setting.on_text and setting.value:
+                return setting.on_text
+            if setting.off_text and not setting.value:
+                return setting.off_text
             return "ON" if setting.value else "OFF"
         elif setting.input_type == "select" and setting.options:
             for opt in setting.options:
@@ -107,8 +119,8 @@ class SettingSelector:
         return sum(len(cat.settings) for cat in self.categories)
 
     def _is_boolean_setting(self, setting: Optional[SettingOption]) -> bool:
-        """Check if a setting is a boolean toggle."""
-        return setting is not None and setting.input_type == "boolean"
+        """Check if a setting is a boolean toggle or nav item."""
+        return setting is not None and setting.input_type in ("boolean", "nav")
 
     def _get_display_text(self) -> HTML:
         """Build the display HTML with one-line boolean toggles."""
@@ -125,8 +137,12 @@ class SettingSelector:
         for c_idx, cat in enumerate(self.categories):
             is_active_cat = c_idx == self.current_cat_idx
 
+            # Add spacing between categories
+            if c_idx > 0:
+                lines.append("")
+
             if show_headers:
-                lines.append(f"  <b><style fg='cyan'>{cat.icon} {cat.title}</style></b>")
+                lines.append(f"<b><style fg='cyan'>{cat.title}</style></b>")
 
             for s_idx, setting in enumerate(cat.settings):
                 is_selected = (is_active_cat
@@ -151,6 +167,31 @@ class SettingSelector:
                             f"  {label}"
                         )
 
+                elif setting.input_type == "nav":
+                    tag = self._format_value(setting)
+                    label = setting.text
+
+                    if is_selected:
+                        if tag and tag not in ("ON", "OFF"):
+                            lines.append(
+                                f"> <style fg='cyan' bold='true'>{tag}</style>"
+                                f"  <b>{label}</b>"
+                            )
+                        else:
+                            lines.append(
+                                f"> <b>{label}</b>"
+                            )
+                    else:
+                        if tag and tag not in ("ON", "OFF"):
+                            lines.append(
+                                f"  <style fg='gray'>{tag}</style>"
+                                f"  {label}"
+                            )
+                        else:
+                            lines.append(
+                                f"  {label}"
+                            )
+
                 elif is_editing and setting.input_type in ("number", "float"):
                     label = setting.text
                     lines.append(
@@ -164,11 +205,25 @@ class SettingSelector:
                         f"  <style fg='yellow'>{self.input_buffer}</style>"
                     )
                 elif is_editing and setting.input_type == "select" and setting.options:
+                    tag = self._format_value(setting)
                     label = setting.text
                     lines.append(
-                        f"> <b>{label}:</b>"
-                        f"  <style fg='yellow'>{self._format_value(setting)}</style>"
+                        f"> <style fg='yellow' bold='true'>{tag}</style>"
+                        f"  <b>{label}</b>"
                     )
+                elif setting.input_type == "select" and setting.options:
+                    tag = self._format_value(setting)
+                    label = setting.text
+                    if is_selected:
+                        lines.append(
+                            f"> <style fg='cyan' bold='true'>{tag}</style>"
+                            f"  <b>{label}</b>"
+                        )
+                    else:
+                        lines.append(
+                            f"  <style fg='gray'>{tag}</style>"
+                            f"  {label}"
+                        )
                 else:
                     label = setting.text
                     val = self._format_value(setting)
@@ -184,11 +239,12 @@ class SettingSelector:
                         )
 
         # Separator + Save button
-        lines.append("")
-        if self._on_save:
-            lines.append("> <b>[ Save ]</b>")
-        else:
-            lines.append("  [ Save ]")
+        if self.show_save:
+            lines.append("")
+            if self._on_save:
+                lines.append("> <b>[ Save ]</b>")
+            else:
+                lines.append("  [ Save ]")
 
         # Help text
         lines.append("")
@@ -201,7 +257,9 @@ class SettingSelector:
             elif setting and setting.input_type == "select":
                 lines.append("<style fg='gray'>↑↓ Change, Enter to confirm, Esc to cancel</style>")
         else:
-            if setting and self._is_boolean_setting(setting):
+            if setting and setting.input_type == "nav":
+                lines.append("<style fg='gray'>↑↓ Navigate, Enter to open, Esc to cancel</style>")
+            elif setting and self._is_boolean_setting(setting):
                 lines.append("<style fg='gray'>↑↓ Navigate, Enter to toggle, Esc to cancel</style>")
             elif setting:
                 lines.append("<style fg='gray'>↑↓ Navigate, Enter to edit, Esc to cancel</style>")
@@ -244,7 +302,9 @@ class SettingSelector:
                 if setting.max_val is not None and float_val > setting.max_val:
                     return False
                 if setting.step is not None and setting.step > 0:
-                    if (float_val - setting.min_val if setting.min_val is not None else float_val) % setting.step != 0:
+                    base = setting.min_val if setting.min_val is not None else 0.0
+                    remainder = abs(float_val - base) % setting.step
+                    if remainder > 1e-9 and abs(remainder - setting.step) > 1e-9:
                         return False
                 return True
             except ValueError:
@@ -274,7 +334,7 @@ class SettingSelector:
         elif self.current_cat_idx < len(self.categories) - 1:
             self.current_cat_idx += 1
             self.current_setting_idx = 0
-        else:
+        elif self.show_save:
             # Past last setting -> move to Save button
             self._on_save = True
 
@@ -347,9 +407,24 @@ class SettingSelector:
             if not setting:
                 return
 
+            # Nav: activate drill-down
+            if setting.input_type == 'nav':
+                if self.on_activate:
+                    self.on_activate(setting.key, setting.value)
+                event.app.exit(result={'_nav': setting.key})
+                return
+
             # Boolean: toggle directly
             if self._is_boolean_setting(setting):
                 self._apply_change(setting.key, not setting.value)
+                invalidate()
+                return
+
+            # Select: cycle to next option directly
+            if setting.input_type == "select" and setting.options:
+                current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
+                new_idx = (current_idx + 1) % len(setting.options)
+                self._apply_change(setting.key, setting.options[new_idx].get("value"))
                 invalidate()
                 return
 
@@ -365,12 +440,10 @@ class SettingSelector:
                         self._apply_change(setting.key, new_val)
                     self.editing_value = False
                     self.input_buffer = ""
-                else:
-                    self.editing_value = False
                 invalidate()
             else:
-                # Start editing for non-boolean types
-                if setting.input_type not in ("boolean", "select"):
+                # Start editing for text/number/float types
+                if setting.input_type in ("text", "number", "float"):
                     self.editing_value = True
                     self.input_buffer = str(setting.value)
                 invalidate()
@@ -445,12 +518,27 @@ class SettingSelector:
         )
 
         invalidate.app = application
+        # Save cursor position before rendering so we can erase on exit
+        application.output.write_raw("\033[s")
+        application.output.flush()
         result = application.run()
 
+        # Erase rendered content: use ANSI save/restore cursor position.
+        # We saved cursor before the app rendered, so restoring it puts
+        # us back at the top of our content. Then erase to end of screen.
+        output = application.output
+        output.write_raw("\033[u")  # Restore cursor to saved position
+        output.write_raw("\033[J")  # Erase from cursor to end of screen
+        output.flush()
+
         # None = cancelled, {} = saved with no changes, {...} = saved with changes
+        # {'_nav': key} = nav item activated (drill-down)
         if result is None:
             return None
-        return result if result else None
+        if isinstance(result, dict) and '_nav' in result:
+            return result  # Nav activation result
+        # Distinguish empty dict (saved, no changes) from None (cancelled)
+        return result
 
 
 # Convenience function for quick usage

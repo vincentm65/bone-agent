@@ -22,7 +22,7 @@ node_modules/
 vmcode-proxy/
 
 # Configuration (keep .example files!)
-#config.yaml
+config.yaml
 
 # Local model files
 llama.cpp/

@@ -6,8 +6,12 @@ from typing import Optional
 from llm import config
 from core.init import run_init
 from core.config_manager import ConfigManager as ConfigManagerClass
-from ui.displays import show_help_table, show_provider_table, show_config_overview
+from ui.displays import show_help_table
 from ui.banner import display_startup_banner
+from core.agentic import SubAgentPanel
+from utils.settings import MonokaiDarkBGStyle
+from utils.markdown import left_align_headings
+from rich.markdown import Markdown
 # Global ConfigManager instance
 config_manager = ConfigManagerClass()
 
@@ -30,13 +34,6 @@ def _handle_help(chat_manager, console, debug_mode_container, args):
     show_help_table(console)
     return CommandResult(status="handled")
 
-
-def _handle_debug(chat_manager, console, debug_mode_container, args):
-    """Handle debug toggle command."""
-    debug_mode_container['debug'] = not debug_mode_container['debug']
-    status = "enabled" if debug_mode_container['debug'] else "disabled"
-    console.print(f"[yellow]Debug mode {status}[/yellow]")
-    return CommandResult(status="handled")
 
 def _handle_compact(chat_manager, console, debug_mode_container, args):
     """Handle manual context compaction."""
@@ -81,46 +78,149 @@ def _handle_compact(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_mode(chat_manager, console, debug_mode_container, args):
-    """Handle interaction mode toggle command."""
-    new_mode = chat_manager.toggle_interaction_mode()
-
-    labels = {
-            "edit": "EDIT (Full Access)",
-            "plan": "PLAN (Read-Only)",
-            }
-    colors = {
-            "edit": "green",
-            "plan": "cyan",
-            }
-
-    label = labels.get(new_mode, new_mode.upper())
-    color = colors.get(new_mode, "white")
-
-    console.print(f"[{color}]Interaction Mode: {label}[/{color}]")
-    display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
-    return CommandResult(status="handled")
 
 
-def _handle_logging(chat_manager, console, debug_mode_container, args):
-    """Handle logging toggle command."""
-    is_enabled = chat_manager.toggle_logging()
-
-    if is_enabled:
-        console.print("[green]Conversation logging enabled.[/green]")
-    else:
-        console.print("[dim]Conversation logging disabled.[/dim]")
-
-    return CommandResult(status="handled")
 
 
 
 
 
 def _handle_config(chat_manager, console, debug_mode_container, args):
-    """Handle config overview command - display all settings."""
-    current_provider = getattr(chat_manager.client, 'provider', 'unknown')
-    show_config_overview(chat_manager, console, debug_mode_container, current_provider)
+    """Handle config command - interactive runtime settings editor."""
+    from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
+
+    # Build runtime settings from current state
+    runtime_settings = [
+        SettingOption(
+            key="debug", text="Debug Mode",
+            value=bool(debug_mode_container.get("debug")),
+            input_type="boolean",
+            on_text="ON", off_text="OFF",
+        ),
+        SettingOption(
+            key="logging", text="Conversation Logging",
+            value=bool(chat_manager.markdown_logger),
+            input_type="boolean",
+            on_text="ON", off_text="OFF",
+        ),
+        SettingOption(
+            key="mode", text="Interaction Mode",
+            value=chat_manager.interaction_mode,
+            input_type="select",
+            options=[
+                {"value": "edit", "text": "EDIT"},
+                {"value": "plan", "text": "PLAN (Read-Only)"},
+            ],
+        ),
+        SettingOption(
+            key="approve", text="Approval Mode",
+            value=chat_manager.approve_mode,
+            input_type="select",
+            options=[
+                {"value": "safe", "text": "SAFE"},
+                {"value": "normal", "text": "NORMAL"},
+                {"value": "danger", "text": "DANGER"},
+            ],
+        ),
+    ]
+
+    # Build status bar settings
+    sb_config = config.STATUS_BAR_SETTINGS
+    sb_settings = [
+        SettingOption(
+            key="show_curr_tokens", text="Current context tokens",
+            value=sb_config.get("show_curr_tokens", True), input_type="boolean",
+        ),
+        SettingOption(
+            key="show_in_tokens", text="Total prompt tokens",
+            value=sb_config.get("show_in_tokens", True), input_type="boolean",
+        ),
+        SettingOption(
+            key="show_out_tokens", text="Total completion tokens",
+            value=sb_config.get("show_out_tokens", True), input_type="boolean",
+        ),
+        SettingOption(
+            key="show_total_tokens", text="Total session tokens",
+            value=sb_config.get("show_total_tokens", True), input_type="boolean",
+        ),
+        SettingOption(
+            key="show_cost", text="Session cost",
+            value=sb_config.get("show_cost", True), input_type="boolean",
+        ),
+        SettingOption(
+            key="show_completed", text="Last completion time",
+            value=sb_config.get("show_completed", True), input_type="boolean",
+        ),
+    ]
+
+    categories = [
+        SettingCategory(title="Runtime Settings", settings=runtime_settings),
+        SettingCategory(title="Status Bar Items", settings=sb_settings),
+    ]
+    selector = SettingSelector(
+        categories=categories,
+        title="Configuration",
+    )
+
+    changes = selector.run()
+
+    # Clear the selector UI from the screen
+    display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
+
+    if changes is None:
+        console.print("[dim]Cancelled.[/dim]")
+        return CommandResult(status="handled")
+
+    if not changes:
+        console.print("[dim]No changes made.[/dim]")
+        return CommandResult(status="handled")
+
+    # Apply changes
+    change_lines = []
+    sb_changes = {}
+    sb_labels = {s.key: s.text for s in sb_settings}
+    for key, value in changes.items():
+        if key == "debug":
+            debug_mode_container['debug'] = value
+            state = "enabled" if value else "disabled"
+            change_lines.append(f"  Debug Mode: {state}")
+        elif key == "logging":
+            chat_manager.set_logging(value)
+            state = "enabled" if value else "disabled"
+            change_lines.append(f"  Conversation Logging: {state}")
+        elif key == "mode":
+            chat_manager.set_interaction_mode(value)
+            labels = {"edit": "EDIT", "plan": "PLAN"}
+            change_lines.append(f"  Interaction Mode: {labels.get(value, value.upper())}")
+        elif key == "approve":
+            chat_manager.approve_mode = value
+            labels = {"safe": "SAFE", "normal": "NORMAL", "danger": "DANGER"}
+            change_lines.append(f"  Approval Mode: {labels.get(value, value.upper())}")
+        elif key in sb_labels:
+            sb_changes[key] = value
+            state = "ON" if value else "OFF"
+            change_lines.append(f"  {sb_labels[key]}: {state}")
+
+    # Persist status bar changes to config
+    if sb_changes:
+        config.update_status_bar_settings(sb_changes)
+        try:
+            cfg_data = config_manager.load(force_reload=True)
+            if "STATUS_BAR_SETTINGS" not in cfg_data:
+                cfg_data["STATUS_BAR_SETTINGS"] = {}
+            cfg_data["STATUS_BAR_SETTINGS"].update(sb_changes)
+            config_manager.save(cfg_data)
+        except Exception as e:
+            console.print(f"[red]Failed to save status bar settings: {e}[/red]")
+
+    # Refresh banner with updated modes
+    display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
+
+    # Display summary
+    console.print(f"[green]Settings updated:[/green]")
+    for line in change_lines:
+        console.print(line)
+
     return CommandResult(status="handled")
 
 
@@ -154,8 +254,131 @@ def _handle_clear(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
+def _open_provider_editor(chat_manager, console, provider):
+    """Open interactive setting editor for a specific provider.
+
+    Args:
+        chat_manager: ChatManager instance
+        console: Rich console for output
+        provider: Provider name (e.g. 'openrouter', 'glm')
+
+    Returns:
+        True if settings were saved, False if cancelled
+    """
+    from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
+
+    cfg = config.get_provider_config(provider)
+    config_data = config_manager.load()
+    settings = []
+
+    # Model setting
+    current_model = cfg.get('model') or cfg.get('api_model') or ''
+    model_label = "Model path" if provider == "local" else "Model"
+    settings.append(SettingOption(
+        key="model", text=model_label,
+        value=current_model, input_type="text",
+    ))
+
+    # API key (not for local or vmcode_free)
+    if provider not in ("local", "vmcode_free"):
+        current_key = cfg.get('api_key', '')
+        # Show masked value, store actual in description for comparison
+        masked = (current_key[:8] + "...") if len(current_key) > 8 else (current_key or "")
+        settings.append(SettingOption(
+            key="api_key", text="API Key",
+            value=masked, input_type="text",
+            description=current_key,
+        ))
+
+    # Cost in/out (not for local or vmcode_free)
+    if provider not in ("local", "vmcode_free"):
+        model_prices = config_data.get("MODEL_PRICES", {})
+        existing = model_prices.get(current_model, {})
+        settings.append(SettingOption(
+            key="cost_in", text="Cost in ($/1M tokens)",
+            value=existing.get('cost_in', 0.0), input_type="float",
+            min_val=0.0, step=0.01,
+        ))
+        settings.append(SettingOption(
+            key="cost_out", text="Cost out ($/1M tokens)",
+            value=existing.get('cost_out', 0.0), input_type="float",
+            min_val=0.0, step=0.01,
+        ))
+
+    category = SettingCategory(title=f"{provider.capitalize()} Settings", settings=settings)
+
+    selector = SettingSelector(
+        categories=[category],
+        title=f"Configure {provider.capitalize()}",
+    )
+
+    changes = selector.run()
+
+    # Clear the selector UI
+    display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
+
+    if changes is None:
+        console.print("[dim]No changes made.[/dim]")
+        return False
+
+    # Apply changes
+    change_lines = []
+
+    if "model" in changes and changes["model"]:
+        try:
+            config_manager.set_model(provider, changes["model"])
+            change_lines.append(f"  Model: {changes['model']}")
+        except Exception as e:
+            console.print(f"[red]Failed to set model: {e}[/red]")
+
+    if "api_key" in changes and changes["api_key"]:
+        # Don't re-save if the user didn't actually change it (masked display)
+        api_key_input = changes["api_key"]
+        original_key = cfg.get('api_key', '')
+        # Detect if user typed a real key (longer than masked display or different)
+        if api_key_input != original_key and not api_key_input.endswith("..."):
+            try:
+                config_manager.set_api_key(provider, api_key_input)
+                masked = (api_key_input[:8] + "...") if len(api_key_input) > 8 else api_key_input
+                change_lines.append(f"  API Key: {masked}")
+            except Exception as e:
+                console.print(f"[red]Failed to set API key: {e}[/red]")
+
+    if "cost_in" in changes or "cost_out" in changes:
+        model_name = changes.get("model") or current_model
+        if model_name:
+            # Use changed values, falling back to originals (not 0.0)
+            existing_prices = config_data.get("MODEL_PRICES", {}).get(model_name, {})
+            cost_in = changes.get("cost_in", existing_prices.get("cost_in", 0.0))
+            cost_out = changes.get("cost_out", existing_prices.get("cost_out", 0.0))
+            try:
+                config_manager.set_model_price(model_name, cost_in, cost_out)
+                change_lines.append(f"  Cost: ${cost_in:.2f}/${cost_out:.2f} per 1M tokens")
+            except Exception as e:
+                console.print(f"[red]Failed to set pricing: {e}[/red]")
+
+    # Reload config and switch provider
+    config_manager.set_provider(provider)
+    chat_manager.reload_config()
+    result = chat_manager.switch_provider(provider)
+
+    if change_lines:
+        console.print(f"[green]{provider.capitalize()} updated:[/green]")
+        for line in change_lines:
+            console.print(line)
+    else:
+        console.print(f"[green]{provider.capitalize()} activated.[/green]")
+
+    if "Failed" not in result and "failed" not in result:
+        console.print(f"[dim]{result}[/dim]")
+
+    return True
+
+
 def _handle_provider(chat_manager, console, debug_mode_container, args):
-    """Handle provider switching command."""
+    """Handle provider switching and configuration command."""
+    current = getattr(chat_manager.client, 'provider', 'unknown')
+
     if args:
         provider = args.strip().lower()
 
@@ -165,32 +388,63 @@ def _handle_provider(chat_manager, console, debug_mode_container, args):
             console.print(f"[dim]Available providers: {', '.join(config.get_providers())}[/dim]")
             return CommandResult(status="handled")
 
-        # Switch provider
+        # Switch directly to the named provider
+        if provider == current:
+            console.print(f"[dim]Already on {provider}[/dim]")
+            return CommandResult(status="handled")
+
+        config_manager.set_provider(provider)
+        chat_manager.reload_config()
         result = chat_manager.switch_provider(provider)
 
-        # Save provider choice after successful switch
-        if "Failed" not in result and "failed" not in result:
-            config_manager.set_provider(provider)
-            # Reload config and update client
-            chat_manager.reload_config()
-
-        # Clear screen and show banner after provider change
-        display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
-        console.print(f"[yellow]{result}[/yellow]")
-
-        # Show helpful next steps
         cfg = config.get_provider_config(provider)
-        if provider == "local":
-            if not cfg.get('model'):
-                console.print("[dim]Tip: Set model path with [bold cyan]/model[/bold cyan] <path_to_gguf>[/dim]")
-        else:
-            if not cfg.get('api_key'):
-                console.print("[dim]Tip: Set API key with [bold cyan]/key[/bold cyan] <your_api_key>[/dim]")
-            if not cfg.get('model'):
-                console.print("[dim]Tip: Set model with [bold cyan]/model[/bold cyan] <model_name>[/dim]")
+        model = cfg.get('model') or cfg.get('api_model') or ''
+        label = f"{provider.capitalize()}"
+        if model:
+            label += f" ({model})"
+        console.print(f"[green]Switched to {label}[/green]")
+        if "Failed" not in result and "failed" not in result:
+            console.print(f"[dim]{result}[/dim]")
+
+        return CommandResult(status="handled")
     else:
-        current = getattr(chat_manager.client, 'provider', 'unknown')
-        show_provider_table(current, console)
+        # Show all providers as a browsable list (nav style)
+        from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
+
+        provider_settings = []
+        for prov in config.get_providers():
+            cfg = config.get_provider_config(prov)
+            model = cfg.get('model') or cfg.get('api_model') or ''
+            label = prov.capitalize()
+            if model:
+                label += f"  ({model[:35]}{'...' if len(model) > 35 else ''})"
+            if prov == current:
+                label += "  <style fg='green'>(Active)</style>"
+            provider_settings.append(SettingOption(
+                key=prov,
+                text=label,
+                value=False,
+                input_type="nav",
+                on_text="",
+                off_text="",
+            ))
+
+        selector = SettingSelector(
+            categories=[SettingCategory(title="Providers", settings=provider_settings)],
+            title="Provider Settings",
+            show_save=False,
+        )
+        result = selector.run()
+
+        if result is None or not isinstance(result, dict) or '_nav' not in result:
+            display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
+            console.print("[dim]Cancelled.[/dim]")
+            return CommandResult(status="handled")
+
+        provider = result['_nav']
+
+    # Open interactive editor for the selected provider
+    _open_provider_editor(chat_manager, console, provider)
 
     return CommandResult(status="handled")
 
@@ -415,67 +669,97 @@ def _handle_usage(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_statusbar(chat_manager, console, debug_mode_container, args):
-    """Handle status bar configuration command - toggle items on/off via SettingSelector."""
-    from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
+def _handle_review(chat_manager, console, debug_mode_container, args):
+    """Handle review command - run code review on git changes."""
+    import subprocess
+    import os
+    import sys
 
-    settings = config.STATUS_BAR_SETTINGS
+    from tools.review_sub_agent import review_changes
 
-    # Define status bar toggle settings
-    sb_settings = [
-        SettingOption(
-            key="show_curr_tokens", text="Current context tokens",
-            value=settings.get("show_curr_tokens", True), input_type="boolean",
-        ),
-        SettingOption(
-            key="show_in_tokens", text="Total prompt tokens",
-            value=settings.get("show_in_tokens", True), input_type="boolean",
-        ),
-        SettingOption(
-            key="show_out_tokens", text="Total completion tokens",
-            value=settings.get("show_out_tokens", True), input_type="boolean",
-        ),
-        SettingOption(
-            key="show_total_tokens", text="Total session tokens",
-            value=settings.get("show_total_tokens", True), input_type="boolean",
-        ),
-        SettingOption(
-            key="show_cost", text="Session cost",
-            value=settings.get("show_cost", True), input_type="boolean",
-        ),
-        SettingOption(
-            key="show_completed", text="Last completion time",
-            value=settings.get("show_completed", True), input_type="boolean",
-        ),
-    ]
+    # Determine git diff arguments
+    if args and args.strip():
+        git_args = args.strip()
+    else:
+        git_args = ""
 
-    category = SettingCategory(title="Status Bar Items", settings=sb_settings)
+    # Build git diff argument list (no shell=True to prevent command injection)
+    git_argv = ["git", "diff"] + git_args.split()
 
-    selector = SettingSelector(
-        categories=[category],
-        title="",
+    # Reject shell metacharacters as defense-in-depth
+    import re
+    dangerous = re.compile(r'[;&|`$(){}<>!]')
+    for arg in git_argv[2:]:
+        if dangerous.search(arg):
+            console.print(f"[red]Rejected dangerous character in argument: {arg}[/red]")
+            return CommandResult(status="handled")
+
+    console.print(f"[cyan]Running: {' '.join(git_argv)}[/cyan]")
+
+    # Run git diff
+    result = subprocess.run(
+        git_argv,
+        shell=False,
+        capture_output=True,
+        text=True,
     )
 
-    changes = selector.run()
-
-    if changes is None:
-        console.print("[dim]Status bar settings unchanged.[/dim]")
+    if result.returncode != 0:
+        console.print(f"[red]git diff failed:[/red]")
+        console.print(f"[dim]{result.stderr.strip()}[/dim]")
         return CommandResult(status="handled")
 
-    # Apply changes to runtime config
-    for key, value in changes.items():
-        config.update_status_bar_settings({key: value})
+    diff_output = result.stdout.strip()
+    if not diff_output:
+        console.print("[yellow]No changes to review.[/yellow]")
+        return CommandResult(status="handled")
 
-    # Persist to config.json
-    try:
-        cfg_data = config_manager.load(force_reload=True)
-        if "STATUS_BAR_SETTINGS" not in cfg_data:
-            cfg_data["STATUS_BAR_SETTINGS"] = {}
-        cfg_data["STATUS_BAR_SETTINGS"].update(changes)
-        config_manager.save(cfg_data)
-        console.print("[green]Status bar settings saved.[/green]")
-    except Exception as e:
-        console.print(f"[red]Failed to save settings: {e}[/red]")
+    # Count changed files for summary
+    file_count = diff_output.count("diff --git ")
+    console.print(f"[dim]Reviewing {file_count} changed file(s)...[/dim]")
+    console.print()
+
+    # Compute paths (same logic as main.py)
+    repo_root = Path.cwd().resolve()
+    app_root = (
+        Path(sys.executable).resolve().parent
+        if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parents[2]
+    )
+    rg_exe_name = "rg.exe" if os.name == "nt" else "rg"
+    rg_exe_path = str((app_root / "bin" / rg_exe_name).resolve())
+
+    # Create a live panel for the review sub-agent
+    panel = SubAgentPanel("Reviewing git diff", console)
+
+    # Run the review
+    review_result = review_changes(
+        diff_output=diff_output,
+        repo_root=repo_root,
+        rg_exe_path=rg_exe_path,
+        console=console,
+        chat_manager=chat_manager,
+        panel_updater=panel,
+        skip_citation_injection=True,
+    )
+
+    # Display result as rendered Markdown
+    if review_result:
+        console.print()
+        md = Markdown(left_align_headings(review_result), code_theme=MonokaiDarkBGStyle, justify="left")
+        console.print(md)
+        console.print()
+
+    # Inject review into chat history so the agent has context for follow-up questions
+    if review_result:
+        chat_manager.messages.append({
+            "role": "user",
+            "content": "/review"
+        })
+        chat_manager.messages.append({
+            "role": "assistant",
+            "content": f"Here is the code review of the current git diff:\n\n{review_result}"
+        })
 
     return CommandResult(status="handled")
 
@@ -486,10 +770,7 @@ _COMMAND_HANDLERS = {
     "/quit": _handle_exit,
     "/help": _handle_help,
     "/h": _handle_help,
-    "/debug": _handle_debug,
     "/compact": _handle_compact,
-    "/mode": _handle_mode,
-    "/logging": _handle_logging,
     "/clear": _handle_clear,
     "/new": _handle_clear,
     "/reset": _handle_clear,
@@ -501,8 +782,8 @@ _COMMAND_HANDLERS = {
     "/usage": _handle_usage,
     "/model": _handle_model,
     "/key": _handle_key,
-    "/statusbar": _handle_statusbar,
-    "/sb": _handle_statusbar,
+    "/review": _handle_review,
+    "/r": _handle_review,
 }
 
 

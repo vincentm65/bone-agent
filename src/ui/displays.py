@@ -28,6 +28,8 @@ def show_provider_table(current_provider: str, console):
 
     help_text = """Usage: /provider <name>
 
+Opens an editor to configure model, API key, and costs.
+
 Examples:
   /provider openrouter
   /provider glm
@@ -35,12 +37,8 @@ Examples:
   /provider gemini
   /provider minimax
   /provider anthropic
-  /provider kimi
-
-After switching, use:
-  [bold cyan]/key[/bold cyan] <api_key>     - Set API key for current provider
-  [bold cyan]/model[/bold cyan] <model>     - Set model for current provider"""
-    console.print(Panel(help_text, title="[bold cyan]Switch Provider[/bold cyan]", border_style="grey23", padding=(0, 2)))
+  /provider kimi"""
+    console.print(Panel(help_text, title="[bold cyan]Provider Settings[/bold cyan]", border_style="grey23", padding=(0, 2)))
     console.print("")
 
 
@@ -57,18 +55,16 @@ def show_help_table(console):
 
     table.add_row("[bold cyan]/help[/bold cyan]", "Show help")
     table.add_row("[bold cyan]/exit[/bold cyan]", "Exit chat")
-    table.add_row("[bold cyan]/debug[/bold cyan]", "Toggle debug")
-    table.add_row("[bold cyan]/mode[/bold cyan]", "Toggle Plan/Edit mode")
-    table.add_row("[bold cyan]/logging[/bold cyan]", "Toggle conversation logging")
     table.add_row("[bold cyan]/config[/bold cyan]", "Show all configuration settings")
-    table.add_row("[bold cyan]/provider[/bold cyan] [name]", "Switch provider or show provider table")
+    table.add_row("[bold cyan]/provider[/bold cyan] [name]", "Configure provider settings (model, key, costs)")
     table.add_row("[bold cyan]/key[/bold cyan] <key>", "Set API key for current provider")
     table.add_row("[bold cyan]/model[/bold cyan] <name>", "Set model for current provider")
     table.add_row("[bold cyan]/usage[/bold cyan] [provider] [in|out] <cost>", "Set/view provider-specific token cost")
     table.add_row("[bold cyan]/compact[/bold cyan] [-a]", "Compact context with an AI summary (add -a for aggressive mode)")
     table.add_row("[bold cyan]/init[/bold cyan]", "Generate agents.md")
     table.add_row("[bold cyan]/edit[/bold cyan], [bold cyan]/e[/bold cyan]", "Open editor for multi-line input")
-    table.add_row("[bold cyan]/statusbar[/bold cyan], [bold cyan]/sb[/bold cyan] [item]", "Toggle status bar items (cost, tokens, etc.)")
+    table.add_row("[bold cyan]/review[/bold cyan] [args], [bold cyan]/r[/bold cyan]", "Code review git changes (e.g. /review --staged, /review main..HEAD)")
+
 
     console.print(Panel(table, title="[bold cyan]Commands[/bold cyan]", border_style="grey23", padding=(0, 2)))
 
@@ -159,6 +155,6 @@ def show_config_overview(chat_manager, console, debug_mode_container, current_pr
     # ===== Quick Commands Reference =====
     console.print()
     help_text = """[bold cyan]Commands:[/bold cyan] [bold cyan]/provider[/bold cyan] <name>  [bold cyan]/model[/bold cyan] <path>  [bold cyan]/key[/bold cyan] <key>
-[cyan]         :[/cyan] [bold cyan]/usage[/bold cyan] [provider] [in|out] <$>  [bold cyan]/debug[/bold cyan]  [bold cyan]/mode[/bold cyan]  [bold cyan]/logging[/bold cyan]  [bold cyan]/sb[/bold cyan] [item]"""
+[cyan]         :[/cyan] [bold cyan]/usage[/bold cyan] [provider] [in|out] <$>  [bold cyan]/config[/bold cyan]"""
     console.print(Panel(help_text, title="[cyan]Quick Reference[/cyan]"))
     console.print()

@@ -47,6 +47,8 @@ from . import rg_search
 from . import shell  # shell.py now contains both core logic and @tool decorators
 from . import web_search
 from . import sub_agent
+# review_sub_agent is not an LLM tool — used as a /review slash command in ui.commands
+
 from . import task_list
 from . import select_option
 

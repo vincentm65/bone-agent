@@ -455,6 +455,13 @@ IMPORTANT: You are a research sub-agent focused on gathering information. Use re
     "review_mode": """# Current Mode: CODE REVIEW
 
 You are a code review agent. Analyze the provided git diff and provide structured feedback.
+Your output goes directly to the user — write clean, readable markdown.
+
+## Workflow
+1. Parse file paths from diff headers (lines starting with `+++ b/` or `--- a/`)
+2. Use `read_file` on each changed file to get surrounding context
+3. Cross-reference changes against related files when needed
+4. Write your review
 
 ## Review Checklist
 - **Correctness**: Logic bugs, off-by-one errors, null/edge cases
@@ -464,13 +471,23 @@ You are a code review agent. Analyze the provided git diff and provide structure
 - **Completeness**: Partial changes (e.g., new function but no tests, new field but no migration)
 
 ## Output Format
-1. **Summary** - 1-2 sentence overview of changes
-2. **Issues** - numbered list, each with severity (critical/warning/info), file, line range, and description
-3. **Suggestions** - optional non-blocking improvements
-4. **Verdict** - approve / request changes / needs discussion
 
-Read changed files for surrounding context before commenting on them.
-Use bracketed citations: [path/to/file] (lines N-M)""",
+### Summary
+1-2 sentence overview of changes.
+
+### Issues
+For each issue, use this format:
+- **SEVERITY** `file_path:line` — description
+
+Group by severity: Critical issues first, then warnings, then info.
+
+### Suggestions
+Optional non-blocking improvements (same format as issues).
+
+### Verdict
+One of: **Approve** / **Request Changes** / **Needs Discussion**
+
+Keep it concise. Reference files as `path/to/file:line_number`. Do NOT use bracketed citation syntax.""",
 }
 
 
@@ -530,12 +547,21 @@ def build_system_prompt(mode: str, plan_type: str = None) -> str:
     return "\n\n".join(sections)
 
 
-def build_sub_agent_prompt() -> str:
-    """Build prompt for sub-agent (research-focused, read-only).
+def build_sub_agent_prompt(sub_agent_type: str = "research") -> str:
+    """Build prompt for sub-agent (research or review, read-only).
+
+    Args:
+        sub_agent_type: Type of sub-agent ('research' or 'review').
 
     Returns:
         Complete system prompt string
     """
+    # Pick the mode section based on sub_agent_type
+    if sub_agent_type == "review":
+        mode_section = SUB_AGENT_SECTIONS["review_mode"]
+    else:
+        mode_section = SUB_AGENT_SECTIONS["mode"]
+
     sections = [
         BASE_SECTIONS["intro"],
         BASE_SECTIONS["tone_and_style"],
@@ -554,7 +580,7 @@ def build_sub_agent_prompt() -> str:
         BASE_SECTIONS["casual_interactions"],
         BASE_SECTIONS["best_practices"],
         BASE_SECTIONS["temp_folder"],
-        SUB_AGENT_SECTIONS["mode"],
+        mode_section,
     ]
     return "\n\n".join(sections)
 

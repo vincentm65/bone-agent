@@ -1054,6 +1054,25 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         self.sync_log()
         return self.interaction_mode
 
+    def set_interaction_mode(self, mode: str) -> str:
+        """Set interaction mode to a specific value.
+
+        Args:
+            mode: The desired mode ('edit' or 'plan').
+
+        Returns:
+            str: The new interaction mode.
+        """
+        modes = ("edit", "plan")
+        if mode not in modes:
+            raise ValueError(f"Invalid mode '{mode}'. Must be one of {modes}")
+        if mode == self.interaction_mode:
+            return self.interaction_mode
+        self.interaction_mode = mode
+        self.update_system_prompt()
+        self.sync_log()
+        return self.interaction_mode
+
     def reset_session(self):
         """Reset chat session (clear messages and history).
 
@@ -1117,6 +1136,20 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             for msg in self.messages:
                 self.markdown_logger.log_message(msg)
             return True
+
+    def set_logging(self, enabled: bool) -> bool:
+        """Set conversation logging to a specific state.
+
+        Args:
+            enabled: True to enable logging, False to disable.
+
+        Returns:
+            bool: The new logging state.
+        """
+        current_state = self.markdown_logger is not None
+        if enabled == current_state:
+            return current_state
+        return self.toggle_logging()
 
     def cleanup(self):
         """Terminate server process if running."""
