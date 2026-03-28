@@ -9,7 +9,7 @@ from core.config_manager import ConfigManager as ConfigManagerClass
 from ui.displays import show_help_table
 from ui.banner import display_startup_banner
 from core.agentic import SubAgentPanel
-from utils.settings import MonokaiDarkBGStyle
+from utils.settings import MonokaiDarkBGStyle, context_settings
 from utils.markdown import left_align_headings
 from rich.markdown import Markdown
 # Global ConfigManager instance
@@ -153,8 +153,29 @@ def _handle_config(chat_manager, console, debug_mode_container, args):
         ),
     ]
 
+    # Build context/compaction settings
+    ctx_settings = [
+        SettingOption(
+            key="compact_trigger_tokens", text="Compaction Threshold",
+            value=context_settings.compact_trigger_tokens,
+            input_type="number",
+        ),
+        SettingOption(
+            key="enable_tool_compaction", text="Per-Message Tool Compaction",
+            value=context_settings.tool_compaction.enable_per_message_compaction,
+            input_type="boolean",
+            on_text="ON", off_text="OFF",
+        ),
+        SettingOption(
+            key="keep_recent_tool_blocks", text="Keep Recent Tool Blocks",
+            value=context_settings.tool_compaction.keep_recent_tool_blocks,
+            input_type="number",
+        ),
+    ]
+
     categories = [
         SettingCategory(title="Runtime Settings", settings=runtime_settings),
+        SettingCategory(title="Context Settings", settings=ctx_settings),
         SettingCategory(title="Status Bar Items", settings=sb_settings),
     ]
     selector = SettingSelector(
@@ -203,10 +224,39 @@ def _handle_config(chat_manager, console, debug_mode_container, args):
                 console.print("[bold red on default]  Dangerous git commands are still blocked.[/bold red on default]")
                 console.print("[bold yellow on default]  Use at your own risk![/bold yellow on default]")
                 console.print()
+        elif key == "compact_trigger_tokens":
+            context_settings.compact_trigger_tokens = int(value)
+            change_lines.append(f"  Compaction Threshold: {value:,} tokens")
+        elif key == "enable_tool_compaction":
+            context_settings.tool_compaction.enable_per_message_compaction = value
+            state = "enabled" if value else "disabled"
+            change_lines.append(f"  Per-Message Tool Compaction: {state}")
+        elif key == "keep_recent_tool_blocks":
+            context_settings.tool_compaction.keep_recent_tool_blocks = int(value)
+            change_lines.append(f"  Keep Recent Tool Blocks: {value}")
         elif key in sb_labels:
             sb_changes[key] = value
             state = "ON" if value else "OFF"
             change_lines.append(f"  {sb_labels[key]}: {state}")
+
+    # Persist context setting changes to config
+    ctx_changes = {k: v for k, v in changes.items() if k in ("compact_trigger_tokens", "enable_tool_compaction", "keep_recent_tool_blocks")}
+    if ctx_changes:
+        try:
+            cfg_data = config_manager.load(force_reload=True)
+            if "CONTEXT_SETTINGS" not in cfg_data:
+                cfg_data["CONTEXT_SETTINGS"] = {}
+            if "tool_compaction" not in cfg_data["CONTEXT_SETTINGS"]:
+                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"] = {}
+            if "compact_trigger_tokens" in ctx_changes:
+                cfg_data["CONTEXT_SETTINGS"]["compact_trigger_tokens"] = int(ctx_changes["compact_trigger_tokens"])
+            if "enable_tool_compaction" in ctx_changes:
+                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["enable_per_message_compaction"] = ctx_changes["enable_tool_compaction"]
+            if "keep_recent_tool_blocks" in ctx_changes:
+                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["keep_recent_tool_blocks"] = int(ctx_changes["keep_recent_tool_blocks"])
+            config_manager.save(cfg_data)
+        except Exception as e:
+            console.print(f"[red]Failed to save context settings: {e}[/red]")
 
     # Persist status bar changes to config
     if sb_changes:
