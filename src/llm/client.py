@@ -1,10 +1,19 @@
 """LLM client for making API requests to various providers."""
 
+import logging
+
 import requests
 from llm import config as config_module
 from llm.config import PROVIDER_REGISTRY, get_provider_config, get_providers
 from llm.providers import get_handler
 from exceptions import LLMConnectionError, LLMResponseError, ConfigurationError
+from utils.validation import validate_api_url
+
+logger = logging.getLogger(__name__)
+
+# Connection/read timeouts (seconds)
+_CONNECT_TIMEOUT = 10
+_READ_TIMEOUT = 120
 
 
 class StreamWrapper:
@@ -57,8 +66,15 @@ class LLMClient:
         if model_name:
             payload["model"] = model_name
 
+        url = f"{registry['api_base']}{registry['endpoint']}"
+        valid, err = validate_api_url(url)
+        if not valid:
+            raise ConfigurationError(
+                f"Insecure API endpoint for provider '{self.provider}': {err}"
+            )
+
         return {
-            "url": f"{registry['api_base']}{registry['endpoint']}",
+            "url": url,
             "headers": headers,
             "payload": payload,
             "error_prefix": registry["error_prefix"],
@@ -87,7 +103,9 @@ class LLMClient:
                 config["url"],
                 headers=config["headers"],
                 json=payload,
-                stream=stream
+                stream=stream,
+                verify=True,
+                timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
             )
 
             # For better debugging, include response text on 4xx errors

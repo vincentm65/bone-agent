@@ -19,7 +19,7 @@ env/
 node_modules/
 
 # Deployment infrastructure (vmcode-proxy server)
-vmcode-proxy/
+#vmcode-proxy/
 
 # Configuration (keep .example files!)
 config.yaml

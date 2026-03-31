@@ -9,6 +9,7 @@ from core.config_manager import ConfigManager as ConfigManagerClass
 from ui.displays import show_help_table
 from ui.banner import display_startup_banner
 from core.agentic import SubAgentPanel
+from ui.setting_selector import SettingSelector, SettingCategory, SettingOption
 from utils.settings import MonokaiDarkBGStyle, context_settings
 from utils.markdown import left_align_headings
 from rich.markdown import Markdown
@@ -16,8 +17,16 @@ from rich.table import Table
 from rich import box
 import json
 import logging
+import ssl
 import urllib.request
 import urllib.error
+from utils.validation import validate_api_url
+
+
+def _shorten_url(url: str) -> str:
+    """Return the URL as-is (shortening handled by the backend or manual copy)."""
+    return url
+
 
 logger = logging.getLogger(__name__)
 
@@ -517,20 +526,60 @@ def _handle_provider(chat_manager, console, debug_mode_container, args):
 
 def _handle_model(chat_manager, console, debug_mode_container, args):
     """Handle model setting command."""
-    if not args:
+    current_provider = getattr(chat_manager.client, 'provider', 'unknown')
+    
+    # For vmcode provider, show interactive model selection
+    if current_provider == "vmcode" and not args:
+        from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
+        
+        cfg = config.get_provider_config(current_provider)
+        current_model = cfg.get('model') or cfg.get('api_model') or ''
+        
+        vmcode_models = [
+            ("GLM-4.7", "glm-4.7"),
+            ("GLM-5", "glm-5"),
+            ("GLM-5-Turbo", "glm-5-turbo"),
+            ("Minimax-2.7", "minimax-2.7"),
+        ]
+        
+        model_settings = []
+        for display_name, model_id in vmcode_models:
+            label = display_name
+            if model_id == current_model or display_name.lower() == current_model.lower():
+                label += "  <style fg='green'>(Active)</style>"
+            model_settings.append(SettingOption(
+                key=model_id,
+                text=label,
+                value=False,
+                input_type="nav",
+                on_text="",
+                off_text="",
+            ))
+        
+        selector = SettingSelector(
+            categories=[SettingCategory(title="vmcode Models", settings=model_settings)],
+            title="Select Model",
+            show_save=False,
+        )
+        result = selector.run()
+        
+        if result is None or not isinstance(result, dict) or '_nav' not in result:
+            display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
+            console.print("[dim]Cancelled.[/dim]")
+            return CommandResult(status="handled")
+        
+        model = result['_nav']
+    elif not args:
         # Show current model for current provider
-        current_provider = getattr(chat_manager.client, 'provider', 'unknown')
         cfg = config.get_provider_config(current_provider)
         model = cfg.get('model') or cfg.get('api_model') or 'Not set'
         console.print(f"[bold cyan]Current provider:[/bold cyan] {current_provider}")
         console.print(f"[bold cyan]Current model:[/bold cyan] {model}")
         return CommandResult(status="handled")
-
-    model = args.strip()
+    else:
+        model = args.strip()
 
     # Set model for current provider
-    current_provider = getattr(chat_manager.client, 'provider', 'unknown')
-
     try:
         backup_path = config_manager.set_model(current_provider, model)
         console.print(f"[green]Model set to '{model}' for {current_provider} provider[/green]")
@@ -711,23 +760,32 @@ def _handle_usage(chat_manager, console, debug_mode_container, args):
             console.print()
             return CommandResult(status="handled")
 
-        status, usage = _call_proxy_api("GET", "/v1/usage", api_base, api_key=api_key)
-        if status == 0 or usage is None:
+        # Fetch usage from proxy and render percentage bars
+        status_code, usage = _call_proxy_api("GET", "/v1/usage", api_base, api_key=api_key)
+        if status_code == 0 or usage is None:
             console.print("[red]Failed to fetch usage from vmcode.[/red]")
             console.print("[dim]Check your API key and network connection.[/dim]")
             console.print()
             return CommandResult(status="handled")
 
         plan_label = usage.get("plan", "unknown").capitalize()
-        tokens_used = usage.get("tokens_used", 0)
-        tokens_limit = usage.get("tokens_limit", 0)
-        tokens_remaining = usage.get("tokens_remaining", 0)
-        reset_date = usage.get("reset_date", "unknown")
+        console.print(f"[bold cyan]📊 Usage — {plan_label} Plan[/bold cyan]")
+        console.print()
 
-        console.print(f"[cyan]Proxy Usage ({plan_label} Plan):[/cyan]")
-        console.print(f"  Tokens used:     {tokens_used:,} / {tokens_limit:,}")
-        console.print(f"  Tokens remaining: {tokens_remaining:,}")
-        console.print(f"  Reset date:      {reset_date}")
+        for period in ("daily", "weekly", "monthly"):
+            data = usage.get(period, {})
+            pct = data.get("pct_used", 0)
+            label = period.capitalize()
+            filled = int(round(pct / 100 * 20))
+            bar = "█" * filled + "░" * (20 - filled)
+            if pct >= 90:
+                icon = "🔴"
+            elif pct >= 70:
+                icon = "🟡"
+            else:
+                icon = "🟢"
+            console.print(f"  {icon} [bold]{label:7s}[/bold]  {bar}  [bold]{pct:.1f}%[/bold]")
+
         console.print()
         return CommandResult(status="handled")
 
@@ -881,18 +939,27 @@ def _call_proxy_api(
     Returns (status_code, parsed_json_or_None).
     Returns (0, None) on network/parse failures.
     """
+    # Validate endpoint uses HTTPS (or localhost HTTP)
+    full_url = f"{api_base.rstrip('/')}{path}"
+    valid, err = validate_api_url(full_url)
+    if not valid:
+        logger.warning("Proxy API call rejected: %s", err)
+        return (0, None)
+
+    # Enforce TLS regardless of global settings
+    ssl_ctx = ssl.create_default_context()
+
     try:
-        url = f"{api_base.rstrip('/')}{path}"
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
 
-        req = urllib.request.Request(url, data=data, method=method)
+        req = urllib.request.Request(full_url, data=data, method=method)
         req.add_header("Content-Type", "application/json")
         if api_key:
             req.add_header("Authorization", f"Bearer {api_key}")
 
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
             return (resp.status, json.loads(resp.read().decode()))
     except urllib.error.HTTPError as e:
         try:
@@ -962,19 +1029,17 @@ def _handle_plan(chat_manager, console, debug_mode_container, args):
             if acct_status == 200 and acct_data:
                 current_plan = acct_data.get("plan")
 
-    table = Table("Plan", "Price", "Monthly Tokens", "Rate Limit (req/min)", title="Available Plans", box=box.SIMPLE_HEAD)
+    table = Table("Plan", "Price", "Rate Limit (req/min)", title="Available Plans", box=box.SIMPLE_HEAD)
     for plan in plans:
         is_current = current_plan and plan["id"] == current_plan
         name = f"[bold green]{plan['name']} (current)[/bold green]" if is_current else plan["name"]
         if plan["id"] == "free":
             price = "Free model only"
-            tokens = "N/A"
             rate = "N/A"
         else:
-            price = f"${plan['price']}/mo" if plan["price"] > 0 else "Free"
-            tokens = f"{plan['tokens']:,}"
-            rate = str(plan["rate_limit"])
-        table.add_row(name, price, tokens, rate)
+            price = f"${plan.get('price', 0)}/mo" if plan.get("price", 0) > 0 else "Free"
+            rate = str(plan["rate_limit"]) if plan.get("rate_limit") is not None else "N/A"
+        table.add_row(name, price, rate)
 
     console.print(table)
     console.print("[dim]Upgrade: [bold cyan]/upgrade pro[/bold cyan]  |  Manage: [bold cyan]/account[/bold cyan][/dim]")
@@ -1107,7 +1172,7 @@ def _handle_account(chat_manager, console, debug_mode_container, args):
 
 
 def _handle_upgrade(chat_manager, console, debug_mode_container, args):
-    """Handle /upgrade [plan] — open checkout or billing portal."""
+    """Handle /upgrade — show plan selector, then open checkout or billing portal."""
     if not _require_proxy_provider(chat_manager, console):
         return CommandResult(status="handled")
 
@@ -1117,73 +1182,116 @@ def _handle_upgrade(chat_manager, console, debug_mode_container, args):
         console.print()
         return CommandResult(status="handled")
 
-    # Determine target plan
-    target = (args or "").strip().lower()
-    if target in ("pro", ""):
-        target = "pro"
-    elif target in ("lite", "free"):
-        pass  # lite/free downgrade via portal
-    else:
-        console.print("[red]Usage: /upgrade [pro|lite|free][/red]")
-        console.print("[dim]/upgrade pro  — upgrade to Pro[/dim]")
-        console.print("[dim]/upgrade lite — manage Lite subscription[/dim]")
-        console.print("[dim]/upgrade free — manage Free tier[/dim]")
-        console.print()
-        return CommandResult(status="handled")
-
-    # Check current plan to avoid redundant actions
+    # Check current plan for showing the current selection
+    current_plan = "free"
     acct_status, acct_data = _call_proxy_api("GET", "/v1/auth/account", api_base, api_key=api_key)
     if acct_status == 200 and acct_data:
         current_plan = acct_data.get("plan", "free")
-        if current_plan == target:
-            console.print(f"[yellow]You're already on {current_plan.capitalize()}.[/yellow]")
-            console.print("[dim]Use [bold cyan]/account[/bold cyan] to manage your subscription.[/dim]")
-            console.print()
-            return CommandResult(status="handled")
+
+    # Get available plans from API
+    status, data = _call_proxy_api("GET", "/v1/billing/plans", api_base)
+    if status == 200 and data and "plans" in data:
+        plans = data["plans"]
+    else:
+        # Fallback to hardcoded defaults
+        plans = [
+            {"id": "free", "name": "Free", "price": 0, "tokens": 0, "rate_limit": 0},
+            {"id": "lite", "name": "Lite", "price": 10, "tokens": 2_000_000, "rate_limit": 60},
+            {"id": "pro", "name": "Pro", "price": 50, "tokens": 15_000_000, "rate_limit": 300},
+        ]
+
+    # Build plan options for selector
+    plan_options = []
+    for plan in plans:
+        if plan["id"] == "free":
+            price_desc = "Free model only"
+        else:
+            price_desc = f"${plan['price']}/mo" if plan["price"] > 0 else "Free"
+        plan_options.append({
+            "value": plan["id"],
+            "text": plan["name"],
+            "description": price_desc,
+        })
+
+    # Map current plan to option value
+    current_value = current_plan if current_plan in ("pro", "lite", "free") else "free"
+
+    # Show plan selector
+    selector = SettingSelector(
+        categories=[
+            SettingCategory(
+                title="Select Plan",
+                settings=[
+                    SettingOption(
+                        key="plan",
+                        text="Select a plan:",
+                        value=current_value,
+                        input_type="options",
+                        options=plan_options,
+                    )
+                ]
+            )
+        ],
+        title="Choose Your Plan",
+        show_save=False,
+    )
+
+    result = selector.run()
+
+    if result is None:
+        console.print("[dim]Cancelled.[/dim]")
+        console.print()
+        return CommandResult(status="handled")
+
+    target = result.get("plan", "pro")
+
+    # Skip if already on the selected plan
+    if target == current_plan:
+        console.print(f"[yellow]You're already on {current_plan.capitalize()}.[/yellow]")
+        console.print("[dim]Use [bold cyan]/account[/bold cyan] to manage your subscription.[/dim]")
+        console.print()
+        return CommandResult(status="handled")
 
     console.print(f"[cyan]Opening {'checkout' if target == 'pro' else 'billing portal'}...[/cyan]")
 
     if target == "pro":
-        status, data = _call_proxy_api(
-            "POST", "/v1/billing/checkout", api_base,
-            body={
-                "plan": "pro",
-                "success_url": "https://vmcode.dev",
-                "cancel_url": "https://vmcode.dev",
-            },
-            api_key=api_key,
-        )
-        if status == 200 and data and "url" in data:
-            url = data["url"]
-        else:
-            detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
-            console.print(f"[red]Failed to create checkout session: {detail}[/red]")
-            console.print()
-            return CommandResult(status="handled")
+        plan_id = "pro"
+    elif target == "lite":
+        plan_id = "lite"
     else:
-        # lite/free — use billing portal
-        status, data = _call_proxy_api(
-            "POST", "/v1/billing/portal", api_base,
-            body={"return_url": "https://vmcode.dev"},
-            api_key=api_key,
-        )
-        if status == 200 and data and "url" in data:
-            url = data["url"]
-        else:
-            detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
-            console.print(f"[red]Failed to open billing portal: {detail}[/red]")
-            console.print()
-            return CommandResult(status="handled")
+        plan_id = "free"
+
+    status, data = _call_proxy_api(
+        "POST", "/v1/billing/checkout", api_base,
+        body={
+            "plan": plan_id,
+            "success_url": "https://vmcode.dev",
+            "cancel_url": "https://vmcode.dev",
+        },
+        api_key=api_key,
+    )
+    action = "create checkout session"
+
+    if status == 200 and data and "url" in data:
+        url = data["url"]
+    else:
+        detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
+        console.print(f"[red]Failed to {action}: {detail}[/red]")
+        console.print()
+        return CommandResult(status="handled")
 
     # Open in browser
+    short_url = _shorten_url(url)
     try:
         import webbrowser
         webbrowser.open(url)
-        console.print(f"[green]Opened in browser: {url}[/green]")
+        console.print(f"[green]Opened in browser[/green]")
     except Exception:
-        console.print(f"[cyan]Copy this URL to your browser:[/cyan]")
-        console.print(f"  [bold]{url}[/bold]")
+        pass
 
+    console.print()
+    console.print(f"[cyan]Or copy this link:[/cyan]")
+    console.print(f"  [bold]{short_url}[/bold]")
     console.print()
     return CommandResult(status="handled")
 

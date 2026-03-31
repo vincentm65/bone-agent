@@ -21,7 +21,7 @@ class SettingOption:
     text: str                         # Display label
     value: Any                        # Current value
     options: List[Dict[str, Any]] = None  # For enum-style: {"value": x, "text": y}
-    input_type: str = "select"        # "select", "text", "number", "boolean", "float"
+    input_type: str = "select"        # "select", "text", "number", "boolean", "float", "options"
     description: str = ""
     min_val: Union[int, float] = None
     max_val: Union[int, float] = None
@@ -87,6 +87,8 @@ class SettingSelector:
             for cat in categories
             for s in cat.settings
         }
+        # For "options" type: track which option is selected within a setting
+        self._current_option_idx = 0
 
     def _get_current_setting(self) -> Optional[SettingOption]:
         """Get the currently selected setting."""
@@ -224,6 +226,35 @@ class SettingSelector:
                             f"  <style fg='gray'>{tag}</style>"
                             f"  {label}"
                         )
+
+                elif setting.input_type == "options" and setting.options:
+                    # Show each option on its own line with radio-style selection
+                    label = setting.text
+                    if is_selected:
+                        lines.append(f"> <b>{label}</b>")
+                    else:
+                        lines.append(f"  <b>{label}</b>")
+                    for opt_idx, opt in enumerate(setting.options):
+                        opt_text = opt.get("text", str(opt.get("value", "")))
+                        opt_value = opt.get("value")
+                        is_current = opt_value == setting.value
+                        is_opt_selected = is_selected and is_current
+                        indent = "  > " if is_opt_selected else "    "
+                        marker = "◉" if is_current else "○"
+                        desc = opt.get("description", "")
+                        if is_current:
+                            color = "cyan"
+                            lines.append(
+                                f'{indent}<style fg="{color}">{marker}</style> '
+                                f'<style fg="{color}" bold="true">{opt_text}</style>'
+                                + (f'  <style fg="gray">{desc}</style>' if desc else '')
+                            )
+                        else:
+                            lines.append(
+                                f'{indent}<style fg="gray">{marker}</style> '
+                                f'{opt_text}'
+                                + (f'  <style fg="gray">{desc}</style>' if desc else '')
+                            )
                 else:
                     label = setting.text
                     val = self._format_value(setting)
@@ -259,6 +290,8 @@ class SettingSelector:
         else:
             if setting and setting.input_type == "nav":
                 lines.append("<style fg='gray'>↑↓ Navigate, Enter to open, Esc to cancel</style>")
+            elif setting and setting.input_type == "options":
+                lines.append("<style fg='gray'>↑↓ Change option, Enter to select</style>")
             elif setting and self._is_boolean_setting(setting):
                 lines.append("<style fg='gray'>↑↓ Navigate, Enter to toggle, Esc to cancel</style>")
             elif setting:
@@ -380,6 +413,14 @@ class SettingSelector:
                     self._apply_change(setting.key, setting.options[new_idx].get("value"))
                 invalidate()
                 return
+            # Options type: navigate within options
+            setting = self._get_current_setting()
+            if setting and setting.input_type == "options" and setting.options:
+                current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
+                new_idx = max(0, current_idx - 1)
+                self._apply_change(setting.key, setting.options[new_idx].get("value"))
+                invalidate()
+                return
             self._navigate_up()
             invalidate()
 
@@ -391,6 +432,14 @@ class SettingSelector:
                     current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
                     new_idx = min(len(setting.options) - 1, current_idx + 1)
                     self._apply_change(setting.key, setting.options[new_idx].get("value"))
+                invalidate()
+                return
+            # Options type: navigate within options
+            setting = self._get_current_setting()
+            if setting and setting.input_type == "options" and setting.options:
+                current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
+                new_idx = min(len(setting.options) - 1, current_idx + 1)
+                self._apply_change(setting.key, setting.options[new_idx].get("value"))
                 invalidate()
                 return
             self._navigate_down()
@@ -426,6 +475,11 @@ class SettingSelector:
                 new_idx = (current_idx + 1) % len(setting.options)
                 self._apply_change(setting.key, setting.options[new_idx].get("value"))
                 invalidate()
+                return
+
+            # Options: confirm selection (same behavior as save)
+            if setting.input_type == "options" and setting.options:
+                self._save(event)
                 return
 
             if self.editing_value:

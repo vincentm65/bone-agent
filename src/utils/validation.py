@@ -1,8 +1,39 @@
 """Command validation and duplicate detection."""
 
 import os
+import re
 import shlex
+from urllib.parse import urlparse
 from llm.config import ALLOWED_COMMANDS
+
+# Localhost patterns allowed over plain HTTP (no TLS needed for loopback)
+_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def validate_api_url(url: str) -> tuple[bool, str]:
+    """Validate an API base URL for security.
+
+    Enforces HTTPS for all non-localhost endpoints.
+    Rejects obviously malformed URLs.
+
+    Returns:
+        (is_valid, error_message)
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, f"Malformed URL: {url}"
+
+    if parsed.scheme not in ("http", "https"):
+        return False, f"Invalid URL scheme '{parsed.scheme}', expected http or https"
+
+    if parsed.scheme == "http" and parsed.hostname not in _LOCALHOST_HOSTS:
+        return False, (
+            f"Plain HTTP is not allowed for remote endpoints. "
+            f"Use HTTPS for {parsed.hostname or url}"
+        )
+
+    return True, ""
 
 
 # Commands that should be silently rejected in execute_command (redirect to native tools)
