@@ -1315,10 +1315,18 @@ class AgenticOrchestrator:
         if use_parallel and self.debug_mode:
             self.console.print(f"[cyan]Executing {len(tool_calls)} tools in parallel[/cyan]")
 
+        # Lock compaction during tool execution to prevent orphaning tool_call_ids
+        self.chat_manager._compaction_locked = True
+
         if use_parallel:
-            return self._execute_tools_parallel(response, thinking_indicator)
+            result = self._execute_tools_parallel(response, thinking_indicator)
         else:
-            return self._execute_tools_sequential(tool_calls, thinking_indicator)
+            result = self._execute_tools_sequential(tool_calls, thinking_indicator)
+
+        # Unlock compaction after all tool results are appended
+        self.chat_manager._compaction_locked = False
+
+        return result
 
     def _execute_tools_sequential(self, tool_calls, thinking_indicator):
         """Execute tools one at a time (original behavior).

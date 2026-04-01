@@ -54,6 +54,10 @@ class ChatManager:
                 conversations_dir=context_settings.conversations_dir
             )
 
+        # Compaction lock: prevents compaction during active tool execution
+        # Set by agentic.py before executing tools, cleared after all results appended
+        self._compaction_locked = False
+
         self._init_messages(reset_totals=True)
 
     def _init_messages(self, reset_totals: bool = True):
@@ -574,6 +578,10 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
         This is called after the LLM produces a final answer with no more tool calls.
         """
+        # Skip compaction if locked (tools are actively being executed)
+        if self._compaction_locked:
+            return
+
         if not context_settings.tool_compaction.enable_per_message_compaction:
             return
 
@@ -829,6 +837,10 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         # Check against total context tokens (system prompt + messages + tools)
         self._update_context_tokens()
         total_tokens = self.token_tracker.current_context_tokens
+
+        # Skip auto-compaction if locked (tools are actively being executed)
+        if self._compaction_locked:
+            return
 
         # Use custom threshold if set, otherwise use global setting
         trigger_threshold = (
