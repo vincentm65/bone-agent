@@ -1,5 +1,6 @@
 """Interactive selection tool for presenting multiple-choice questions to the user."""
 
+import asyncio
 from threading import Timer
 from typing import Optional, List, Dict, Any, Union
 
@@ -410,7 +411,8 @@ class SelectionPanel:
             style=TOOLBAR_STYLE,
         )
 
-        result = application.run()
+        # Use run_async with asyncio to properly await coroutines
+        result = asyncio.run(application.run_async())
 
         return result
 

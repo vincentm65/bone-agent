@@ -772,7 +772,7 @@ def _handle_usage(chat_manager, console, debug_mode_container, args):
         console.print(f"[bold cyan]Usage -- {plan_label} Plan[/bold cyan]")
         console.print()
 
-        for period in ("daily", "weekly", "monthly"):
+        for period in ("daily", "weekly"):
             data = usage.get(period, {})
             pct = data.get("pct_used", 0)
             label = period.capitalize()

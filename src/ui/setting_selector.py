@@ -1,5 +1,6 @@
 """Reusable component for interactive setting selection and editing."""
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable, Union
 
@@ -575,7 +576,8 @@ class SettingSelector:
         # Save cursor position before rendering so we can erase on exit
         application.output.write_raw("\033[s")
         application.output.flush()
-        result = application.run()
+        # Use run_async with asyncio to properly await coroutines
+        result = asyncio.run(application.run_async())
 
         # Erase rendered content: use ANSI save/restore cursor position.
         # We saved cursor before the app rendered, so restoring it puts

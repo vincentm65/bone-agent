@@ -5,7 +5,11 @@ import sys
 import time
 import random
 import threading
+import warnings
 from pathlib import Path
+
+# Suppress prompt_toolkit RuntimeWarning about unawaited coroutines during cleanup
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # Add src directory to Python path so we can import llm, core, utils modules
 src_dir = Path(__file__).resolve().parent.parent

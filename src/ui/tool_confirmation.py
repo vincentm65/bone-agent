@@ -1,5 +1,6 @@
 """Interactive tool confirmation panel with arrow key navigation."""
 
+import asyncio
 from threading import Timer
 from typing import Optional, Tuple
 from prompt_toolkit import HTML
@@ -95,6 +96,8 @@ class ToolConfirmationPanel:
             event: PromptToolkit event object
             result: Result value to return when application exits
         """
+        if self._showing_summary:
+            return
         self._showing_summary = True
         self._selected_value = result
         event.app.invalidate()
@@ -207,5 +210,6 @@ class ToolConfirmationPanel:
             mouse_support=False,
         )
 
-        result = application.run()
+        # Use run_async with asyncio to properly await coroutines
+        result = asyncio.run(application.run_async())
         return self._handle_result(result)
