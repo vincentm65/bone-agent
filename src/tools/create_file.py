@@ -13,7 +13,8 @@ from .helpers.formatters import format_file_result
 def _validate_create_path(
     path_str: str,
     repo_root: Path,
-    gitignore_spec
+    gitignore_spec,
+    vault_root: Path = None,
 ) -> Tuple[Optional[Path], Optional[str]]:
     """Validate and resolve path for file creation.
 
@@ -21,15 +22,18 @@ def _validate_create_path(
         path_str: Path string to validate
         repo_root: Repository root directory
         gitignore_spec: Optional PathSpec for .gitignore filtering
+        vault_root: Optional Obsidian vault root path
 
     Returns:
         (resolved_path, error_message) - error_message is None if valid
     """
-    resolver = PathResolver(repo_root=repo_root, gitignore_spec=gitignore_spec)
+    vault_path = Path(vault_root) if vault_root else None
+    resolver = PathResolver(repo_root=repo_root, gitignore_spec=gitignore_spec, vault_path=vault_path)
     return resolver.resolve_and_validate(
         path_str,
         check_gitignore=True,
-        must_exist=False  # File doesn't need to exist yet
+        must_exist=False,  # File doesn't need to exist yet
+        enforce_boundary=vault_path is not None,
     )
 
 
@@ -50,7 +54,8 @@ def create_file(
     path_str: str,
     repo_root: Path,
     content: Optional[str] = None,
-    gitignore_spec = None
+    gitignore_spec = None,
+    vault_root: str = None,
 ) -> str:
     """Create a new file with optional initial content.
 
@@ -62,13 +67,14 @@ def create_file(
         repo_root: Repository root directory (for path resolution)
         content: Optional initial content for the file. If omitted, creates empty file.
         gitignore_spec: Optional PathSpec for .gitignore filtering
+        vault_root: Optional Obsidian vault root path
 
     Returns:
         str: Formatted result with exit_code and status, including preview
     """
     try:
         # Validate path
-        resolved, error = _validate_create_path(path_str, repo_root, gitignore_spec)
+        resolved, error = _validate_create_path(path_str, repo_root, gitignore_spec, vault_root=vault_root)
         if error:
             return format_file_result(exit_code=1, error=error, path=path_str)
 

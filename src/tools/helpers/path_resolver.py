@@ -33,15 +33,18 @@ class PathResolver:
     def __init__(
         self,
         repo_root: Path,
-        gitignore_spec = None
+        gitignore_spec = None,
+        vault_path: Path = None
     ):
         """Initialize the path resolver.
 
         Args:
             repo_root: Repository root directory for resolving relative paths
             gitignore_spec: Optional PathSpec for .gitignore filtering
+            vault_path: Optional Obsidian vault root (allowed as second base path)
         """
         self.repo_root = repo_root
+        self.vault_path = vault_path
         self.gitignore_spec = gitignore_spec
 
     def resolve_and_validate(
@@ -50,7 +53,8 @@ class PathResolver:
         check_gitignore: bool = True,
         must_exist: bool = True,
         must_be_file: bool = False,
-        must_be_dir: bool = False
+        must_be_dir: bool = False,
+        enforce_boundary: bool = False,
     ) -> Tuple[Optional[Path], Optional[str]]:
         """Validate and resolve a path string.
 
@@ -67,6 +71,7 @@ class PathResolver:
             must_exist: Whether the path must exist on disk
             must_be_file: Whether the path must be a file (requires must_exist=True)
             must_be_dir: Whether the path must be a directory (requires must_exist=True)
+            enforce_boundary: Whether to restrict paths to repo_root or vault_path (default: False)
 
         Returns:
             Tuple of (resolved_path, error_message)
@@ -102,6 +107,25 @@ class PathResolver:
             # Resolve to absolute path (handles .. and symlinks)
             path = path.resolve()
 
+            # Step 2b: Security boundary — path must be within repo_root or vault_path
+            if enforce_boundary:
+                try:
+                    path.relative_to(self.repo_root)
+                except ValueError:
+                    if self.vault_path is not None:
+                        try:
+                            path.relative_to(self.vault_path)
+                        except ValueError:
+                            elapsed = time.time() - start_time
+                            _track_validation_error("outside_allowed_roots")
+                            _path_resolution_times.append(elapsed)
+                            return None, f"Path is outside allowed directories: {path_str}"
+                    else:
+                        elapsed = time.time() - start_time
+                        _track_validation_error("outside_repo")
+                        _path_resolution_times.append(elapsed)
+                        return None, f"Path is outside repository: {path_str}"
+
             # Step 3: Check existence if required
             if must_exist:
                 if not path.exists():
@@ -128,15 +152,7 @@ class PathResolver:
                 # Only check gitignore for paths within the repo
                 try:
                     path.relative_to(self.repo_root)
-                    from .file_helpers import _is_fast_ignored, _is_ignored_cached, _register_gitignore_spec
-                    from utils.gitignore_filter import is_path_ignored
-
-                    # Fast-path check
-                    if _is_fast_ignored(path):
-                        elapsed = time.time() - start_time
-                        _track_validation_error("fast_path_filtered")
-                        _path_resolution_times.append(elapsed)
-                        return None, f"Path is excluded by fast-path filters: {path_str}"
+                    from .file_helpers import _is_ignored_cached, _register_gitignore_spec
 
                     # Full gitignore check
                     spec_key = _register_gitignore_spec(self.gitignore_spec)

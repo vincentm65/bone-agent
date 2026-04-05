@@ -176,7 +176,8 @@ OBSIDIAN_SETTINGS:
   enabled: false            # Set to true to enable Obsidian tools
   vault_path: ""            # Absolute path to your Obsidian vault root
   auto_resolve_links: true  # LLM auto-resolves [[wiki-links]] before reading notes
-  exclude_folders: ".obsidian,.trash"  # Comma-separated folders to skip during vault scans
+  exclude_folders: ".obsidian,.trash,node_modules,.git,__pycache__"  # Comma-separated folders to skip during vault scans
+  project_base: "Dev"       # Base folder within vault for project notes
 
 # =============================================================================
 # NOTES

@@ -11,13 +11,75 @@ Usage (from __init__.py):
 """
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 
 from .helpers.base import ToolDefinition, ToolRegistry
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class VaultSession:
+    """Immutable snapshot of vault pairing state.
+
+    Built once when the vault is activated (register()) and shared everywhere.
+    Eliminates scattered derivation of vault_root, project_folder, and path prefixes.
+
+    Attributes:
+        vault_root: Absolute validated vault root Path.
+        project_folder: Absolute project folder (vault_root / project_base / repo_name).
+        project_folder_relative: Vault-relative project folder string (e.g. "Dev/myrepo").
+    """
+    vault_root: Path
+    project_folder: Path
+    project_folder_relative: str
+
+
+# Module-level session — set by register(), cleared by unregister()
+_session: Optional[VaultSession] = None
+
+
+def get_vault_session() -> Optional[VaultSession]:
+    """Return the active VaultSession, or None if vault is not paired."""
+    return _session
+
+
+def build_vault_session(repo_root: Path = None) -> Optional[VaultSession]:
+    """Build a VaultSession from current settings.
+
+    Args:
+        repo_root: Repository root used to derive project folder name.
+                   Falls back to os.getcwd() if not provided.
+
+    Returns:
+        VaultSession if vault is configured and valid, None otherwise.
+    """
+    from utils.settings import obsidian_settings
+
+    if not obsidian_settings.is_active():
+        return None
+
+    root = obsidian_settings.vault_path  # Already validated by is_active()
+    # Re-resolve to absolute (is_active checks existence but returns raw string)
+    root = Path(root).resolve()
+
+    project_base = obsidian_settings.project_base or "Dev"
+    repo_name = repo_root.name if repo_root else os.path.basename(os.getcwd())
+    if not repo_name:
+        return None
+
+    project_folder = root / project_base / repo_name
+    pf_relative = str(project_base) + "/" + repo_name
+
+    return VaultSession(
+        vault_root=root,
+        project_folder=project_folder,
+        project_folder_relative=pf_relative,
+    )
 
 
 class _VaultIndex:
@@ -38,10 +100,13 @@ class _VaultIndex:
 
     def _build(self, vault_root: Path):
         """Scan vault and build stem→[(path, stem)] index."""
+        from utils.settings import obsidian_settings
+
         self._stem_map.clear()
         self._vault_root = vault_root
+        exclude = obsidian_settings.exclude_folders_list
         for md_file in vault_root.rglob("*.md"):
-            if ".obsidian" in md_file.parts:
+            if any(excl == part for part in md_file.parts for excl in exclude):
                 continue
             stem = md_file.stem
             key = stem.lower()
@@ -59,48 +124,8 @@ _vault_index = _VaultIndex()
 # Internal utilities (not exposed as tools)
 # =============================================================================
 
-# Cached vault root — invalidated on register/unregister
-_cached_vault_root: Optional[Path] = None
-
-
-def _get_vault_root() -> Optional[Path]:
-    """Resolve vault root from settings, validate .obsidian/ exists.
-
-    Result is cached after first successful resolution. Call invalidate_vault_cache()
-    when vault settings change.
-
-    Returns:
-        Path to vault root, or None if not configured/invalid
-    """
-    global _cached_vault_root
-
-    if _cached_vault_root is not None:
-        return _cached_vault_root
-
-    from utils.settings import obsidian_settings
-
-    vault_path = obsidian_settings.vault_path
-    if not vault_path:
-        return None
-
-    root = Path(vault_path).resolve()
-    if not root.is_dir():
-        logger.warning(f"Obsidian vault path is not a directory: {root}")
-        return None
-
-    obsidian_dir = root / ".obsidian"
-    if not obsidian_dir.is_dir():
-        logger.warning(f"No .obsidian/ directory found in: {root}")
-        return None
-
-    _cached_vault_root = root
-    return root
-
-
 def invalidate_vault_cache():
-    """Invalidate cached vault root and index. Call when vault settings change."""
-    global _cached_vault_root
-    _cached_vault_root = None
+    """Invalidate vault index cache. Call when vault settings change."""
     _vault_index.invalidate()
 
 
@@ -118,10 +143,8 @@ def _resolve_path(relative_path: str, vault_root: Path) -> Optional[Path]:
     """
     try:
         resolved = (vault_root / relative_path).resolve()
-        # Ensure the resolved path is within the vault
-        if not str(resolved).startswith(str(vault_root)):
-            logger.warning(f"Path traversal attempt: {relative_path}")
-            return None
+        # Ensure the resolved path is within the vault (exact boundary check)
+        resolved.relative_to(vault_root)
         return resolved
     except (ValueError, OSError) as e:
         logger.warning(f"Invalid path '{relative_path}': {e}")
@@ -233,21 +256,6 @@ def _parse_simple_yaml(yaml_text: str) -> Dict:
     return result
 
 
-def parse_wiki_links(content: str) -> List[str]:
-    """Extract all wiki-link names from content.
-
-    Handles [[Link]], [[Link|Alias]], and [[Link#Heading]].
-
-    Args:
-        content: Markdown content
-
-    Returns:
-        List of link names (without [[ ]] or aliases)
-    """
-    pattern = r"\[\[([^\]|#]+)"
-    return re.findall(pattern, content)
-
-
 def _find_backlinks(note_path: Path, vault_root: Path, rg_exe_path: str = None) -> List[str]:
     """Find notes in the vault that link to the given note.
 
@@ -269,14 +277,21 @@ def _find_backlinks(note_path: Path, vault_root: Path, rg_exe_path: str = None) 
 
     try:
         import subprocess
+        from utils.settings import obsidian_settings
 
-        # Search for [[NoteName]] pattern across .md files, excluding .obsidian/
+        # Build glob exclusions from settings
+        exclude = obsidian_settings.exclude_folders_list
+        rg_args = [
+            rg_bin,
+            "--files-with-matches",
+            "--glob=*.md",
+        ]
+        for excl in exclude:
+            rg_args.append(f"--glob=!{excl}")
+
+        # Search for [[NoteName]] pattern across .md files
         result = subprocess.run(
-            [
-                rg_bin,
-                "--files-with-matches",
-                "--glob=*.md",
-                "--glob=!.obsidian",
+            rg_args + [
                 f"[[{re.escape(note_name)}]]",
                 str(vault_root),
             ],
@@ -316,9 +331,10 @@ def _handle_obsidian_resolve(
     **kwargs,
 ) -> str:
     """Resolve a wiki-link or note name to filesystem path(s)."""
-    vault_root = _get_vault_root()
-    if not vault_root:
+    session = get_vault_session()
+    if not session:
         return "exit_code=1\nObsidian vault is not configured or invalid. Use /obsidian set <path> to configure."
+    vault_root = session.vault_root
 
     if not name or not name.strip():
         return "exit_code=1\n'name' parameter is required."
@@ -364,9 +380,10 @@ def _handle_obsidian_frontmatter(
     **kwargs,
 ) -> str:
     """Parse frontmatter from an Obsidian note."""
-    vault_root = _get_vault_root()
-    if not vault_root:
+    session = get_vault_session()
+    if not session:
         return "exit_code=1\nObsidian vault is not configured or invalid. Use /obsidian set <path> to configure."
+    vault_root = session.vault_root
 
     if not path_str or not path_str.strip():
         return "exit_code=1\n'path_str' parameter is required."
@@ -408,6 +425,59 @@ def _handle_obsidian_frontmatter(
     body_lines = body.count("\n") + 1 if body else 0
     lines.append("")
     lines.append(f"Body lines: {body_lines}")
+
+    return "exit_code=0\n" + "\n".join(lines)
+
+
+def _handle_project_status(**kwargs) -> str:
+    """Scan project folders (Bugs, Tasks, Initiatives) and return aggregated status counts."""
+    session = get_vault_session()
+    if not session:
+        return "exit_code=1\nProject folder not found. Run /project init first."
+
+    project_folder = session.project_folder
+
+    if not project_folder.is_dir():
+        return (
+            f"exit_code=1\nProject folder does not exist: {project_folder}\n"
+            f"Run /project init to create it."
+        )
+
+    # Scan flat folders: Bugs, Tasks, Initiatives
+    type_folders = {
+        "Bugs": project_folder / "Bugs",
+        "Tasks": project_folder / "Tasks",
+        "Initiatives": project_folder / "Initiatives",
+    }
+
+    lines = [f"Project: {project_folder.name}", ""]
+
+    for type_name, folder in type_folders.items():
+        if not folder.is_dir():
+            lines.append(f"  {type_name}: (no folder)")
+            continue
+
+        # Count notes by status from frontmatter
+        status_counts: Dict[str, int] = {}
+        total = 0
+
+        for md_file in folder.rglob("*.md"):
+            if md_file.name.startswith("_"):
+                continue  # Skip templates
+            try:
+                content = md_file.read_text(encoding="utf-8", newline=None)
+                metadata, _ = parse_frontmatter(content)
+                status = str(metadata.get("status", "unknown")).lower()
+                status_counts[status] = status_counts.get(status, 0) + 1
+                total += 1
+            except OSError:
+                continue
+
+        if total == 0:
+            lines.append(f"  {type_name}: (empty)")
+        else:
+            counts_str = ", ".join(f"{s}: {c}" for s, c in sorted(status_counts.items()))
+            lines.append(f"  {type_name} ({total} total): {counts_str}")
 
     return "exit_code=0\n" + "\n".join(lines)
 
@@ -456,7 +526,7 @@ OBSIDIAN_FRONTMATTER_TOOL = ToolDefinition(
         "properties": {
             "path_str": {
                 "type": "string",
-                "description": "Path to the note, relative to vault root (e.g. 'Projects/Auth System.md')"
+                "description": "Path to the note, relative to vault root (e.g. 'Dev/myrepo/Bugs/Auth Bug.md')"
             }
         },
         "required": ["path_str"]
@@ -466,16 +536,54 @@ OBSIDIAN_FRONTMATTER_TOOL = ToolDefinition(
     handler=_handle_obsidian_frontmatter,
 )
 
+PROJECT_STATUS_TOOL = ToolDefinition(
+    name="project_status",
+    description=(
+        "Get aggregated status of project issues (bugs, tasks, initiatives). "
+        "Scans the project's Bugs/, Tasks/, and Initiatives/ folders and counts notes by type and status. "
+        "Returns a summary — no parameters needed."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {},
+    },
+    allowed_modes=["edit", "plan"],
+    requires_approval=False,
+    handler=_handle_project_status,
+)
+
 
 # =============================================================================
 # Registration function
 # =============================================================================
+
+def init_session(repo_root: Path = None) -> Optional[VaultSession]:
+    """Build and cache the VaultSession.
+
+    Should be called once with the actual repo_root when available.
+    Falls back to os.getcwd() if repo_root is None (acceptable for prompt
+    building before the orchestrator starts).
+
+    Returns:
+        The active VaultSession, or None if vault is not configured.
+    """
+    global _session
+    session = build_vault_session(repo_root=repo_root)
+    if session:
+        # Only cache if we have a real repo_root — otherwise the orchestrator
+        # will call us again with the correct path and that should win.
+        if repo_root is not None or _session is None:
+            _session = session
+            logger.info(f"Vault session initialized: {session.project_folder_relative}")
+    return _session
+
 
 def register() -> bool:
     """Register Obsidian tools with the global tool registry.
 
     Should only be called when obsidian_settings.is_active() is True.
     Safe to call multiple times — tools are only registered once.
+    Also initializes the VaultSession if not already done.
 
     Returns:
         True if tools were registered, False if already registered
@@ -485,32 +593,35 @@ def register() -> bool:
         logger.debug("Obsidian tools already registered, skipping.")
         return False
 
-    # Validate vault before registering
-    vault_root = _get_vault_root()
-    if not vault_root:
+    # Ensure session exists (builds one if needed, validates via ObsidianSettings.is_active())
+    session = get_vault_session() or init_session()
+    if not session:
         logger.warning("Cannot register Obsidian tools: vault is not configured or invalid.")
         return False
 
     ToolRegistry.register(OBSIDIAN_RESOLVE_TOOL)
     ToolRegistry.register(OBSIDIAN_FRONTMATTER_TOOL)
+    ToolRegistry.register(PROJECT_STATUS_TOOL)
     invalidate_vault_cache()
 
-    logger.info(f"Obsidian tools registered. Vault: {vault_root}")
+    logger.info(f"Obsidian tools registered. Vault: {session.vault_root}")
     return True
 
 
 def unregister() -> bool:
-    """Remove Obsidian tools from the global tool registry.
+    """Remove Obsidian tools from the global tool registry and clear the session.
 
     Returns:
         True if tools were unregistered, False if not registered
     """
+    global _session
     if not ToolRegistry.get("obsidian_resolve"):
         return False
 
-    for name in ("obsidian_resolve", "obsidian_frontmatter"):
+    for name in ("obsidian_resolve", "obsidian_frontmatter", "project_status"):
         ToolRegistry.unregister(name)
 
+    _session = None
     invalidate_vault_cache()
     logger.info("Obsidian tools unregistered.")
     return True

@@ -85,7 +85,10 @@ def _read_full_file(file_path: Path, start_line: int) -> Dict[str, any]:
         dict with keys: content, lines_read, truncated=False
     """
     if start_line == 1:
-        content = file_path.read_text(encoding="utf-8", errors="replace")
+        # Use newline=None (universal newlines) to normalize \r\n → \n,
+        # matching the behavior of all other read paths and edit_file's matcher.
+        with file_path.open("r", encoding="utf-8", errors="replace", newline=None) as f:
+            content = f.read()
         lines_read = len(content.splitlines())
     else:
         lines = []

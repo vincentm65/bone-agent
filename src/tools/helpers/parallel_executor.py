@@ -174,7 +174,8 @@ class ParallelToolExecutor:
                         interaction_mode=interaction_mode,
                         chat_manager=cm,
                         rg_exe_path=context.get('rg_exe_path'),
-                        panel_updater=context.get('panel_updater')
+                        panel_updater=context.get('panel_updater'),
+                        vault_root=context.get('vault_root')
                     )
 
                     # For edit_file: return preview (orchestrator handles approval)
@@ -203,7 +204,8 @@ class ParallelToolExecutor:
                     interaction_mode=interaction_mode,
                     chat_manager=cm,
                     rg_exe_path=context.get('rg_exe_path'),
-                    panel_updater=context.get('panel_updater')
+                    panel_updater=context.get('panel_updater'),
+                    vault_root=context.get('vault_root')
                 )
 
                 tool_result = tool.execute(tool_call.arguments, tool_context)

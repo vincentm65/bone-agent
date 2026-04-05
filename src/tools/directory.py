@@ -114,7 +114,8 @@ def _apply_smart_truncation(items, show_files, show_dirs, hit_limit=False) -> Tu
 
 def _validate_directory_path(
     path_str: str,
-    repo_root: Path
+    repo_root: Path,
+    vault_root: str = None
 ) -> Tuple[Optional[Path], Optional[str]]:
     """Validate and resolve path for directory listing.
 
@@ -124,17 +125,21 @@ def _validate_directory_path(
     Args:
         path_str: Path string to validate
         repo_root: Repository root directory
+        vault_root: Optional Obsidian vault root path
 
     Returns:
         (resolved_path, error_message) - error_message is None if valid
     """
+    from pathlib import Path as P
+    vault_path = P(vault_root) if vault_root else None
     # Use PathResolver for centralized validation
-    resolver = PathResolver(repo_root=repo_root, gitignore_spec=None)
+    resolver = PathResolver(repo_root=repo_root, gitignore_spec=None, vault_path=vault_path)
     resolved, error = resolver.resolve_and_validate(
         path_str,
         check_gitignore=False,  # Directory listing shows everything
         must_exist=True,
-        must_be_dir=True  # Must be a directory
+        must_be_dir=True,  # Must be a directory
+        enforce_boundary=vault_path is not None
     )
 
     if error:
@@ -166,7 +171,8 @@ def list_directory(
     show_files: bool = True,
     show_dirs: bool = True,
     pattern: Optional[str] = None,
-    gitignore_spec = None
+    gitignore_spec = None,
+    vault_root: str = None
 ) -> str:
     """List directory contents.
 
@@ -181,13 +187,14 @@ def list_directory(
         show_dirs: Include directories in output
         pattern: Optional glob pattern to filter results (e.g., "*.py")
         gitignore_spec: Optional PathSpec for .gitignore filtering
+        vault_root: Optional Obsidian vault root path
 
     Returns:
         str: Formatted result with exit_code, items_count, and directory listing
     """
     try:
         # Validate path
-        resolved, error = _validate_directory_path(path_str, repo_root)
+        resolved, error = _validate_directory_path(path_str, repo_root, vault_root=vault_root)
         if error:
             return format_file_result(
                 exit_code=1,

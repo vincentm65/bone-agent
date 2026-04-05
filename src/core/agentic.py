@@ -1,11 +1,15 @@
 """Agent tool-calling loop."""
 
 import json
+import logging
 import re
 import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -36,6 +40,16 @@ from exceptions import (
     CommandExecutionError,
     FileEditError,
 )
+
+
+def _vault_root_str() -> Optional[str]:
+    """Return vault_root from the active VaultSession, or None."""
+    try:
+        from tools.obsidian import get_vault_session
+        session = get_vault_session()
+        return str(session.vault_root) if session else None
+    except Exception:
+        return None
 
 
 def _print_or_append(text, console, panel_updater, markup=True):
@@ -1061,6 +1075,12 @@ class AgenticOrchestrator:
         self.gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
         # For parallel execution: temporary console override
         self._parallel_context = {}
+        # Initialize vault session with known repo_root (for project folder derivation)
+        try:
+            from tools.obsidian import init_session
+            init_session(repo_root)
+        except Exception as e:
+            logger.warning("Failed to initialize vault session: %s", e)
 
 
     def _get_console(self):
@@ -1071,23 +1091,6 @@ class AgenticOrchestrator:
         """
         # Check if we're in a parallel context with suppressed console
         return self._parallel_context.get('console', self.console)
-
-    @staticmethod
-    def _get_vault_root():
-        """Derive vault_root from obsidian_settings when active.
-
-        Delegates to obsidian._get_vault_root() which caches the result.
-
-        Returns:
-            Absolute vault path string, or None if vault is not configured.
-        """
-        try:
-            from tools.obsidian import _get_vault_root
-            root = _get_vault_root()
-            return str(root) if root else None
-        except Exception:
-            pass
-        return None
 
     def run(self, user_input, thinking_indicator=None, allowed_tools=None):
         """Main orchestration loop.
@@ -1476,7 +1479,7 @@ class AgenticOrchestrator:
                 'gitignore_spec': self.gitignore_spec,
                 'panel_updater': self.panel_updater,
                 'interaction_mode': self.chat_manager.interaction_mode,
-                'vault_root': self._get_vault_root(),
+                'vault_root': _vault_root_str(),
             }
 
             # Convert to ToolCall objects
@@ -1716,7 +1719,8 @@ class AgenticOrchestrator:
                 repo_root=self.repo_root,
                 console=console,
                 gitignore_spec=self.gitignore_spec,
-                context_lines=args_dict.get('context_lines', 3)
+                context_lines=args_dict.get('context_lines', 3),
+                vault_root=_vault_root_str()
             )
             # Strip exit_code line from final result before displaying
             if final_result and isinstance(final_result, str):
@@ -1766,17 +1770,6 @@ class AgenticOrchestrator:
         except (json.JSONDecodeError, TypeError):
             return False, "Error: Invalid JSON arguments."
 
-        # Restrict create_file to .temp/ in plan mode
-        if function_name == "create_file" and self.chat_manager.interaction_mode == "plan":
-            path = arguments.get("path_str", "")
-            normalized = path.replace("\\", "/").lstrip("/")
-            if ".." in normalized.split("/") or not normalized.startswith(".temp/"):
-                return False, (
-                    "exit_code=1\nIn plan mode, create_file can only write to the "
-                    ".temp/ directory. Use .temp/ for plan documents, "
-                    "code drafts, and temporary files."
-                )
-
         # Create SubAgentPanel for sub_agent tool calls
         panel_to_use = self.panel_updater
         if function_name == "sub_agent":
@@ -1798,7 +1791,7 @@ class AgenticOrchestrator:
                     chat_manager=self.chat_manager,
                     rg_exe_path=self.rg_exe_path,
                     panel_updater=panel_to_use,
-                    vault_root=self._get_vault_root()
+                    vault_root=_vault_root_str()
                 )
                 # Determine terminal policy for thinking indicator management
                 from tools.helpers.base import get_terminal_policy, TERMINAL_YIELD

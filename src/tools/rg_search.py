@@ -206,12 +206,11 @@ def _search_vault(vault_root, rg_exe_path, output_mode, debug_mode, console,
 
     try:
         # Build exclude globs from obsidian_settings
-        exclude_folders = [".obsidian", ".trash"]
+        from utils.settings import obsidian_settings
         try:
-            from utils.settings import obsidian_settings
             exclude_folders = obsidian_settings.exclude_folders_list
-        except Exception:
-            pass
+        except (AttributeError, TypeError):
+            exclude_folders = []
 
         # Build vault rg command from scratch (no shared state mutation)
         vault_args = ["--no-ignore"]

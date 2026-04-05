@@ -274,7 +274,7 @@ Use read-only tools plus `create_file` for plan documents. Workflow:
 5. End with '## Summary of Changes' (bullet list of what changes)
 6. Ask: 'Do you approve this plan? Reply with yes/approve to proceed.'
 
-You may use `create_file` to write plan documents (e.g., `.temp/plan_*.md`). Do NOT use `create_file` to create production code — save that for edit mode.
+You may use `create_file` to write plan documents. Use the vault project folder when available (see vault plan guidance below), or `.temp/plan_*.md` otherwise.
 
 Keep plans concise: bullet points, high-level approach, no code snippets unless asked.""",
 
@@ -382,8 +382,94 @@ An Obsidian vault is linked.
 - When writing notes: include YAML frontmatter (`tags`, `status`, `date_created`, `date_modified`), use `[[wiki-links]]` for cross-references, never touch `.obsidian/`
 - Auto-resolve: {auto_resolve_links} | Excluded: {exclude_folders}
 """,
-}
 
+    "project_management": """## Project Management (Vault)
+
+Project folder: `{__project_folder__}`
+Use `create_file`, `edit_file`, `read_file`, and `list_directory` with the **full vault path** to manage project notes.
+
+**Folder structure** (use `create_file` to add notes):
+- `Bugs/` — bug reports
+- `Tasks/` — tasks and action items
+- `Initiatives/` — larger efforts that spawn tasks/bugs
+- `Docs/` — project documentation
+- `Dashboard.md` — auto-generated summary view (uses Obsidian Base queries)
+
+**Tool:** `project_status` — aggregated issue counts by type and status.
+
+**Frontmatter schemas:**
+
+Bug note:
+```yaml
+---
+title: "Short bug description"
+type: bug
+status: reported | in-progress | fixed | verified
+priority: critical | high | medium | low
+date_created: YYYY-MM-DD
+date_modified: YYYY-MM-DD
+tags: [bug, relevant-tag]
+related_files:
+  - path/to/file.py
+steps_to_reproduce: |
+  1. ...
+expected_behavior: "..."
+actual_behavior: "..."
+---
+```
+
+Task note:
+```yaml
+---
+title: "Short task description"
+type: task
+status: todo | in-progress | done
+priority: high | medium | low
+date_created: YYYY-MM-DD
+date_modified: YYYY-MM-DD
+tags: [task, relevant-tag]
+related_files:
+  - path/to/file.py
+parent_initiative: "[[Initiative Note Name]]"
+---
+```
+
+Initiative note:
+```yaml
+---
+title: "Initiative name"
+type: initiative
+status: proposed | in-progress | review | done
+date_created: YYYY-MM-DD
+date_modified: YYYY-MM-DD
+tags: [initiative, relevant-tag]
+description: "..."
+child_tasks:
+  - "[[Task Note Name]]"
+child_bugs:
+  - "[[Bug Note Name]]"
+---
+```
+
+Doc note:
+```yaml
+---
+title: "Document title"
+type: doc
+date_created: YYYY-MM-DD
+date_modified: YYYY-MM-DD
+tags: [docs, relevant-tag]
+---
+```
+
+**Workflow conventions:**
+- Initiatives spawn child tasks and bugs — link via `parent_initiative` / `child_tasks` / `child_bugs` fields with `[[wiki-links]]`
+- Use `obsidian_resolve` to resolve `[[wiki-links]]` to file paths before `read_file`
+- Code file references in notes: plain text paths (e.g., `src/tools/obsidian.py`), not wiki-links
+- Update `date_modified` whenever editing an existing note
+- Always include YAML frontmatter in vault notes — never touch `.obsidian/`
+""",
+}
 
 # Sub-agent specific sections (research-focused, read-only tools passed via function calling)
 
@@ -511,19 +597,77 @@ def build_system_prompt(mode: str, plan_type: str = None) -> str:
         MODE_SECTIONS[mode],
     ]
 
-    # Conditionally include Obsidian vault guidance
+    # Conditionally include Obsidian vault guidance, project management, and plan-specific guidance
+    project_folder_str = None  # Cache for reuse across sections
     try:
         from utils.settings import obsidian_settings
         if obsidian_settings.is_active():
+            # Derive project folder from session (needed by guidance sections)
+            try:
+                from tools.obsidian import get_vault_session
+                session = get_vault_session()
+                if session:
+                    project_folder_str = str(session.project_folder)
+                else:
+                    project_folder_str = "<not available>"
+            except Exception:
+                project_folder_str = "<not available>"
+
             guidance = BASE_SECTIONS["obsidian_guidance"].format(
                 auto_resolve_links="ON" if obsidian_settings.auto_resolve_links else "OFF",
                 exclude_folders=obsidian_settings.exclude_folders,
             )
             sections.append(guidance)
+
+            # Check if project folder exists on disk
+            project_exists = (
+                session
+                and session.project_folder.is_dir()
+                and (session.project_folder / "Bugs").is_dir()
+            )
+
+            if project_exists:
+                vault_root_str = str(session.vault_root)
+                # File routing rule — tell agent to route project notes to vault
+                routing_rule = (
+                    f"**CRITICAL — File routing for project notes:**\n"
+                    f"Vault root: `{vault_root_str}`\n"
+                    f"Project folder: `{project_folder_str}`\n"
+                    f"When the user asks you to create, document, or track bugs, tasks, initiatives, "
+                    f"or any project-related notes, you MUST use `create_file` with the **full vault path** "
+                    f"(e.g. `{project_folder_str}/Bugs/My Bug.md`). "
+                    f"NEVER create issue/tracking files in the repo root or any repo subdirectory — "
+                    f"they belong in the vault. Only create files in the repo for actual code changes "
+                    f"(source files, configs, tests, etc.).\n"
+                    f"This also applies to `edit_file`, `read_file`, and `list_directory` — use the full vault path for any vault file."
+                )
+                sections.append(routing_rule)
+
+                pm_guidance = BASE_SECTIONS["project_management"].replace(
+                    "{__project_folder__}", project_folder_str,
+                )
+                sections.append(pm_guidance)
+
+                # Add plan vault write guidance when in plan mode
+                if mode == "plan":
+                    vault_plan = (
+                    "## Plan File Location (Vault Active)\n\n"
+                    "When a vault is configured, write plans as **initiative notes** in the project folder rather than `.temp/`.\n\n"
+                    f"**Project folder:** `{project_folder_str}`\n\n"
+                    "**Workflow:**\n"
+                    f"- Write the plan as an initiative note: `{project_folder_str}/Initiatives/<plan_name>.md`\n"
+                    f"- Break the plan into tasks: `{project_folder_str}/Tasks/<task_name>.md`\n"
+                    "- Use the existing initiative and task frontmatter schemas (see Project Management section)\n"
+                    "- Link tasks to the initiative via `parent_initiative: \"[[<Plan Name>]]\"` in the task's frontmatter\n"
+                    "- Link initiative to its tasks via `child_tasks: [\"[[<Task Name>]]\"]` in the initiative's frontmatter\n"
+                    "- Use the full vault path with `create_file` (e.g. `/home/user/Vault/Dev/myrepo/Initiatives/plan.md`)\n"
+                    "- For scratch/exploratory work, `.temp/` is still available"
+                )
+                sections.append(vault_plan)
     except Exception as e:
         import logging
         logging.getLogger(__name__).debug("Obsidian guidance not included: %s", e)
-    
+
     # Add plan type section if in plan mode and plan_type is specified
     if mode == "plan" and plan_type:
         sections.append(PLAN_TYPE_SECTIONS[plan_type])

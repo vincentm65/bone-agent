@@ -23,11 +23,6 @@ import urllib.error
 from utils.validation import validate_api_url
 
 
-def _shorten_url(url: str) -> str:
-    """Return the URL as-is (shortening handled by the backend or manual copy)."""
-    return url
-
-
 logger = logging.getLogger(__name__)
 
 # Global ConfigManager instance
@@ -92,15 +87,7 @@ def _handle_compact(chat_manager, console, debug_mode_container, args):
         console.print()
         console.print("[cyan]Compacted summary:[/cyan]")
         console.print(f"[dim]{result['summary']}[/dim]")
-    
     return CommandResult(status="handled")
-
-
-
-
-
-
-
 
 
 def _handle_config(chat_manager, console, debug_mode_container, args):
@@ -1233,6 +1220,43 @@ def _handle_account(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
+def _send_reset_key_email(console, api_base, email):
+    """Shared logic for sending a new API key via email.
+
+    Used by both /login (path 2: user lost key) and /reset-key.
+    Returns CommandResult.
+    """
+    console.print(f"[cyan]Sending new API key to {email}...[/cyan]")
+    console.print("[dim]This will create a new key and email it to you. Old keys remain valid.[/dim]")
+    console.print()
+
+    from rich.prompt import Confirm
+    if not Confirm.ask("Send a new API key to this email?", default=False):
+        console.print("[dim]Cancelled.[/dim]")
+        console.print()
+        return CommandResult(status="handled")
+
+    status, data = _call_proxy_api("POST", "/v1/auth/reset-key", api_base, body={"email": email})
+
+    if status == 429:
+        detail = (data or {}).get("detail", "Too many requests.") if data else "Too many requests."
+        console.print(f"[yellow]{detail}[/yellow]")
+        console.print()
+        return CommandResult(status="handled")
+
+    if status != 200 and status != 201:
+        detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
+        console.print(f"[red]Failed to send: {detail}[/red]")
+        console.print()
+        return CommandResult(status="handled")
+
+    message = (data or {}).get("message", "Check your email for the new API key.")
+    console.print(f"[green]{message}[/green]")
+    console.print("[dim]Once you receive the key, run: [bold cyan]/key <your-new-key>[/bold cyan][/dim]")
+    console.print()
+    return CommandResult(status="handled")
+
+
 def _handle_login(chat_manager, console, debug_mode_container, args):
     """Handle /login <email> — log in to an existing vmcode account on this device.
 
@@ -1328,34 +1352,8 @@ def _handle_login(chat_manager, console, debug_mode_container, args):
         return CommandResult(status="handled")
 
     # Path 2: user lost their key — email a new one
-    console.print(f"[cyan]Sending a new API key to {email}...[/cyan]")
-    console.print("[dim]This will create a new key and email it to you. Old keys remain valid.[/dim]")
-    console.print()
+    return _send_reset_key_email(console, api_base, email)
 
-    if not Confirm.ask("Send a new API key to this email?", default=False):
-        console.print("[dim]Cancelled.[/dim]")
-        console.print()
-        return CommandResult(status="handled")
-
-    status, data = _call_proxy_api("POST", "/v1/auth/reset-key", api_base, body={"email": email})
-
-    if status == 429:
-        detail = (data or {}).get("detail", "Too many requests.") if data else "Too many requests."
-        console.print(f"[yellow]{detail}[/yellow]")
-        console.print()
-        return CommandResult(status="handled")
-
-    if status != 200 and status != 201:
-        detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
-        console.print(f"[red]Failed to send: {detail}[/red]")
-        console.print()
-        return CommandResult(status="handled")
-
-    message = (data or {}).get("message", "Check your email for the new API key.")
-    console.print(f"[green]{message}[/green]")
-    console.print("[dim]Once you receive the key, run: [bold cyan]/key <your-new-key>[/bold cyan][/dim]")
-    console.print()
-    return CommandResult(status="handled")
 
 
 def _handle_resend(chat_manager, console, debug_mode_container, args):
@@ -1432,34 +1430,7 @@ def _handle_reset_key(chat_manager, console, debug_mode_container, args):
         console.print()
         return CommandResult(status="handled")
 
-    console.print(f"[cyan]Sending new API key to {email}...[/cyan]")
-    console.print("[dim]This will create a new key and email it to you. Old keys remain valid.[/dim]")
-    console.print()
-
-    from rich.prompt import Confirm
-    if not Confirm.ask("Send a new API key to this email?", default=False):
-        console.print("[dim]Cancelled.[/dim]")
-        console.print()
-        return CommandResult(status="handled")
-
-    status, data = _call_proxy_api("POST", "/v1/auth/reset-key", api_base, body={"email": email})
-
-    if status == 429:
-        detail = (data or {}).get("detail", "Too many requests.") if data else "Too many requests."
-        console.print(f"[yellow]{detail}[/yellow]")
-        console.print()
-        return CommandResult(status="handled")
-
-    if status != 200 and status != 201:
-        detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
-        console.print(f"[red]Failed to send: {detail}[/red]")
-        console.print()
-        return CommandResult(status="handled")
-
-    message = (data or {}).get("message", "Check your email for the new API key.")
-    console.print(f"[green]{message}[/green]")
-    console.print()
-    return CommandResult(status="handled")
+    return _send_reset_key_email(console, api_base, email)
 
 
 def _handle_manage(chat_manager, console, debug_mode_container, args):
@@ -1621,17 +1592,16 @@ def _handle_upgrade(chat_manager, console, debug_mode_container, args):
         return CommandResult(status="handled")
 
     # Open in browser
-    short_url = _shorten_url(url)
     try:
         import webbrowser
         webbrowser.open(url)
-        console.print(f"[green]Opened in browser[/green]")
+        console.print("[green]Opened in browser[/green]")
     except Exception:
         pass
 
     console.print()
-    console.print(f"[cyan]Or copy this link:[/cyan]")
-    console.print(f"  [bold]{short_url}[/bold]")
+    console.print("[cyan]Or copy this link:[/cyan]")
+    console.print(f"  [bold]{url}[/bold]")
     console.print()
     return CommandResult(status="handled")
 
@@ -1767,6 +1737,9 @@ def _apply_obsidian_changes(chat_manager, console, obsidian_settings, changes):
         elif key == "exclude_folders":
             obsidian_settings.update(exclude_folders=value)
             change_lines.append(f"  Exclude folders: {value}")
+        elif key == "project_base":
+            obsidian_settings.update(project_base=value.strip() if value else "Dev")
+            change_lines.append(f"  Project base: {obsidian_settings.project_base}")
 
     # Register/unregister tools based on new active state
     is_active = obsidian_settings.is_active()
@@ -1789,6 +1762,7 @@ def _apply_obsidian_changes(chat_manager, console, obsidian_settings, changes):
             enabled=obsidian_settings.enabled,
             auto_resolve_links=obsidian_settings.auto_resolve_links,
             exclude_folders=obsidian_settings.exclude_folders,
+            project_base=obsidian_settings.project_base,
         )
 
     return change_lines
@@ -1820,6 +1794,7 @@ def _handle_obsidian(chat_manager, console, debug_mode_container, args):
             console.print(f"  Enabled: {obsidian_settings.enabled}")
             console.print(f"  Auto-resolve links: {obsidian_settings.auto_resolve_links}")
             console.print(f"  Exclude folders: {obsidian_settings.exclude_folders}")
+            console.print(f"  Project base: {obsidian_settings.project_base}")
             console.print()
             console.print("[dim]Run [bold cyan]/obsidian[/bold cyan] (no args) for interactive settings.[/dim]")
             return CommandResult(status="handled")
@@ -1890,6 +1865,12 @@ def _handle_obsidian(chat_manager, console, debug_mode_container, args):
             input_type="text",
             description="Comma-separated folder names to skip during vault scans",
         ),
+        SettingOption(
+            key="project_base", text="Project Base",
+            value=obsidian_settings.project_base,
+            input_type="text",
+            description="Base folder within vault for project notes (default: Dev)",
+        ),
     ]
 
     categories = [
@@ -1930,6 +1911,260 @@ def _handle_obsidian(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
+def _handle_project(chat_manager, console, debug_mode_container, args):
+    """Handle /project command — manage project structure in Obsidian vault.
+
+    Subcommands:
+        init — scaffold project folder structure (Bugs, Tasks, Initiatives, Docs, Dashboard.md)
+        status — show aggregated status of project issues
+    """
+    from utils.settings import obsidian_settings
+
+    if not obsidian_settings.is_active():
+        console.print("[yellow]Obsidian vault is not configured or inactive.[/yellow]")
+        console.print("[dim]Run [bold cyan]/obsidian set <path>[/bold cyan] to configure your vault.[/dim]")
+        console.print()
+        return CommandResult(status="handled")
+
+    if not args or not args.strip():
+        console.print("[red]Usage: [bold cyan]/project[/bold cyan] [init | status][/red]")
+        console.print("[dim]  init   — scaffold project folder structure in vault[/dim]")
+        console.print("[dim]  status — show aggregated issue status[/dim]")
+        console.print()
+        return CommandResult(status="handled")
+
+    subcmd = args.strip().lower()
+
+    if subcmd == "init":
+        from tools.obsidian import get_vault_session
+
+        session = get_vault_session()
+        if not session:
+            console.print("[red]Could not determine project folder.[/red]")
+            return CommandResult(status="handled")
+
+        project_folder = session.project_folder
+
+        # Check if already exists
+        if project_folder.is_dir():
+            console.print(f"[yellow]Project folder already exists: {project_folder}[/yellow]")
+            console.print("[dim]No changes made. Delete the folder manually if you want to re-initialize.[/dim]")
+            console.print()
+            return CommandResult(status="handled")
+
+        # Define folder structure and templates
+        folders = {
+            "Bugs": (
+                "---\n"
+                "type: bug\n"
+                "status: reported\n"
+                "priority: medium\n"
+                "date_created: {date}\n"
+                "date_modified: {date}\n"
+                "tags: [bug]\n"
+                "---\n"
+                "\n"
+                "# {title}\n"
+                "\n"
+                "**Description:**\n"
+                "\n"
+                "**Steps to reproduce:**\n"
+                "\n"
+                "**Expected behavior:**\n"
+                "\n"
+                "**Actual behavior:**\n"
+                "\n"
+                "Statuses: `reported` → `in-progress` → `fixed` → `verified`\n"
+            ),
+            "Tasks": (
+                "---\n"
+                "type: task\n"
+                "status: todo\n"
+                "priority: medium\n"
+                "date_created: {date}\n"
+                "date_modified: {date}\n"
+                "tags: [task]\n"
+                "---\n"
+                "\n"
+                "# {title}\n"
+                "\n"
+                "**Description:**\n"
+                "\n"
+                "**Acceptance criteria:**\n"
+                "\n"
+                "Statuses: `todo` → `in-progress` → `done`\n"
+            ),
+            "Initiatives": (
+                "---\n"
+                "type: initiative\n"
+                "status: proposed\n"
+                "priority: medium\n"
+                "date_created: {date}\n"
+                "date_modified: {date}\n"
+                "tags: [initiative]\n"
+                "---\n"
+                "\n"
+                "# {title}\n"
+                "\n"
+                "**Goal:**\n"
+                "\n"
+                "**Motivation:**\n"
+                "\n"
+                "**Child tasks/bugs:**\n"
+                "\n"
+                "Statuses: `proposed` → `in-progress` → `review` → `done`\n"
+            ),
+            "Docs": (
+                "---\n"
+                "type: doc\n"
+                "date_created: {date}\n"
+                "date_modified: {date}\n"
+                "tags: [docs]\n"
+                "---\n"
+                "\n"
+                "# {title}\n"
+                "\n"
+            ),
+        }
+
+        from datetime import date
+
+        today = date.today().isoformat()
+        created_folders = []
+
+        for folder_rel, template in folders.items():
+            folder_path = project_folder / folder_rel
+            folder_path.mkdir(parents=True, exist_ok=True)
+            created_folders.append(folder_rel)
+
+            # Write template
+            template_path = folder_path / "_Template.md"
+            if not template_path.exists():
+                title = folder_rel.split("/")[-1].rstrip("s")
+                content = template.format(date=today, title=title)
+                template_path.write_text(content, encoding="utf-8")
+
+        # Create Dashboard
+        dashboard_path = project_folder / "Dashboard.md"
+        repo_name = project_folder.name
+        dv_init = (
+            f'```dataview\n'
+            f"TABLE status, priority, date_created\n"
+            f'FROM "{session.project_folder_relative}/Initiatives"\n'
+            f'WHERE type = "initiative" AND status != "done"\n'
+            f"SORT date_created DESC\n"
+            f"```\n"
+        )
+        dv_tasks = (
+            f'```dataview\n'
+            f"TABLE status, priority, date_created\n"
+            f'FROM "{session.project_folder_relative}/Tasks"\n'
+            f'WHERE type = "task" AND status != "done"\n'
+            f"SORT date_created DESC\n"
+            f"```\n"
+        )
+        dv_bugs = (
+            f'```dataview\n'
+            f"TABLE status, priority, date_created\n"
+            f'FROM "{session.project_folder_relative}/Bugs"\n'
+            f'WHERE type = "bug" AND status != "fixed" AND status != "verified"\n'
+            f"SORT date_created DESC\n"
+            f"```\n"
+        )
+        dv_completed = (
+            f'```dataview\n'
+            f"TABLE type, status, date_modified\n"
+            f'FROM "{session.project_folder_relative}"\n'
+            f'WHERE (type = "task" AND status = "done")\n'
+            f'   OR (type = "bug" AND (status = "fixed" OR status = "verified"))\n'
+            f'   OR (type = "initiative" AND status = "done")\n'
+            f"SORT date_modified DESC\n"
+            f"```\n"
+        )
+        dashboard_content = (
+            "---\n"
+            "type: dashboard\n"
+            "date_created: {date}\n"
+            "date_modified: {date}\n"
+            "tags: [dashboard]\n"
+            "---\n"
+            "\n"
+            "# {title} Dashboard\n"
+            "\n"
+            "> [!summary] Project Overview\n"
+            "> Run `/project status` for live counts.\n"
+            "\n"
+            "## Active Initiatives\n"
+            "\n"
+            f"{dv_init}\n"
+            "## Open Tasks\n"
+            "\n"
+            f"{dv_tasks}\n"
+            "## Open Bugs\n"
+            "\n"
+            f"{dv_bugs}\n"
+            "## Recently Completed\n"
+            "\n"
+            f"{dv_completed}\n"
+        )
+        dashboard_content = dashboard_content.format(date=today, title=repo_name)
+        dashboard_path.write_text(dashboard_content, encoding="utf-8")
+        created_folders.append("Dashboard.md")
+
+        # Invalidate vault cache so new notes are indexed
+        from tools.obsidian import invalidate_vault_cache
+        invalidate_vault_cache()
+
+        console.print(f"[green]Project initialized: {project_folder.name}[/green]")
+        for folder in created_folders:
+            console.print(f"  [dim]Created: {folder}/ (_Template.md)[/dim]")
+        console.print()
+
+        # Check if Dataview plugin is installed and enabled
+        vault_root = session.vault_root
+        community_plugins = vault_root / ".obsidian" / "community-plugins.json"
+        dataview_dir = vault_root / ".obsidian" / "plugins" / "dataview"
+        has_plugin_entry = (
+            community_plugins.is_file()
+            and "dataview" in community_plugins.read_text(encoding="utf-8")
+        )
+        has_plugin_files = (
+            dataview_dir.is_dir()
+            and (dataview_dir / "main.js").is_file()
+            and (dataview_dir / "manifest.json").is_file()
+        )
+        if not has_plugin_entry or not has_plugin_files:
+            console.print("[yellow]Dataview plugin not detected — dashboard tables won't render.[/yellow]")
+            console.print("[dim]Install the Dataview community plugin in Obsidian:[/dim]")
+            console.print("[dim]  Settings → Community plugins → Browse → search 'Dataview' → Install & Enable[/dim]")
+            console.print("[dim]Or download from: https://github.com/blacksmithgu/obsidian-dataview[/dim]")
+            console.print()
+
+        console.print("[dim]Create issues with [bold cyan]/project status[/bold cyan] to see the board.[/dim]")
+        console.print()
+        return CommandResult(status="handled")
+
+    elif subcmd == "status":
+        from tools.obsidian import _handle_project_status as _status_tool
+
+        result = _status_tool()
+        # Parse the exit_code= protocol used by tool handlers
+        if result.startswith("exit_code=0\n"):
+            console.print(f"[cyan]{result[len('exit_code=0\\n'):]}[/cyan]")
+        elif result.startswith("exit_code="):
+            console.print(f"[yellow]{result.split(chr(10), 1)[-1]}[/yellow]")
+        else:
+            console.print(result)
+        console.print()
+        return CommandResult(status="handled")
+
+    else:
+        console.print(f"[red]Unknown subcommand: {subcmd}[/red]")
+        console.print("[dim]Usage: [bold cyan]/project[/bold cyan] [init | status][/dim]")
+        console.print()
+        return CommandResult(status="handled")
+
+
 # Command registry - maps command names to their handlers
 _COMMAND_HANDLERS = {
     "/exit": _handle_exit,
@@ -1960,6 +2195,7 @@ _COMMAND_HANDLERS = {
     "/upgrade": _handle_upgrade,
     "/rotate-key": _handle_rotate_key,
     "/obsidian": _handle_obsidian,
+    "/project": _handle_project,
 }
 
 

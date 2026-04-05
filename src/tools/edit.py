@@ -156,7 +156,7 @@ def _find_unique_span_with_fallbacks(content, search_text):
     return None, diagnostics
 
 
-def _resolve_repo_path(path_str, repo_root, gitignore_spec=None):
+def _resolve_repo_path(path_str, repo_root, gitignore_spec=None, vault_root=None):
     """Resolve and validate a path for editing.
 
     This function wraps PathResolver.resolve_and_validate() for the edit tool's
@@ -166,6 +166,7 @@ def _resolve_repo_path(path_str, repo_root, gitignore_spec=None):
         path_str: Path string to resolve
         repo_root: Repository root directory
         gitignore_spec: Optional pathspec.PathSpec for .gitignore filtering
+        vault_root: Optional Obsidian vault root path
 
     Returns:
         Resolved Path object
@@ -173,13 +174,16 @@ def _resolve_repo_path(path_str, repo_root, gitignore_spec=None):
     Raises:
         PathValidationError: If path is invalid or blocked by .gitignore
     """
+    from pathlib import Path
+    vault_path = Path(vault_root) if vault_root else None
     # Use PathResolver for centralized validation
-    resolver = PathResolver(repo_root=repo_root, gitignore_spec=gitignore_spec)
+    resolver = PathResolver(repo_root=repo_root, gitignore_spec=gitignore_spec, vault_path=vault_path)
     resolved, error = resolver.resolve_and_validate(
         path_str,
         check_gitignore=True,
         must_exist=True,
-        must_be_file=False  # We'll check this separately
+        must_be_file=False,  # We'll check this separately
+        enforce_boundary=vault_path is not None,
     )
 
     if error:
@@ -198,13 +202,14 @@ def _resolve_repo_path(path_str, repo_root, gitignore_spec=None):
     return resolved
 
 
-def _prepare_edit(arguments, repo_root, gitignore_spec=None) -> tuple[str, dict]:
+def _prepare_edit(arguments, repo_root, gitignore_spec=None, vault_root=None) -> tuple[str, dict]:
     """Prepare edit operation with validation.
 
     Args:
         arguments: Edit arguments dict
         repo_root: Repository root
         gitignore_spec: Optional PathSpec for .gitignore filtering
+        vault_root: Optional Obsidian vault root path
 
     Returns:
         Tuple of (status_string, payload_dict)
@@ -219,7 +224,7 @@ def _prepare_edit(arguments, repo_root, gitignore_spec=None) -> tuple[str, dict]
 
     # Resolve and validate path using PathResolver
     try:
-        file_path = _resolve_repo_path(path, repo_root, gitignore_spec)
+        file_path = _resolve_repo_path(path, repo_root, gitignore_spec, vault_root=vault_root)
     except PathValidationError as e:
         # Re-raise with additional context
         raise FileEditError(str(e), details=e.details)
@@ -294,7 +299,7 @@ def _prepare_edit(arguments, repo_root, gitignore_spec=None) -> tuple[str, dict]
     }
 
 
-def preview_edit_file(arguments, repo_root, gitignore_spec=None) -> tuple[str, Text]:
+def preview_edit_file(arguments, repo_root, gitignore_spec=None, vault_root=None) -> tuple[str, Text]:
     """Build a line-numbered diff preview without writing changes.
 
     Returns:
@@ -303,7 +308,7 @@ def preview_edit_file(arguments, repo_root, gitignore_spec=None) -> tuple[str, T
     Raises:
         FileEditError: If edit validation fails
     """
-    status, payload = _prepare_edit(arguments, repo_root, gitignore_spec)
+    status, payload = _prepare_edit(arguments, repo_root, gitignore_spec, vault_root=vault_root)
 
     start, end = payload["search_span"]
     new_content = (
@@ -330,14 +335,14 @@ def preview_edit_file(arguments, repo_root, gitignore_spec=None) -> tuple[str, T
     return "exit_code=0", diff_text
 
 
-def run_edit_file(arguments, repo_root, console, gitignore_spec=None) -> str | Text:
+def run_edit_file(arguments, repo_root, console, gitignore_spec=None, vault_root=None) -> str | Text:
     """Apply search/replace edit to a file.
 
     Returns:
         Rich Text with diff for success, str with exit_code for errors
     """
     try:
-        status, payload = _prepare_edit(arguments, repo_root, gitignore_spec)
+        status, payload = _prepare_edit(arguments, repo_root, gitignore_spec, vault_root=vault_root)
 
         start, end = payload["search_span"]
         new_content = (
@@ -434,7 +439,8 @@ def edit_file(
     console,
     chat_manager,
     gitignore_spec = None,
-    context_lines: int = 3
+    context_lines: int = 3,
+    vault_root: str = None,
 ) -> str | Text:
     """Apply search/replace edit to a file.
 
@@ -447,6 +453,7 @@ def edit_file(
         chat_manager: ChatManager instance (injected by context)
         gitignore_spec: PathSpec for .gitignore filtering (injected by context)
         context_lines: Number of context lines in diff
+        vault_root: Obsidian vault root path (injected by context)
 
     Returns:
         Edit result with diff
@@ -471,7 +478,7 @@ def edit_file(
 
     # Preview edit (confirmation workflow handled by orchestrator)
     try:
-        preview_status, preview_diff = preview_edit_file(arguments, repo_root, gitignore_spec)
+        preview_status, preview_diff = preview_edit_file(arguments, repo_root, gitignore_spec, vault_root=vault_root)
         if preview_status != "exit_code=0":
             return preview_status
 
@@ -493,7 +500,8 @@ def _execute_edit_file(
 	repo_root: Path,
 	console,
 	gitignore_spec = None,
-	context_lines: int = 3
+	context_lines: int = 3,
+	vault_root: str = None
 ) -> str | Text:
 	"""Execute a confirmed edit operation (internal function).
 
@@ -508,6 +516,7 @@ def _execute_edit_file(
 		console: Rich console for output
 		gitignore_spec: PathSpec for .gitignore filtering
 		context_lines: Number of context lines in diff
+		vault_root: Obsidian vault root path
 
 	Returns:
 		Edit result with diff (Rich Text for success, str with exit_code for errors)
@@ -520,7 +529,7 @@ def _execute_edit_file(
 	}
 
 	try:
-		return run_edit_file(arguments, repo_root, console, gitignore_spec)
+		return run_edit_file(arguments, repo_root, console, gitignore_spec, vault_root=vault_root)
 	except FileEditError as e:
 		return f"exit_code=1\n{e}"
 	except Exception as e:

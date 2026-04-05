@@ -11,7 +11,7 @@ from pathlib import Path
 # Add src to path so we can import the tool decorator
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from tools.base import tool
+from tools.helpers.base import tool
 
 
 @tool(

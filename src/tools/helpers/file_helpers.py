@@ -1,42 +1,15 @@
 """Shared utilities for file operations."""
 
-import os
 import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from utils.gitignore_filter import ALWAYS_ALLOWED_FILES
-
-# Fast-path patterns that should never be checked against spec
-FAST_IGNORE_DIRS = {".git", ".venv", "__pycache__", "node_modules", "venv", "env", ".env"}
-# Keep this list to high-signal "noise" files only; avoid blocking common lockfiles that may be relevant.
-FAST_IGNORE_FILES = {".DS_Store", "Thumbs.db"}
-
 _GITIGNORE_SPEC_REGISTRY = {}
 
 # Performance metrics for gitignore filtering
 _gitignore_filter_times = []
-_fast_path_hits = 0
 _gitignore_spec_hits = 0
-
-
-def _is_fast_ignored(path: Path) -> bool:
-    """Quick check for common ignore patterns without spec lookup.
-
-    Args:
-        path: Path to check
-
-    Returns:
-        True if path matches fast-path ignore patterns
-    """
-    if path.name in ALWAYS_ALLOWED_FILES:
-        return False
-    if path.name in FAST_IGNORE_FILES:
-        return True
-    if any(part in FAST_IGNORE_DIRS for part in path.parts):
-        return True
-    return False
 
 
 def _register_gitignore_spec(gitignore_spec) -> int:
@@ -129,24 +102,14 @@ class GitignoreFilter:
     def is_ignored(self, path: Path) -> bool:
         """Check if a path should be ignored by gitignore rules.
 
-        Performs two-stage filtering:
-        1. Fast-path check for common patterns (.git, __pycache__, etc.)
-        2. Full gitignore spec evaluation if fast-path passes
-
         Args:
             path: Path object to check
 
         Returns:
             True if path should be ignored, False otherwise
         """
-        global _fast_path_hits, _gitignore_spec_hits
+        global _gitignore_spec_hits
         start_time = time.time()
-
-        # Fast-path check for common ignore patterns
-        if _is_fast_ignored(path):
-            _fast_path_hits += 1
-            _gitignore_filter_times.append(time.time() - start_time)
-            return True
 
         # Full gitignore check (only if spec is provided)
         if self.gitignore_spec is not None and self._spec_key is not None:
@@ -186,7 +149,6 @@ def get_gitignore_filter_metrics() -> dict:
     Returns:
         Dictionary with metrics:
         - total_checks: Total number of filter checks
-        - fast_path_hits: Number of matches by fast-path filters
         - spec_hits: Number of matches by gitignore spec
         - avg_filter_time: Average filter time in seconds
         - cache_hit_rate: Estimated LRU cache hit rate
@@ -194,14 +156,13 @@ def get_gitignore_filter_metrics() -> dict:
     if not _gitignore_filter_times:
         return {
             "total_checks": 0,
-            "fast_path_hits": 0,
             "spec_hits": 0,
             "avg_filter_time": 0,
             "cache_hit_rate": 0
         }
 
     total_checks = len(_gitignore_filter_times)
-    total_hits = _fast_path_hits + _gitignore_spec_hits
+    total_hits = _gitignore_spec_hits
 
     # Estimate cache hit rate from _is_ignored_cached
     try:
@@ -213,7 +174,6 @@ def get_gitignore_filter_metrics() -> dict:
 
     return {
         "total_checks": total_checks,
-        "fast_path_hits": _fast_path_hits,
         "spec_hits": _gitignore_spec_hits,
         "avg_filter_time": sum(_gitignore_filter_times) / total_checks,
         "cache_hit_rate": cache_hit_rate
@@ -222,9 +182,8 @@ def get_gitignore_filter_metrics() -> dict:
 
 def clear_gitignore_filter_metrics():
     """Clear all accumulated metrics for testing or monitoring reset."""
-    global _fast_path_hits, _gitignore_spec_hits
+    global _gitignore_spec_hits
     _gitignore_filter_times.clear()
-    _fast_path_hits = 0
     _gitignore_spec_hits = 0
     # Clear LRU cache for _is_ignored_cached
     _is_ignored_cached.cache_clear()
