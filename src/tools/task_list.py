@@ -117,10 +117,10 @@ def _format_task_list(task_list, title=None):
             },
             "title": {
                 "type": "string",
-                "description": "Optional short title"
+                "description": "Short title summarizing the workflow (e.g. 'Add pagination to user API'). Always provide a meaningful title."
             }
         },
-        "required": ["tasks"]
+        "required": ["tasks", "title"]
     },
     allowed_modes=["edit"],
     requires_approval=False
@@ -128,14 +128,14 @@ def _format_task_list(task_list, title=None):
 def create_task_list(
     tasks: List[str],
     chat_manager,
-    title: Optional[str] = None,
+    title: str,
 ) -> str:
     """Create or replace an in-session task list.
 
     Args:
         tasks: List of task descriptions
         chat_manager: ChatManager instance (injected by context)
-        title: Optional title for the task list
+        title: Title for the task list
 
     Returns:
         Formatted task list result
@@ -146,11 +146,12 @@ def create_task_list(
         return "exit_code=1\nerror: Task lists are disabled in PLAN mode. Switch to EDIT mode.\n\n"
 
     # Validate title
-    if title is not None and not isinstance(title, str):
+    if not isinstance(title, str):
         return "exit_code=1\nerror: 'title' must be a string.\n\n"
-    title = title.strip() if isinstance(title, str) else None
-    if title:
-        title = title[:constants.MAX_TASK_TITLE_LEN]
+    title = title.strip()
+    if not title:
+        return "exit_code=1\nerror: 'title' must be non-empty.\n\n"
+    title = title[:constants.MAX_TASK_TITLE_LEN]
 
     # Normalize tasks
     normalized = []
