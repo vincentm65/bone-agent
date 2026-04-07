@@ -312,7 +312,7 @@ def _search_vault(vault_root, rg_exe_path, output_mode, debug_mode, console,
         return "\n".join(rewritten)
 
     except Exception:
-        logger.debug("Vault search failed", exc_info=True)
+        logger.warning("Vault search failed", exc_info=True)
         return None
 
 
@@ -321,6 +321,8 @@ def _merge_results(repo_result, vault_output, output_mode):
 
     Both inputs are raw formatted strings from format_tool_result.
     We extract the content sections and combine them under headers.
+    Metadata (matches/files counts) is preserved so the display parser
+    can extract a summary for the user.
     """
     def _extract_content(formatted):
         """Extract content lines (skip metadata header)."""
@@ -341,6 +343,21 @@ def _merge_results(repo_result, vault_output, output_mode):
                 return line.split("=", 1)[1]
         return "0"
 
+    def _extract_count(formatted):
+        """Extract matches=N or files=N count from formatted result."""
+        for line in formatted.split("\n"):
+            if line.startswith("matches="):
+                try:
+                    return ("matches", int(line.split("=", 1)[1].strip()))
+                except (ValueError, IndexError):
+                    pass
+            elif line.startswith("files="):
+                try:
+                    return ("files", int(line.split("=", 1)[1].strip()))
+                except (ValueError, IndexError):
+                    pass
+        return None
+
     repo_exit_code = _extract_exit_code(repo_result)
     repo_content = _extract_content(repo_result)
     vault_content = _extract_content(vault_output)
@@ -348,10 +365,30 @@ def _merge_results(repo_result, vault_output, output_mode):
     if not vault_content:
         return repo_result
 
+    # Build combined metadata line for the display parser
+    repo_count = _extract_count(repo_result)
+    vault_count = _extract_count(vault_output)
+
+    metadata_line = ""
+    if repo_count and vault_count and repo_count[0] == vault_count[0]:
+        # Same count type (both matches or both files) — sum them
+        combined = repo_count[1] + vault_count[1]
+        metadata_line = f"{repo_count[0]}={combined}"
+    elif repo_count:
+        metadata_line = f"{repo_count[0]}={repo_count[1]}"
+    elif vault_count:
+        metadata_line = f"{vault_count[0]}={vault_count[1]}"
+
     if not repo_content:
         # Only vault results — return with vault label
-        return f"exit_code=0\n[vault]\n{vault_content}\n\n"
+        header = f"exit_code=0"
+        if metadata_line:
+            header += f"\n{metadata_line}"
+        return f"{header}\n[vault]\n{vault_content}\n\n"
 
     # Both — present under labeled sections, preserve repo exit code
-    merged = f"exit_code={repo_exit_code}\n[repo]\n{repo_content}\n\n[vault]\n{vault_content}\n\n"
+    header = f"exit_code={repo_exit_code}"
+    if metadata_line:
+        header += f"\n{metadata_line}"
+    merged = f"{header}\n[repo]\n{repo_content}\n\n[vault]\n{vault_content}\n\n"
     return merged

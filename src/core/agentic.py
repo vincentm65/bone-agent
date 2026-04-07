@@ -2,22 +2,15 @@
 
 import json
 import logging
-import re
-import threading
-import time
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.syntax import Syntax
-from rich.text import Text
-from rich.live import Live
 
 from utils.markdown import left_align_headings
-from utils.settings import MAX_TOOL_CALLS, MAX_COMMAND_OUTPUT_LINES, MonokaiDarkBGStyle
+from utils.settings import MAX_TOOL_CALLS, MonokaiDarkBGStyle
 from tools import (
     confirm_tool,
     read_file,
@@ -27,482 +20,29 @@ from tools import (
     _tools_for_mode,
 )
 from utils.settings import tool_settings
-from utils.result_parsers import (
-    extract_exit_code,
-    extract_all_metadata,
-    extract_multiple_metadata,
+from utils.result_parsers import extract_exit_code
+from core.retry import (
+    RETRY_MAX_ATTEMPTS,
+    RETRY_DELAYS,
+    is_retryable_error,
+    wait_with_cancel_message,
 )
-from tools.task_list import _format_task_list, _strip_rich_markup
 from exceptions import (
     LLMError,
     LLMConnectionError,
     LLMResponseError,
-    CommandExecutionError,
-    FileEditError,
+    CommandExecutionError, FileEditError,
 )
 
-
-def _vault_root_str() -> Optional[str]:
-    """Return vault_root from the active VaultSession, or None."""
-    try:
-        from tools.obsidian import get_vault_session
-        session = get_vault_session()
-        return str(session.vault_root) if session else None
-    except Exception:
-        return None
-
-
-def _print_or_append(text, console, panel_updater, markup=True):
-    """Print text to console or append to panel_updater.
-
-    Args:
-        text: Text to display
-        console: Rich console
-        panel_updater: Optional SubAgentPanel for live updates
-        markup: If True, parse Rich markup (only used for console)
-    """
-    if panel_updater:
-        panel_updater.append(text)
-    else:
-        console.print(text, markup=markup)
-
-
-# File extension to Pygments lexer name mapping for syntax highlighting
-_LEXER_MAP = {
-    'py': 'python',
-    'js': 'javascript',
-    'ts': 'typescript',
-    'tsx': 'typescript',
-    'jsx': 'javascript',
-    'go': 'go',
-    'rs': 'rust',
-    'java': 'java',
-    'c': 'c',
-    'cpp': 'cpp',
-    'h': 'c',
-    'hpp': 'cpp',
-    'sh': 'bash',
-    'bash': 'bash',
-    'zsh': 'bash',
-    'yaml': 'yaml',
-    'yml': 'yaml',
-    'json': 'json',
-    'toml': 'toml',
-    'md': 'markdown',
-    'html': 'html',
-    'css': 'css',
-    'sql': 'sql',
-    'php': 'php',
-    'rb': 'ruby',
-    'swift': 'swift',
-    'kt': 'kotlin',
-    'scala': 'scala',
-    'lua': 'lua',
-    'r': 'r',
-}
-
-
-def _strip_leading_task_list_echo(content, task_list, title=None):
-    """Remove a leading echoed task list from assistant content.
-
-    Some models copy the task list tool output into the final response, which
-    causes duplicate task list rendering in the CLI.
-    """
-    if not content or not isinstance(content, str) or not task_list:
-        return content or ""
-
-    expected = _strip_rich_markup(_format_task_list(task_list, title)).strip()
-    if not expected:
-        return content
-
-    trimmed = content.lstrip()
-    if trimmed.startswith(expected):
-        remainder = trimmed[len(expected):]
-        return remainder.lstrip("\n").lstrip()
-
-    return content
-
-
-def _build_read_file_label(path, start_line=None, max_lines=None, with_colon=False):
-    """Build uniform read_file label.
-
-    Args:
-        path: File path
-        start_line: Optional starting line number (unused in display)
-        max_lines: Optional max lines to read (unused in display)
-        with_colon: If True, use 'read_file: path' format (for batch mode labels)
-
-    Returns:
-        str: Formatted label
-    """
-    separator = ': ' if with_colon else ' '
-    label = f"read_file{separator}{path}"
-    return label
-
-
-
-
-
-
-
-
-def _build_tool_label(function_name, arguments):
-    """Build tool label with arguments for display.
-
-    Args:
-        function_name: Name of the tool function
-        arguments: Dictionary of tool arguments
-
-    Returns:
-        str: Formatted label with arguments (e.g., "read_file: path/to/file", "rg: search_pattern")
-    """
-    if function_name == "rg":
-        pattern = arguments.get('pattern', '')
-        # Truncate long patterns for display
-        return f"rg: {pattern[:40]}" if pattern else "rg"
-    elif function_name == "read_file":
-        path = arguments.get('path_str', '')
-        return _build_read_file_label(path, with_colon=True)
-    elif function_name == "list_directory":
-        path = arguments.get('path_str', '')
-        return f"list_directory: {path}"
-    elif function_name == "create_file":
-        path = arguments.get('path_str', '')
-        return f"create_file: {path}"
-    elif function_name == "edit_file":
-        path = arguments.get('path', '')
-        return f"edit_file: {path}"
-    elif function_name == "web_search":
-        query = arguments.get('query', '')
-        return f"web search | {query}"
-    elif function_name == "execute_command":
-        command = arguments.get('command', '')
-        # Truncate long commands for display
-        return f"execute_command: {command[:80]}" if command else "execute_command"
-    else:
-        return function_name
-
-
-def _handle_create_file_feedback(tool_result, console, panel_updater):
-    """Handle feedback for create_file tool.
-
-    Display syntax-highlighted file preview.
-    """
-    lines = tool_result.split('\n')
-    # Extract path from metadata
-    path_match = re.search(r'path=([^\s]+)', tool_result)
-    path_str = path_match.group(1) if path_match else "file"
-
-    # Find file content section
-    content_start = None
-    content_end = None
-    for i, line in enumerate(lines):
-        if line.startswith("=== FILE_CONTENT ==="):
-            content_start = i + 1
-        elif line.startswith("=== END_FILE_CONTENT ===") and content_start is not None:
-            content_end = i
-            break
-
-    # Display summary and syntax-highlighted content
-    if content_start is not None and content_end is not None:
-        content_lines = lines[content_start:content_end]
-        content = "\n".join(content_lines)
-
-        # Get file extension for syntax highlighting
-        file_ext = Path(path_str).suffix[1:] if Path(path_str).suffix else "text"
-        lexer_name = _LEXER_MAP.get(file_ext.lower(), 'text')
-
-        # Create syntax object
-        syntax = Syntax(
-            content,
-            lexer_name,
-            theme=MonokaiDarkBGStyle,
-            line_numbers=True,
-            word_wrap=False
-        )
-
-        # Show with prefix for console
-        if panel_updater:
-            panel_updater.append(f"Created: {path_str}")
-            panel_updater.append(str(syntax))
-        else:
-            console.print(f"Created: {path_str}", markup=False)
-            console.print(syntax)
-    else:
-        # Fallback: just show path
-        prefix = "╰─ " if not panel_updater else ""
-        message = f"{prefix}Created: {path_str}"
-        _print_or_append(message, console, panel_updater)
-
-    if not panel_updater:
-        console.print()
-
-
-def _handle_list_directory_feedback(tool_result, console, panel_updater):
-    """Handle feedback for list_directory tool.
-
-    Display formatted directory tree with files and directories.
-    """
-    lines = tool_result.split('\n')
-    # Extract items_count from metadata
-    items_count = 0
-    for line in lines:
-        match = re.search(r'items_count=(\d+)', line)
-        if match:
-            items_count = int(match.group(1))
-            break
-
-    # Parse content lines (skip metadata lines)
-    content_start = None
-    for i, line in enumerate(lines):
-        if line.startswith("FILE") or line.startswith("DIR"):
-            content_start = i
-            break
-
-    if content_start is not None and items_count > 0:
-        content_lines = lines[content_start:]
-
-        # Parse entries: kind, path, line_count, size
-        # Format: FILE  path/to/file.py       123 lines  12345 bytes
-        #         DIR   path/to/dir/             0 lines
-        entries = []
-        for line in content_lines:
-            # Use regex to extract parts - handles paths with spaces
-            # Pattern: <KIND>  <path>  <line_count> lines  [<size> bytes]
-            file_match = re.match(r'^(FILE|DIR)\s+(.+?)\s+(\d+)\s+lines(?:\s+(\d+)\s+bytes)?$', line)
-            if file_match:
-                kind = file_match.group(1)
-                path = file_match.group(2).strip()
-                line_count = file_match.group(3)
-                size = file_match.group(4) if file_match.group(4) else None
-
-                if kind == "FILE":
-                    entries.append(("FILE", path, size if size else "?"))
-                else:  # DIR
-                    entries.append(("DIR", path))
-
-        # Sort: directories first, then alphabetically
-        entries.sort(key=lambda x: (0 if x[0] == "DIR" else 1, x[1]))
-
-        # Build tree with truncation (max 10 items)
-        max_display = 10
-        display_entries = entries[:max_display]
-        remaining = max(0, items_count - max_display)
-
-        # Format tree lines
-        tree_lines = []
-        for i, entry in enumerate(display_entries):
-            is_last = (i == len(display_entries) - 1) and (remaining == 0)
-            # Use closing pipe (└─) for last item, otherwise middle pipe (├─)
-            connector = "└─" if is_last else "├─"
-            if entry[0] == "DIR":
-                tree_lines.append(f"   {connector} {entry[1]}")
-            else:  # FILE
-                size_str = f"{int(entry[2]):,}" if entry[2].isdigit() else entry[2]
-                tree_lines.append(f"   {connector} {entry[1]} ({size_str} bytes)")
-
-        # Add overflow indicator if needed (always use closing pipe)
-        if remaining > 0:
-            tree_lines.append(f"   └─ ... and {remaining} more")
-
-        # Build output with header
-        path_match = re.search(r'path=([^\s]+)', tool_result)
-        path_str = path_match.group(1) if path_match else "directory"
-        header = f"{path_str}/ ({items_count} item{'s' if items_count != 1 else ''})"
-
-        # Display with prefix
-        prefix = "╰─ " if not panel_updater else ""
-        output = f"{prefix}{header}\n"
-        output += "\n".join(tree_lines)
-
-        _print_or_append(output, console, panel_updater)
-
-    if not panel_updater:
-        console.print()
-
-
-def _handle_execute_command_feedback(tool_result, console, panel_updater):
-    """Handle feedback for execute_command tool.
-
-    Display command output with line truncation and exit code.
-    """
-    lines = tool_result.split('\n')
-    if lines:
-        # Extract exit code from first line
-        exit_code = extract_exit_code(tool_result)
-
-        # Get output (all lines after the exit_code line)
-        output_lines = lines[1:] if exit_code is not None else lines
-        output_lines = [line for line in output_lines if line.strip()]
-
-        # Truncate if too many lines
-        truncation_message = None
-        if len(output_lines) > MAX_COMMAND_OUTPUT_LINES:
-            displayed_lines = output_lines[:MAX_COMMAND_OUTPUT_LINES]
-            omitted = len(output_lines) - MAX_COMMAND_OUTPUT_LINES
-            output = '\n'.join(displayed_lines)
-            truncation_message = f"[dim]... ({omitted} more lines truncated)[/dim]"
-        else:
-            output = '\n'.join(output_lines)
-
-        # Build prefix
-        prefix = "╰─ " if not panel_updater else ""
-
-        # Show output
-        if output:
-            display_text = f"{prefix}{output}"
-            _print_or_append(display_text, console, panel_updater, markup=False)
-
-        # Show truncation message separately to preserve markup
-        if truncation_message:
-            _print_or_append(truncation_message, console, panel_updater)
-
-        # Show exit code if non-zero
-        if exit_code is not None and exit_code != 0:
-            exit_text = f"[dim](exit code: {exit_code})[/dim]"
-            _print_or_append(exit_text, console, panel_updater)
-
-    if not panel_updater:
-        console.print()
-
-
-def _display_tool_feedback(command, tool_result, console, indent=False, panel_updater=None):
-    """Display user summary for read_file, rg, and list_directory.
-
-    Args:
-        command: Tool command string
-        tool_result: Tool result string
-        console: Rich console
-        indent: If True, prefix with '│ ' (for sub-agent mode)
-        panel_updater: Optional SubAgentPanel for live updates
-    """
-    if not tool_result:
-        return
-
-    # For sub-agent panel: add tool call with formatted message
-    if panel_updater:
-        # Extract tool name from command
-        if command.startswith("read_file"):
-            tool_name = "read_file"
-        elif command.startswith("rg"):
-            tool_name = "rg"
-        elif command.startswith("list_directory"):
-            tool_name = "list_directory"
-        elif command.startswith(("create_task_list", "complete_task", "show_task_list")):
-            tool_name = command.split()[0]
-        elif command.startswith("web search"):
-            tool_name = "web_search"
-        elif command.startswith("execute_command"):
-            tool_name = "execute_command"
-        else:
-            tool_name = command.split()[0]
-        
-        # Pass to panel updater which will handle formatting
-        panel_updater.add_tool_call(tool_name, tool_result, command)
-
-    # For task list tools: show the list (bounded by MAX_TASKS / MAX_TASK_LEN)
-    if command.startswith(("create_task_list", "complete_task", "show_task_list")):
-        exit_code = extract_exit_code(tool_result)
-        if exit_code == 0 or exit_code is None:
-            # Successful task list - display without exit_code line, with Rich markup parsing.
-            rendered = tool_result
-            if rendered.startswith("exit_code="):
-                rendered = "\n".join(rendered.splitlines()[1:])
-            _print_or_append(rendered.strip(), console, panel_updater, markup=True)
-        else:
-            # Show single-line error if present
-            first_two = "\n".join(tool_result.splitlines()[:2]).strip()
-            _print_or_append(first_two or tool_result.strip(), console, panel_updater, markup=False)
-        if not panel_updater:
-            console.print()
-        return
-
-    # For read_file: parse lines_read and start_line from first line
-    if command.startswith("read_file"):
-        metadata = extract_multiple_metadata(tool_result, 'lines_read', 'start_line')
-        count = metadata.get('lines_read')
-        if count is not None:
-            # Only add prefix for console, not for panel_updater
-            prefix = "╰─ " if not panel_updater else ""
-
-            # Build message with line range if start_line is present
-            start_line = metadata.get('start_line')
-            if start_line:
-                if start_line > 1:
-                    end_line = start_line + count - 1
-                    message = f"{prefix}[dim]Read lines {start_line}-{end_line} ({count} line{'s' if count != 1 else ''})[/dim]"
-                else:
-                    message = f"{prefix}[dim]Read {count} line{'s' if count != 1 else ''}[/dim]"
-            else:
-                message = f"{prefix}[dim]Read {count} line{'s' if count != 1 else ''}[/dim]"
-
-            _print_or_append(message, console, panel_updater)
-        if not panel_updater:
-            console.print()
-        return
-
-    # For rg: parse matches/files from result
-    if command.startswith("rg"):
-        prefix = "╰─ " if not panel_updater else ""
-        message = None
-
-        # Check for "No matches found" message (0 results)
-        lines = tool_result.split('\n')
-        if any("No matches found" in line for line in lines):
-            message = f"{prefix}[dim]No matches found[/dim]"
-        # Check for matches=N or files=N pattern
-        elif len(lines) > 1:
-            metadata = extract_all_metadata(tool_result, line_index=1)
-            count = metadata.get('matches') or metadata.get('files')
-            if count is not None:
-                label = 'matches' if 'matches' in metadata else 'files'
-                if count == 0:
-                    message = f"{prefix}[dim]No {label} found[/dim]"
-                else:
-                    message = f"{prefix}[dim]Found {count} {label}[/dim]"
-        # Fallback: if exit_code=1 but no other info, show no matches
-        elif any("exit_code=1" in line for line in lines):
-            message = f"{prefix}[dim]No matches found[/dim]"
-
-        if message:
-            _print_or_append(message, console, panel_updater)
-        if not panel_updater:
-            console.print()
-        return
-
-    # For list_directory: parse and display directory tree
-    if command.startswith("list_directory"):
-        _handle_list_directory_feedback(tool_result, console, panel_updater)
-        return
-
-    # For create_file: display preview of created file
-    if command.startswith("create_file"):
-        _handle_create_file_feedback(tool_result, console, panel_updater)
-        return
-
-    # For execute_command: display command output with line truncation
-    if command.startswith("execute_command"):
-        _handle_execute_command_feedback(tool_result, console, panel_updater)
-        return
-
-    # For web_search: display results count
-    if command.startswith("web search"):
-        lines = tool_result.split('\n')
-        if lines:
-            # Extract results_found from first line
-            match = re.search(r'results_found=(\d+)', lines[0])
-            if match:
-                count = int(match.group(1))
-                # Only add prefix for console, not for panel_updater
-                prefix = "╰─ " if not panel_updater else ""
-                if count == 0:
-                    message = f"{prefix}[dim]No results found[/dim]"
-                else:
-                    message = f"{prefix}[dim]Found {count} result{'s' if count != 1 else ''}[/dim]"
-                _print_or_append(message, console, panel_updater)
-        if not panel_updater:
-            console.print()
-        return
+from core.tool_feedback import (
+    vault_root_str,
+    _print_or_append,
+    strip_leading_task_list_echo,
+    build_read_file_label,
+    build_tool_label,
+    display_tool_feedback,
+)
+from ui.sub_agent_panel import SubAgentPanel
 
 
 def _handle_empty_response(empty_response_count, console):
@@ -517,72 +57,6 @@ def _handle_empty_response(empty_response_count, console):
         return False, empty_response_count
     return True, empty_response_count
 
-
-# Timeout retry constants
-_RETRY_MAX_ATTEMPTS = 3
-_RETRY_DELAYS = (2, 4)  # exponential backoff per attempt
-_RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
-_RETRYABLE_ERROR_KEYWORDS = (
-    "timeout", "timed out", "connectionerror", "connection refused",
-    "connection reset", "connection aborted", "name or service not known",
-    "network unreachable", "no route to host", "eof occurred",
-)
-_NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 405, 422}
-
-
-def _is_retryable_error(error):
-    """Check if an LLMConnectionError is retryable.
-
-    Retryable conditions:
-    - Timeout or connection-level errors (network unreachable, DNS failure, etc.)
-    - HTTP 429 (rate limited), 502, 503, 504 (server errors)
-
-    Non-retryable conditions:
-    - HTTP 400, 401, 403, 405, 422 (client/auth errors)
-    - LLMResponseError (malformed response data)
-
-    Args:
-        error: Exception instance (typically LLMConnectionError)
-
-    Returns:
-        bool: True if the error is retryable
-    """
-    # Never retry response parsing errors
-    if isinstance(error, LLMResponseError):
-        return False
-
-    # Check HTTP status code first (most reliable signal)
-    details = getattr(error, 'details', {}) or {}
-    status_code = details.get("status_code")
-    if status_code is not None:
-        if status_code in _NON_RETRYABLE_STATUS_CODES:
-            return False
-        if status_code in _RETRYABLE_STATUS_CODES:
-            return True
-
-    # For network-level errors, check the original error message
-    original_error = details.get("original_error", "")
-    original_lower = original_error.lower()
-    return any(keyword in original_lower for keyword in _RETRYABLE_ERROR_KEYWORDS)
-
-
-def _wait_with_cancel_message(console, delay_seconds):
-    """Wait briefly before retrying, showing a dim status line.
-
-    Args:
-        console: Rich console for output
-        delay_seconds: Seconds to wait
-
-    Returns:
-        bool: True if wait completed, False if interrupted by KeyboardInterrupt
-    """
-    console.print(f"[dim]Connection issue, retrying in {delay_seconds}s... (Ctrl+C to cancel)[/dim]")
-    try:
-        time.sleep(delay_seconds)
-    except KeyboardInterrupt:
-        console.print("[dim]Retry cancelled.[/dim]")
-        return False
-    return True
 
 
 def _handle_tool_limit_reached(chat_manager, console):
@@ -624,357 +98,6 @@ def _handle_tool_limit_reached(chat_manager, console):
     console.print("[red]Error: model returned empty response after tool limit reached.[/red]")
     return False
 
-
-class SubAgentPanel:
-    """Live panel for streaming sub-agent tool output."""
-
-    # Spinner frames for animation
-    _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-    def __init__(self, query, console):
-        """Initialize the sub-agent panel.
-
-        Args:
-            query: The task query for the sub-agent
-            console: Rich console for display
-        """
-        self.console = console
-        self.query = query
-        self.tool_calls = []  # List of tool_name strings
-        self.total_tool_calls = 0
-        self._live = None
-        self._spinner_index = 0
-        self._show_spinner = True
-        self._spinner_thread = None
-        self._stop_spinner = threading.Event()
-        self._saved_termios = None
-
-    def _get_title(self):
-        """Get panel title with optional spinner and tool call counter.
-
-        Returns:
-            Rich markup string for the panel title
-        """
-        if self._show_spinner:
-            spinner = self._SPINNER_FRAMES[self._spinner_index % len(self._SPINNER_FRAMES)]
-            return f"[cyan]{spinner} Sub-Agent ({self.total_tool_calls})[/cyan]"
-        return f"[cyan]Sub-Agent ({self.total_tool_calls})[/cyan]"
-
-    def _render_panel(self, title=None, border_style="cyan"):
-        """Render the current panel state.
-
-        Args:
-            title: Optional title override. If None, uses _get_title().
-            border_style: Border style (default: "cyan")
-
-        Returns:
-            Rich Panel object with current content and title
-        """
-        lines = [f"[bold cyan]Query:[/bold cyan] {self.query}", ""]
-        
-        if self.tool_calls:
-            content = "\n".join(self.tool_calls)
-            lines.append(content)
-        else:
-            lines.append("[dim]No tools called yet[/dim]")
-        
-        content = "\n".join(lines)
-        return Panel(
-            Text.from_markup(content, justify="left"),
-            title=title if title is not None else self._get_title(),
-            title_align="left",
-            border_style=border_style,
-            padding=(0, 1),
-        )
-
-    def _spin(self):
-        """Background thread: continuously increment spinner and update display."""
-        while not self._stop_spinner.is_set():
-            self._spinner_index += 1
-            if self._live:
-                self._live.update(self._render_panel())
-            time.sleep(0.1)  # 10 updates per second = smooth animation
-
-    @staticmethod
-    def _set_raw_mode():
-        """Switch stdin to raw mode to prevent keystroke echoes during spinner."""
-        import os
-        import sys
-        if os.name == 'nt':
-            return
-        try:
-            import termios
-            fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
-            new = old.copy()
-            new[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)
-            new[0] &= ~(termios.ICRNL)
-            termios.tcsetattr(fd, termios.TCSANOW, new)
-            return old
-        except Exception:
-            return None
-
-    @staticmethod
-    def _restore_terminal_mode(saved):
-        """Restore terminal mode from saved termios attributes."""
-        import os
-        import sys
-        if saved is None:
-            return
-        try:
-            import os as _os
-            if _os.name == 'nt':
-                return
-        except Exception:
-            pass
-        try:
-            import termios
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, saved)
-        except Exception:
-            pass
-
-    def __enter__(self):
-        """Start Live display context.
-
-        Returns:
-            self for use in with statement
-        """
-        self._saved_termios = self._set_raw_mode()
-        panel = self._render_panel()
-        self._live = Live(panel, console=self.console, refresh_per_second=10)
-        self._live.__enter__()
-
-        # Start background spinner thread
-        self._spinner_thread = threading.Thread(target=self._spin, daemon=True)
-        self._spinner_thread.start()
-
-        return self
-
-    def __exit__(self, *args):
-        """End Live display context."""
-        self._stop_spinner.set()
-        if self._spinner_thread:
-            self._spinner_thread.join(timeout=0.5)
-        if self._live:
-            self._live.__exit__(*args)
-        self._restore_terminal_mode(self._saved_termios)
-        self._saved_termios = None
-
-    def add_tool_call(self, tool_name, tool_result=None, command=None):
-        """Add a tool call message to the panel and refresh display.
-
-        Args:
-            tool_name: Name of the tool (e.g., "read_file", "rg")
-            tool_result: Optional tool result string (for detailed formatting)
-            command: Optional command string for context
-        """
-        # If no tool_result provided, just show tool name (backward compatibility)
-        if tool_result is None:
-            message = f"[grey]{tool_name}[/grey]"
-            self.total_tool_calls += 1
-            self.tool_calls.append(message)
-            if len(self.tool_calls) > 5:
-                self.tool_calls.pop(0)
-            self._live.update(self._render_panel())
-            return
-
-        # Full implementation with tool_result
-        self.total_tool_calls += 1
-        
-        # Format message based on tool type, matching main agent styling
-        if tool_name == "read_file":
-            # Extract path from command if available
-            path = ""
-            if command:
-                # Command format is "read_file: path" (parallel) or "read_file path" (sequential)
-                match = re.search(r'read_file:?\s+(.+)', command)
-                if match:
-                    path = match.group(1).strip()
-
-            # Parse lines_read from result
-            metadata = extract_multiple_metadata(tool_result, 'lines_read', 'start_line')
-            count = metadata.get('lines_read')
-
-            if count is not None:
-                start_line = metadata.get('start_line')
-                if start_line:
-                    if start_line > 1:
-                        end_line = start_line + count - 1
-                        message = f"[grey]read_file {path}[/grey]\n[dim]╰─ Read lines {start_line}-{end_line} ({count} line{'s' if count != 1 else ''})[/dim]"
-                    else:
-                        message = f"[grey]read_file {path}[/grey]\n[dim]╰─ Read {count} line{'s' if count != 1 else ''}[/dim]"
-                else:
-                    message = f"[grey]read_file {path}[/grey]\n[dim]╰─ Read {count} line{'s' if count != 1 else ''}[/dim]"
-            else:
-                message = f"[grey]read_file {path}[/grey]"
-        
-        elif tool_name == "rg":
-            # Extract pattern from command if available
-            pattern = ""
-            if command:
-                # Command format is "rg: pattern" (parallel) or "rg pattern" (sequential)
-                match = re.search(r'rg:?\s+(.+)', command)
-                if match:
-                    pattern = match.group(1).strip()
-
-            # Parse matches/files from result
-            lines = tool_result.split('\n')
-            if len(lines) > 1:
-                metadata = extract_all_metadata(tool_result, line_index=1)
-                count = metadata.get('matches') or metadata.get('files')
-                if count is not None:
-                    label = 'matches' if 'matches' in metadata else 'files'
-                    if count == 0:
-                        message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ No {label} found[/dim]"
-                    else:
-                        message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ Found {count} {label}[/dim]"
-                else:
-                    message = f"[grey]rg {pattern}[/grey]"
-            elif any("exit_code=1" in line for line in lines):
-                # Fallback for no matches with minimal output
-                message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ No matches found[/dim]"
-            else:
-                message = f"[grey]rg {pattern}[/grey]"
-            
-            # Fallback: if exit_code=1 but no footer, add no matches
-            if tool_result and "exit_code=1" in tool_result and "╰─" not in message:
-                message = f"[grey]rg {pattern}[/grey]\n[dim]╰─ No matches found[/dim]"
-        
-        elif tool_name == "list_directory":
-            # Extract path from command if available
-            path = "."
-            if command:
-                # Command format is "list_directory: path" (parallel) or "list_directory path" (sequential)
-                match = re.search(r'list_directory:?\s+(.+)', command)
-                if match:
-                    path = match.group(1).strip()
-            
-            # Parse items_count from result
-            lines = tool_result.split('\n')
-            items_count = 0
-            for line in lines:
-                match = re.search(r'items_count=(\d+)', line)
-                if match:
-                    items_count = int(match.group(1))
-                    break
-            
-            if items_count > 0:
-                message = f"[grey]list_directory {path}[/grey]\n[dim]╰─ {items_count} item{'s' if items_count != 1 else ''}[/dim]"
-            else:
-                message = f"[grey]list_directory {path}[/grey]\n[dim]╰─ No items[/dim]"
-        
-        elif tool_name == "web_search":
-            # Extract query from command if available
-            query = ""
-            if command:
-                # Command format is "web search | query"
-                if "|" in command:
-                    parts = command.split(" | ", 1)
-                    if len(parts) > 1:
-                        query = parts[1]
-
-            # Parse results_found from tool_result
-            lines = tool_result.split('\n')
-            results_count = None
-            if lines:
-                match = re.search(r'results_found=(\d+)', lines[0])
-                if match:
-                    results_count = int(match.group(1))
-
-            if query:
-                if results_count is not None:
-                    if results_count == 0:
-                        message = f"[bold cyan]web search | {query}[/bold cyan]\n[dim]╰─ No results found[/dim]"
-                    else:
-                        message = f"[bold cyan]web search | {query}[/bold cyan]\n[dim]╰─ Found {results_count} result{'s' if results_count != 1 else ''}[/dim]"
-                else:
-                    message = f"[bold cyan]web search | {query}[/bold cyan]\n[dim]╰─ Search completed[/dim]"
-            else:
-                message = f"[bold cyan]web_search[/bold cyan]\n[dim]╰─ Search completed[/dim]"
-        
-        elif tool_name == "execute_command":
-            # Extract command from the command parameter if available
-            cmd_display = ""
-            if command:
-                # Command format is "execute_command: cmd" or just the cmd itself
-                if command.startswith("execute_command"):
-                    parts = command.split(' ', 1)
-                    if len(parts) > 1:
-                        cmd_display = parts[1]
-                else:
-                    # Just the command itself (from label builder)
-                    cmd_display = command
-            if cmd_display:
-                message = f"[grey]{cmd_display}[/grey]\n[dim]╰─ Command executed[/dim]"
-            else:
-                message = f"[grey]execute_command[/grey]\n[dim]╰─ Command executed[/dim]"
-        
-        elif tool_name in ("create_task_list", "complete_task", "show_task_list"):
-            # Handle task list tools - show the task list content
-            exit_code = extract_exit_code(tool_result)
-            if exit_code == 0 or exit_code is None:
-                rendered = tool_result
-                if rendered.startswith("exit_code="):
-                    rendered = "\n".join(rendered.splitlines()[1:])
-                message = f"[grey]{tool_name}[/grey]\n[dim]╰─ {rendered.strip()}[/dim]"
-            else:
-                first_two = "\n".join(tool_result.splitlines()[:2]).strip()
-                message = f"[grey]{tool_name}[/grey]\n[dim]╰─ {first_two or tool_result.strip()}[/dim]"
-        
-        else:
-            # Generic fallback
-            message = f"[grey]{tool_name}[/grey]"
-        
-        self.tool_calls.append(message)
-        # Keep only last 5 tool calls
-        if len(self.tool_calls) > 5:
-            self.tool_calls.pop(0)
-        self._live.update(self._render_panel())
-
-    def append(self, text):
-        """Append text to panel and refresh display (kept for compatibility).
-
-        Args:
-            text: Text to append (may contain Rich markup)
-        """
-        # For now, just update panel to refresh title counter
-        self._live.update(self._render_panel())
-
-    def set_complete(self, usage=None):
-        """Mark panel as complete with optional token info.
-
-        Args:
-            usage: Optional dict with 'prompt', 'completion', 'total' token counts
-        """
-        self._show_spinner = False  # Stop spinner
-
-        # Build title with token usage if available
-        if usage and usage.get('total_tokens'):
-            total_tokens = usage.get('total_tokens', 0)
-            title = f"[green]✓ Sub-Agent Complete ({self.total_tool_calls}) - {total_tokens:,} tokens[/green]"
-        else:
-            title = f"[green]✓ Sub-Agent Complete ({self.total_tool_calls})[/green]"
-
-        # Update panel with green complete title showing total tool calls and tokens
-        self._live.update(self._render_panel(
-            title=title,
-            border_style="green"
-        ))
-
-    def set_error(self, message):
-        """Show error in panel with red styling.
-
-        Args:
-            message: Error message to display
-        """
-        self._show_spinner = False  # Stop spinner
-        self._live.update(Panel(
-            message,
-            title="[red]✗ Sub-Agent Error[/red]",
-            title_align="left",
-            border_style="red",
-            padding=(0, 1),
-        ))
 
 
 class AgenticOrchestrator:
@@ -1095,7 +218,7 @@ class AgenticOrchestrator:
 
         # Retry loop for timeout/connection errors
         last_error = None
-        for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+        for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
             try:
                 response = self.chat_manager.client.chat_completion(
                     self.chat_manager.messages, stream=False, tools=tools
@@ -1104,9 +227,9 @@ class AgenticOrchestrator:
                 last_error = e
 
                 # Check if this error is retryable
-                if _is_retryable_error(e) and attempt < _RETRY_MAX_ATTEMPTS:
-                    delay = _RETRY_DELAYS[min(attempt - 1, len(_RETRY_DELAYS) - 1)]
-                    wait_ok = _wait_with_cancel_message(self.console, delay)
+                if is_retryable_error(e) and attempt < RETRY_MAX_ATTEMPTS:
+                    delay = RETRY_DELAYS[min(attempt - 1, len(RETRY_DELAYS) - 1)]
+                    wait_ok = wait_with_cancel_message(self.console, delay)
                     if not wait_ok:
                         return None
                     continue
@@ -1143,7 +266,7 @@ class AgenticOrchestrator:
             True if handled successfully, False if should continue looping
         """
         content = response.get("content", "")
-        content = _strip_leading_task_list_echo(
+        content = strip_leading_task_list_echo(
             content,
             getattr(self.chat_manager, "task_list", None) or [],
             getattr(self.chat_manager, "task_list_title", None),
@@ -1424,7 +547,7 @@ class AgenticOrchestrator:
                 'gitignore_spec': self.gitignore_spec,
                 'panel_updater': self.panel_updater,
                 'interaction_mode': self.chat_manager.interaction_mode,
-                'vault_root': _vault_root_str(),
+                'vault_root': vault_root_str(),
             }
 
             # Convert to ToolCall objects
@@ -1478,7 +601,7 @@ class AgenticOrchestrator:
                     # Label builders
                     label_builders = {
                         "rg": lambda a: f"rg: {a.get('pattern', '')[:40]}",
-                        "read_file": lambda a: _build_read_file_label(
+                        "read_file": lambda a: build_read_file_label(
                             a.get('path_str', ''),
                             a.get('start_line'),
                             a.get('max_lines'),
@@ -1569,7 +692,7 @@ class AgenticOrchestrator:
                                 # Error occurred during preview - don't show to user, but still return to agent
                                 pass
                         elif label:
-                            _display_tool_feedback(label, result.result, self.console, panel_updater=self.panel_updater)
+                            display_tool_feedback(label, result.result, self.console, panel_updater=self.panel_updater)
                             # Force flush to ensure immediate output
                             if not self.panel_updater:
                                 self.console.file.flush()
@@ -1690,7 +813,7 @@ class AgenticOrchestrator:
                 console=console,
                 gitignore_spec=self.gitignore_spec,
                 context_lines=args_dict.get('context_lines', 3),
-                vault_root=_vault_root_str()
+                vault_root=vault_root_str()
             )
             # Strip exit_code line from final result before displaying
             if final_result and isinstance(final_result, str):
@@ -1761,7 +884,7 @@ class AgenticOrchestrator:
                     chat_manager=self.chat_manager,
                     rg_exe_path=self.rg_exe_path,
                     panel_updater=panel_to_use,
-                    vault_root=_vault_root_str()
+                    vault_root=vault_root_str()
                 )
                 # Determine terminal policy for thinking indicator management
                 from tools.helpers.base import get_terminal_policy, TERMINAL_YIELD
@@ -1876,7 +999,7 @@ class AgenticOrchestrator:
                     console = self._get_console()
                     if console:
                         # Build label with arguments for better display
-                        label = _build_tool_label(function_name, arguments)
+                        label = build_tool_label(function_name, arguments)
 
                         # For task list tools: only show the task list, no label duplication
                         if function_name in ("create_task_list", "complete_task", "show_task_list"):
@@ -1900,7 +1023,7 @@ class AgenticOrchestrator:
                                 console.file.flush()
 
                             # Then display feedback
-                            _display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
+                            display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
 
                 return False, str(result)
             except Exception as e:

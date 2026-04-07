@@ -137,10 +137,19 @@ SERVER_SETTINGS:
 # =============================================================================
 # CONTEXT SETTINGS
 # =============================================================================
-# Context compaction thresholds and defaults
+# Two-tier compaction system:
+#   compact_trigger_tokens — reactive, post-response compaction (AI summarizes history)
+#   hard_limit_tokens      — proactive, pre-send guard (ensures context fits before LLM calls)
 CONTEXT_SETTINGS:
-  compact_trigger_tokens: 100000 # Tokens threshold for auto-compaction
-  log_conversations: false       # Whether to log conversations to disk
+  compact_trigger_tokens: 100000 # Tokens threshold for reactive auto-compaction
+  max_context_window: 200000     # Maximum context window for the model
+  # Proactive context guard: triggers ensure_context_fits() BEFORE LLM calls.
+  # If context exceeds this, tool results are compacted, then history is compacted,
+  # then oldest messages are truncated as a last resort.
+  # Defaults to 90% of max_context_window if not explicitly set.
+  hard_limit_tokens: 180000
+  notify_auto_compaction: true    # Show dim notification when auto-compaction runs
+  log_conversations: false        # Whether to log conversations to disk
   conversations_dir: conversations # Directory for conversation logs
   tool_compaction:
     enable_per_message_compaction: true  # Enable per-message tool result compaction
@@ -175,7 +184,6 @@ MODEL_PRICES: {}
 OBSIDIAN_SETTINGS:
   enabled: false            # Set to true to enable Obsidian tools
   vault_path: ""            # Absolute path to your Obsidian vault root
-  auto_resolve_links: true  # LLM auto-resolves [[wiki-links]] before reading notes
   exclude_folders: ".obsidian,.trash,node_modules,.git,__pycache__"  # Comma-separated folders to skip during vault scans
   project_base: "Dev"       # Base folder within vault for project notes
 
