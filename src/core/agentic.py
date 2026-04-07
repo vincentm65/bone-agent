@@ -8,11 +8,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from rich.markdown import Markdown
+from rich.text import Text
 
 from utils.markdown import left_align_headings
 from utils.settings import MAX_TOOL_CALLS, MonokaiDarkBGStyle
 from tools import (
-    confirm_tool,
     read_file,
     list_directory,
     create_file,
@@ -27,11 +27,14 @@ from core.retry import (
     is_retryable_error,
     wait_with_cancel_message,
 )
+from core.tool_approval import (
+    handle_edit_approval,
+    handle_command_approval,
+    resolve_edit_preview,
+)
 from exceptions import (
     LLMError,
-    LLMConnectionError,
     LLMResponseError,
-    CommandExecutionError, FileEditError,
 )
 
 from core.tool_feedback import (
@@ -409,7 +412,6 @@ class AgenticOrchestrator:
                 self.console.print()
 
         # Check if we should use parallel execution
-        from utils.settings import tool_settings
         use_parallel = (
             tool_settings.enable_parallel_execution and
             len(tool_calls) > 1 and
@@ -435,20 +437,25 @@ class AgenticOrchestrator:
                     if self.debug_mode:
                         self.console.print("[dim]Forcing sequential execution (sub_agent detected)[/dim]")
                     break
+                elif tool_name == "select_option":
+                    use_parallel = False
+                    if self.debug_mode:
+                        self.console.print("[dim]Forcing sequential execution (select_option detected)[/dim]")
+                    break
 
         if use_parallel and self.debug_mode:
             self.console.print(f"[cyan]Executing {len(tool_calls)} tools in parallel[/cyan]")
 
         # Lock compaction during tool execution to prevent orphaning tool_call_ids
-        self.chat_manager._compaction_locked = True
+        self.chat_manager.set_compaction_lock(True)
 
         if use_parallel:
-            result = self._execute_tools_parallel(response, thinking_indicator)
+            result = self._execute_tools_parallel(tool_calls, thinking_indicator)
         else:
             result = self._execute_tools_sequential(tool_calls, thinking_indicator)
 
         # Unlock compaction after all tool results are appended
-        self.chat_manager._compaction_locked = False
+        self.chat_manager.set_compaction_lock(False)
 
         return result
 
@@ -466,8 +473,6 @@ class AgenticOrchestrator:
 
         for tool_call in tool_calls:
             tool_id = tool_call["id"]
-            function_name = tool_call["function"]["name"]
-
             should_exit, tool_result = self._process_single_tool_call(
                 tool_call, thinking_indicator
             )
@@ -475,7 +480,6 @@ class AgenticOrchestrator:
             if should_exit:
                 # Cancel was selected - append this result and break immediately
                 if tool_result is not None and tool_result is not False:
-                    from rich.text import Text
                     if isinstance(tool_result, Text):
                         content_for_agent = f"exit_code=0\n{str(tool_result)}"
                     else:
@@ -491,7 +495,6 @@ class AgenticOrchestrator:
 
             # Append tool result if not skipped (guidance mode)
             if tool_result is not None and tool_result is not False:
-                from rich.text import Text
                 # Add exit_code prefix for agent consumption
                 if isinstance(tool_result, Text):
                     # Rich Text object = successful edit (exit_code=0)
@@ -516,18 +519,16 @@ class AgenticOrchestrator:
 
         return end_loop
 
-    def _execute_tools_parallel(self, response, thinking_indicator):
+    def _execute_tools_parallel(self, tool_calls, thinking_indicator):
         """Execute multiple tools concurrently.
 
         Args:
-            response: Full message dict from LLM (includes content and tool_calls)
+            tool_calls: List of tool call dicts from LLM (already filtered)
             thinking_indicator: Optional ThinkingIndicator instance
 
         Returns:
             True if should exit the orchestration loop
         """
-        # Extract tool_calls from response
-        tool_calls = response.get("tool_calls")
         if not tool_calls:
             return False
         from tools.parallel_executor import ParallelToolExecutor, ToolCall
@@ -557,11 +558,13 @@ class AgenticOrchestrator:
                     arguments = json.loads(tc["function"]["arguments"])
                 except json.JSONDecodeError:
                     # Invalid JSON - handle inline for this tool
-                    self.chat_manager.log_message({
+                    tool_msg = {
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "content": "exit_code=1\nInvalid JSON arguments"
-                    })
+                    }
+                    self.chat_manager.messages.append(tool_msg)
+                    self.chat_manager.log_message(tool_msg)
                     continue
 
                 tool_call_objs.append(
@@ -578,13 +581,12 @@ class AgenticOrchestrator:
                 return False
 
             # Create executor
-            from utils.settings import tool_settings
             executor = ParallelToolExecutor(
                 max_workers=tool_settings.max_parallel_workers
             )
 
             # Execute in parallel
-            results, had_errors = executor.execute_tools(
+            results, _ = executor.execute_tools(
                 tool_call_objs,
                 context
             )
@@ -664,33 +666,19 @@ class AgenticOrchestrator:
                     try:
                         if function_name == "edit_file" and result.requires_approval:
                             # Handle approval workflow for edit_file in parallel mode
-                            from rich.text import Text
-
                             thinking_indicator = context.get('thinking_indicator')
-
-                            if isinstance(result.result, Text):
-                                # Rich Text object (new format with styling)
-                                approved_result, should_exit = self._handle_edit_approval(
-                                    result.result, args_dict.get('path', ''), args_dict,
-                                    self.console, thinking_indicator)
-                                result.result = approved_result
-                                if should_exit:
-                                    result.should_exit = True
-                            elif result.result.startswith("exit_code=0"):
-                                # Legacy string format - parse and display
-                                lines = result.result.split('\n')
-                                preview_lines = [line for line in lines if not line.startswith("exit_code=")]
-                                preview = '\n'.join(preview_lines).strip()
-
-                                approved_result, should_exit = self._handle_edit_approval(
+                            preview, is_valid = resolve_edit_preview(result.result)
+                            if is_valid:
+                                approved_result, should_exit = handle_edit_approval(
                                     preview, args_dict.get('path', ''), args_dict,
-                                    self.console, thinking_indicator)
+                                    self.console, thinking_indicator,
+                                    self.chat_manager.approve_mode,
+                                    lambda: self.chat_manager.cycle_approve_mode(),
+                                    self.repo_root, self.gitignore_spec,
+                                    vault_root_str)
                                 result.result = approved_result
                                 if should_exit:
                                     result.should_exit = True
-                            else:
-                                # Error occurred during preview - don't show to user, but still return to agent
-                                pass
                         elif label:
                             display_tool_feedback(label, result.result, self.console, panel_updater=self.panel_updater)
                             # Force flush to ensure immediate output
@@ -735,7 +723,6 @@ class AgenticOrchestrator:
                         end_loop = True
 
                     # Add exit_code prefix for agent consumption (Rich Text = success)
-                    from rich.text import Text
                     if isinstance(result.result, Text):
                         content_for_agent = f"exit_code=0\n{str(result.result)}"
                     else:
@@ -771,69 +758,6 @@ class AgenticOrchestrator:
         finally:
             # Restore console output
             self._parallel_context['console'] = self.console
-
-    def _handle_edit_approval(self, preview, file_path, args_dict, console, thinking_indicator):
-        """Handle edit_file approval workflow (shared between sequential and parallel paths).
-
-        Args:
-            preview: Either a rich Text object or a plain string to display.
-            file_path: The file path being edited (for the confirm prompt).
-            args_dict: Tool arguments dict (path, search, replace, context_lines).
-            console: Rich console for display.
-            thinking_indicator: ThinkingIndicator instance (may be None).
-
-        Returns:
-            (result_str, should_exit) tuple where should_exit=True means cancel the agentic loop.
-        """
-        # Display preview
-        console.print(preview)
-        console.print()
-
-        # Stop thinking indicator while waiting for user input
-        if thinking_indicator:
-            thinking_indicator.stop()
-
-        action, guidance = confirm_tool(
-            f"edit_file: {file_path}",
-            console,
-            reason=args_dict.get('reason', 'Apply file edit with above changes'),
-            requires_approval=True,
-            approve_mode=self.chat_manager.approve_mode,
-            is_edit_tool=True,
-            cycle_approve_mode=lambda: self.chat_manager.cycle_approve_mode()
-        )
-
-        if action == "accept":
-            from tools.edit import _execute_edit_file
-            final_result = _execute_edit_file(
-                path=args_dict.get('path'),
-                search=args_dict.get('search'),
-                replace=args_dict.get('replace'),
-                repo_root=self.repo_root,
-                console=console,
-                gitignore_spec=self.gitignore_spec,
-                context_lines=args_dict.get('context_lines', 3),
-                vault_root=vault_root_str()
-            )
-            # Strip exit_code line from final result before displaying
-            if final_result and isinstance(final_result, str):
-                result_lines = [line for line in final_result.split('\n') if not line.startswith('exit_code=')]
-                final_result = '\n'.join(result_lines).strip()
-            result_str, should_exit = final_result, False
-        elif action == "advise":
-            console.print(f"[dim]Edit not applied. User advice: {guidance}[/dim]")
-            result_str = f"exit_code=1\nEdit not applied. User advice: {guidance}"
-            should_exit = False
-        else:  # cancel
-            console.print("[dim]Operation canceled by user.[/dim]")
-            result_str = "exit_code=1\nOperation canceled by user. Do not retry this operation."
-            should_exit = True
-
-        # Restart thinking indicator after user input
-        if thinking_indicator:
-            thinking_indicator.start()
-
-        return result_str, should_exit
 
     def _process_single_tool_call(self, tool_call, thinking_indicator):
         """Process a single tool call.
@@ -894,86 +818,43 @@ class AgenticOrchestrator:
                 if tool.requires_approval:
                     # For edit_file: generate preview and request approval
                     if function_name == "edit_file":
-                        from rich.text import Text
-
                         result = tool.execute(arguments, context)
 
                         # Display preview
                         console = self._get_console()
                         if console:
-                            if isinstance(result, Text):
-                                # Rich Text object (new format with styling)
-                                approved_result, should_exit = self._handle_edit_approval(
-                                    result, arguments.get('path', ''), arguments,
-                                    console, thinking_indicator)
-                                if should_exit:
-                                    return True, approved_result
-                                result = approved_result
-                            elif result.startswith("exit_code=0"):
-                                # Legacy string format - parse and display
-                                lines = result.split('\n')
-                                preview_lines = [line for line in lines if not line.startswith("exit_code=")]
-                                preview = '\n'.join(preview_lines).strip()
-
-                                approved_result, should_exit = self._handle_edit_approval(
+                            preview, is_valid = resolve_edit_preview(result)
+                            if is_valid:
+                                approved_result, should_exit = handle_edit_approval(
                                     preview, arguments.get('path', ''), arguments,
-                                    console, thinking_indicator)
+                                    console, thinking_indicator,
+                                    self.chat_manager.approve_mode,
+                                    lambda: self.chat_manager.cycle_approve_mode(),
+                                    self.repo_root, self.gitignore_spec,
+                                    vault_root_str)
                                 if should_exit:
                                     return True, approved_result
                                 result = approved_result
-                            else:
-                                # Error occurred during preview - don't show to user, but still return to agent
-                                pass
                         return False, str(result)
                     elif function_name == "execute_command":
-                        # Get console for approval prompt
                         console = self._get_console()
-
-                        # Check if command should be silently blocked (redirect to native tool)
-                        # This check happens BEFORE approval to avoid prompting for blocked commands
-                        from utils.validation import is_auto_approved_command, check_for_silent_blocked_command
                         command = arguments.get('command', '')
-                        is_blocked, reprompt_msg = check_for_silent_blocked_command(command)
-                        if is_blocked:
-                            # Return reprompt message to guide the AI to use the native tool
-                            # This is not shown to the user - the AI sees it and can retry
-                            if self.debug_mode:
-                                console.print(f"[dim]Silently blocked command: {command.split()[0]}[/dim]")
-                            result = f"exit_code=1\n{reprompt_msg}"
-                            return False, result
+                        result, should_exit, command_executed = handle_command_approval(
+                            command, arguments, tool, context, console,
+                            thinking_indicator, self.chat_manager.approve_mode,
+                            self.debug_mode)
+                        if should_exit:
+                            return True, result
 
-                        # Check if command should be auto-approved
-                        auto_approve = is_auto_approved_command(command)
-
-                        # Request user approval (unless auto-approved)
-                        if not auto_approve:
-                            # Stop thinking indicator while waiting for user input
-                            if thinking_indicator:
-                                thinking_indicator.stop()
-
-                            action, guidance = confirm_tool(
-                                f"execute_command: {command[:80]}{'...' if len(command) > 80 else ''}",
-                                console,
-                                reason=arguments.get('reason', 'Execute shell command'),
-                                requires_approval=True,
-                                approve_mode=self.chat_manager.approve_mode
-                            )
-
-                            if action == "accept":
-                                result = tool.execute(arguments, context)
-                            elif action == "advise":
-                                result = f"Command not executed. User advice: {guidance}"
-                            elif action == "cancel":
-                                result = "Command canceled by user. Do not retry this operation."
-                                # Break the agentic loop entirely
-                                return True, result
-
-                            # Restart thinking indicator after user input
-                            if thinking_indicator:
-                                thinking_indicator.start()
-                        else:
-                            # Auto-approved command - execute without prompting
-                            result = tool.execute(arguments, context)
+                        # Display execute_command output when command actually ran
+                        if command_executed:
+                            label = build_tool_label(function_name, arguments)
+                            label_text = f"[grey]{label}[/grey]"
+                            if not self.panel_updater:
+                                console.print(label_text, highlight=False)
+                                console.file.flush()
+                            display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
+                        return False, result
                     else:
                         # Other tools with requires_approval can be handled here in the future
                         result = tool.execute(arguments, context)

@@ -66,6 +66,15 @@ class ChatManager:
 
         self._init_messages(reset_totals=True)
 
+    def set_compaction_lock(self, locked):
+        """Set or release the compaction lock.
+
+        When locked, compaction is skipped entirely (no message removal,
+        no summarization, no truncation). Used during tool execution to
+        prevent orphaning tool_call_ids.
+        """
+        self._compaction_locked = locked
+
     def _init_messages(self, reset_totals: bool = True):
         """Initialize message history with system prompt and agents.md as initial exchange."""
         # Start new conversation logging session
