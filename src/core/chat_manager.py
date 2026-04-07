@@ -370,6 +370,14 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
     def _find_tool_blocks(self):
         """Find all tool-result blocks in message history.
 
+        Handles both single-turn and multi-turn tool chains:
+          Single: user → assistant(tc) → tool_results → assistant(answer)
+          Multi:  user → assistant(tc1) → tools → assistant(tc2) → tools → assistant(answer)
+
+        In multi-turn chains, all tool_calls and tool_results are merged into
+        a single block spanning from the first assistant(tool_calls) to the
+        final assistant(answer).
+
         Returns:
             list: List of block dicts with keys: user_idx, start, end, tool_calls, tool_results
         """
@@ -391,28 +399,44 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                     i += 1
                     continue
 
-                # Collect all tool results
-                tool_results = []
-                j = i + 1
-                while j < len(self.messages) and self.messages[j].get('role') == 'tool':
-                    tool_results.append(self.messages[j].get('content', ''))
-                    j += 1
+                # Follow consecutive assistant(tool_calls) → tool_results pairs
+                # until we reach a final answer (assistant without tool_calls)
+                block_start = i
+                all_tool_calls = []
+                all_tool_results = []
+                j = i
+                found_end = False
 
-                # Check if next message is assistant with NO tools (final answer)
-                if j < len(self.messages):
-                    next_msg = self.messages[j]
-                    if (next_msg.get('role') == 'assistant' and
-                        not next_msg.get('tool_calls')):
-                        # This is a complete block!
-                        blocks.append({
-                            'user_idx': user_idx,
-                            'start': i,
-                            'end': j,
-                            'tool_calls': msg.get('tool_calls', []),
-                            'tool_results': tool_results
-                        })
+                while j < len(self.messages):
+                    if self.messages[j].get('role') == 'assistant' and self.messages[j].get('tool_calls'):
+                        # Accumulate tool calls from this assistant message
+                        all_tool_calls.extend(self.messages[j].get('tool_calls', []))
+                        # Collect immediately following tool results
+                        k = j + 1
+                        while k < len(self.messages) and self.messages[k].get('role') == 'tool':
+                            all_tool_results.append(self.messages[k].get('content', ''))
+                            k += 1
+                        j = k
+                    elif self.messages[j].get('role') == 'assistant' and not self.messages[j].get('tool_calls'):
+                        # Final answer — this completes the block
+                        found_end = True
+                        break
+                    else:
+                        # Non-tool, non-assistant message breaks the chain
+                        break
 
-                i = j + 1
+                if found_end and all_tool_calls:
+                    blocks.append({
+                        'user_idx': user_idx,
+                        'start': block_start,
+                        'end': j,
+                        'tool_calls': all_tool_calls,
+                        'tool_results': all_tool_results
+                    })
+
+                # Continue scanning from after the final answer (or after the chain)
+                # Guard: always advance at least one position to prevent infinite loops
+                i = max(i + 1, j + 1 if found_end else j)
             else:
                 i += 1
 
