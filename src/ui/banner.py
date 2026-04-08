@@ -1,11 +1,13 @@
 """Startup banner display - separated from main.py to avoid circular imports."""
 
 import os
+from pathlib import Path
 from rich.console import Console
 from rich.theme import Theme
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
+import json
 from llm import config
 
 console = Console(theme=Theme({
@@ -33,6 +35,16 @@ def format_directory_path(path: str) -> str:
     if len(parts) > 2:
         return f"{parts[0]}.../{parts[-1]}"
     return path
+
+
+def _get_version() -> str:
+    """Read version from package.json (single source of truth)."""
+    try:
+        pkg_path = Path(__file__).resolve().parent.parent.parent / "package.json"
+        with open(pkg_path) as f:
+            return json.load(f)["version"]
+    except Exception:
+        return "?.?.?"
 
 
 def display_startup_banner(approve_mode: str, interaction_mode: str = "edit", *, clear_screen: bool = False):
@@ -65,7 +77,7 @@ def display_startup_banner(approve_mode: str, interaction_mode: str = "edit", *,
     # Add content
     grid.add_row(
         Text("vmCode", style="bold white"),
-        Text("v1.0.3", style="dim white")
+        Text(f"v{_get_version()}", style="dim white")
     )
 
     model_info = Text.assemble(

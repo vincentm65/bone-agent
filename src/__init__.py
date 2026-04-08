@@ -1,3 +1,11 @@
 """vmCode - AI-powered coding assistant."""
 
-__version__ = "1.1.0"
+import json
+from pathlib import Path
+
+try:
+    _pkg_path = Path(__file__).resolve().parent.parent / "package.json"
+    with open(_pkg_path) as _f:
+        __version__ = json.load(_f)["version"]
+except Exception:
+    __version__ = "?.?.?"
