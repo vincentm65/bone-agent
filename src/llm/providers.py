@@ -85,7 +85,10 @@ class OpenAIHandler:
 
                         # Capture usage data if present (usually in final chunk)
                         if 'usage' in data:
-                            usage_data = data['usage']
+                            usage_data = dict(data['usage'])
+                            # Promote top-level cost into usage dict (OpenRouter places it here)
+                            if 'cost' in data:
+                                usage_data['cost'] = data['cost']
 
                         choices = data.get('choices', [])
                         if choices:

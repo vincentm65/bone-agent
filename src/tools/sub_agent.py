@@ -114,7 +114,7 @@ def sub_agent(
         # Track usage
         usage = sub_agent_data.get('usage', {})
         if usage:
-            chat_manager.token_tracker.add_usage(usage)
+            chat_manager.token_tracker.add_usage(usage, model_name=sub_agent_data.get("model", ""))
             panel.set_complete({
                 'prompt_tokens': usage.get('prompt_tokens', 0),
                 'completion_tokens': usage.get('completion_tokens', 0),

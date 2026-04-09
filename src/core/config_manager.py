@@ -85,24 +85,13 @@ class ConfigManager:
     def set_provider(self, provider_name: str) -> Optional[Path]:
         return self.update_field('LAST_PROVIDER', provider_name)
 
-    def _extract_model_pricing(self, config_data: Dict[str, Any], model: str) -> Dict[str, float]:
-        """Extract pricing for a model from config.
+    def _extract_model_pricing(self, model_name: str, config: Dict[str, Any] | None = None) -> Dict[str, float]:
+        """Extract pricing for a model from MODEL_PRICES.
 
-        Args:
-            config_data: Configuration dictionary
-            model: Model name to look up
-
-        Returns:
-            Dict with 'in' and 'out' cost values per 1M tokens
+        Delegates to llm_config.get_model_cost() — single source of truth.
         """
-        model_prices = config_data.get('MODEL_PRICES', {})
-        if model and model in model_prices:
-            model_cost = model_prices[model]
-            return {
-                'in': float(model_cost.get('cost_in', 0.0)),
-                'out': float(model_cost.get('cost_out', 0.0))
-            }
-        return {'in': 0.0, 'out': 0.0}
+        cost_in, cost_out = llm_config.get_model_cost(model_name, config=config)
+        return {'in': cost_in, 'out': cost_out}
 
     def get_usage_costs(self, provider: str = None, model: str = None) -> Dict[str, float]:
         """Get usage costs for a specific model.
@@ -137,7 +126,7 @@ class ConfigManager:
             if model_key:
                 model = config_data.get(model_key, '')
 
-        return self._extract_model_pricing(config_data, model)
+        return self._extract_model_pricing(model, config=config_data)
 
     def set_model(self, provider_name: str, model: str) -> Optional[Path]:
         """Set model for a specific provider.
@@ -206,7 +195,7 @@ class ConfigManager:
             Dict with 'in' and 'out' cost values per 1M tokens
         """
         config_data = self.load()
-        return self._extract_model_pricing(config_data, model_name)
+        return self._extract_model_pricing(model_name, config=config_data)
 
     def set_model_price(self, model_name: str, cost_in: float, cost_out: float) -> Optional[Path]:
         """Set pricing for a specific model.

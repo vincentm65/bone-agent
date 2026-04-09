@@ -10,9 +10,18 @@ from ui.displays import show_help_table
 from ui.banner import display_startup_banner
 from core.agentic import SubAgentPanel
 from ui.setting_selector import SettingSelector, SettingCategory, SettingOption
+import re
+
 from utils.settings import MonokaiDarkBGStyle, context_settings
-from utils.markdown import left_align_headings
 from rich.markdown import Markdown
+
+
+_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
+
+
+def left_align_headings(markdown: str) -> str:
+    """Strip markdown heading markers to avoid Rich's centering."""
+    return _HEADING_RE.sub(lambda m: m.group(2), markdown)
 from rich.table import Table
 
 from rich import box
@@ -302,13 +311,14 @@ def _handle_clear(chat_manager, console, debug_mode_container, args):
     console.print(f"  Out: {conv_out:,} tokens")
     console.print(f"  Total: {conv_total:,} tokens")
 
-    # Display cost — prefer upstream-reported actual cost
+    # Display cost — combined actual + estimated, with config-based fallback
     tracker_conv = chat_manager.token_tracker
-    if tracker_conv.conv_actual_cost > 0:
-        console.print(f"  Cost: ${tracker_conv.conv_actual_cost:.4f} (upstream-reported)")
-    elif costs['in'] > 0 or costs['out'] > 0:
-        conv_cost = tracker_conv.calculate_conversation_cost(costs['in'], costs['out'])
-        console.print(f"  Cost: ${conv_cost['total_cost']:.4f}")
+    if tracker_conv.has_actual_cost():
+        conv_cost = tracker_conv.conv_actual_cost + tracker_conv.conv_estimated_cost
+    else:
+        conv_cost = tracker_conv.get_conversation_display_cost(costs['in'], costs['out'])
+    if conv_cost > 0:
+        console.print(f"  Cost: ${conv_cost:.4f}")
 
     console.print()
 
@@ -805,36 +815,29 @@ def _handle_usage(chat_manager, console, debug_mode_container, args):
     console.print()
     
 
-    # Display costs — prefer upstream-reported actual cost (e.g. OpenRouter)
-    # over locally estimated cost from token counts × static rates
-    if tracker.has_actual_cost():
+    # Display costs — combined upstream-reported + estimated
+    display_cost = tracker.get_display_cost(current_model)
+    if display_cost > 0:
         console.print(f"[cyan]Session Cost ({current_model}):[/cyan]")
-        console.print(f"  Total:  ${tracker.total_actual_cost:.6f} (upstream-reported)")
+        console.print(f"  Total:  ${display_cost:.6f}")
         console.print()
-        console.print(f"[dim]Note: Cost reported directly by the provider (e.g. OpenRouter), "
-                      f"not estimated from token rates.[/dim]")
+        if tracker.has_actual_cost():
+            console.print(f"[dim]Note: Includes ${tracker.total_actual_cost:.6f} provider-reported "
+                          f"+ ${tracker.total_estimated_cost:.6f} locally estimated.[/dim]")
+        else:
+            console.print(f"[dim]Note: Cost estimated from token counts × static rates.[/dim]")
         console.print()
-    elif costs['in'] > 0 or costs['out'] > 0:
-        session_cost = tracker.calculate_session_cost(costs['in'], costs['out'])
-        console.print(f"[cyan]Session Cost ({current_model}):[/cyan]")
-
-        if costs['in'] > 0:
-            console.print(f"  Input:  ${session_cost['input_cost']:.6f} (${costs['in']:.6f}/1M tokens)")
-
-        if costs['out'] > 0:
-            console.print(f"  Output: ${session_cost['output_cost']:.6f} (${costs['out']:.6f}/1M tokens)")
-
-        console.print(f"  Total:  ${session_cost['total_cost']:.6f}")
-        console.print()
-        console.print(f"[dim]Note: Costs are per-model. Switch model with [bold cyan]/model[/bold cyan] to set different costs.[/dim]")
-        console.print()
-
     else:
-        console.print(f"[yellow]Cost not configured for model '{current_model}'. Set with:[/yellow]")
-        console.print(f"  [bold cyan]/usage[/bold cyan] in <cost>   - Set input token cost per 1M tokens")
-        console.print(f"  [bold cyan]/usage[/bold cyan] out <cost>  - Set output token cost per 1M tokens")
-        console.print(f"[dim]Example: [bold cyan]/usage[/bold cyan] in 2.50[/dim]")
-        console.print()
+        if costs['in'] > 0 or costs['out'] > 0:
+            console.print("  No cost data available (no tokens used yet).")
+            console.print(f"[dim]Rates: ${costs['in']:.6f}/1M in, ${costs['out']:.6f}/1M out[/dim]")
+            console.print()
+        else:
+            console.print(f"[yellow]Cost not configured for model '{current_model}'. Set with:[/yellow]")
+            console.print(f"  [bold cyan]/usage[/bold cyan] in <cost>   - Set input token cost per 1M tokens")
+            console.print(f"  [bold cyan]/usage[/bold cyan] out <cost>  - Set output token cost per 1M tokens")
+            console.print(f"[dim]Example: [bold cyan]/usage[/bold cyan] in 2.50[/dim]")
+            console.print()
 
     return CommandResult(status="handled")
 

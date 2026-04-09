@@ -63,20 +63,39 @@ _provider_registry_cache = None
 _cached_provider = None
 
 
+def get_model_cost(model_name: str, config: dict | None = None) -> tuple[float, float]:
+    """Get model-specific (cost_in, cost_out) per 1M tokens from MODEL_PRICES.
+
+    Shared utility — used by both the provider registry builder and config_manager.
+    Returns (0.0, 0.0) for unknown models.
+
+    Args:
+        model_name: Model name to look up.
+        config: Optional config dict (defaults to _CONFIG). Pass a fresh config
+                after runtime edits to get up-to-date pricing.
+    """
+    model_prices = (config if config is not None else _CONFIG).get("MODEL_PRICES", {})
+    if model_name in model_prices:
+        mc = model_prices[model_name]
+        return float(mc.get("cost_in", 0.0)), float(mc.get("cost_out", 0.0))
+    return 0.0, 0.0
+
+
+def _model_cost(model_config_key):
+    """Return {cost_in, cost_out} dict for use in provider registry via **spread.
+
+    Reads from module-level _CONFIG (not an injected config). Safe because
+    reload_config() invalidates the provider registry cache, forcing a rebuild.
+    """
+    ci, co = get_model_cost(_CONFIG.get(model_config_key, ""))
+    return {"cost_in": ci, "cost_out": co}
+
+
 def _get_provider_registry():
     """Build PROVIDER_REGISTRY from current config (cached)."""
     global _provider_registry_cache
     if _provider_registry_cache is not None:
         return _provider_registry_cache
-
-    # Helper function to get model-specific pricing
-    def get_model_cost(provider_name: str, model_name: str, cost_key_in: str, cost_key_out: str, default_in: float, default_out: float) -> tuple[float, float]:
-        """Get model-specific cost from MODEL_PRICES."""
-        model_prices = _CONFIG.get("MODEL_PRICES", {})
-        if model_name in model_prices:
-            model_cost = model_prices[model_name]
-            return float(model_cost.get("cost_in", 0.0)), float(model_cost.get("cost_out", 0.0))
-        return 0.0, 0.0
 
     _provider_registry_cache = {
         "local": {
@@ -125,10 +144,7 @@ def _get_provider_registry():
             "default_top_p": 0.9,
             "allow_top_p": True,
             "allow_temperature": True,
-            "cost_in": get_model_cost("openrouter", _CONFIG.get("OPENROUTER_MODEL", ""),
-                                     "", "", 0.0, 0.0)[0],
-            "cost_out": get_model_cost("openrouter", _CONFIG.get("OPENROUTER_MODEL", ""),
-                                      "", "", 0.0, 0.0)[1]
+            **_model_cost("OPENROUTER_MODEL"),
         },
         "glm": {
             "type": "api",
@@ -146,10 +162,7 @@ def _get_provider_registry():
             "default_top_p": 0.9,
             "allow_top_p": True,
             "allow_temperature": True,
-            "cost_in": get_model_cost("glm", _CONFIG.get("GLM_MODEL", ""),
-                                     "", "", 0.0, 0.0)[0],
-            "cost_out": get_model_cost("glm", _CONFIG.get("GLM_MODEL", ""),
-                                      "", "", 0.0, 0.0)[1]
+            **_model_cost("GLM_MODEL"),
         },
         "openai": {
             "type": "api",
@@ -167,10 +180,7 @@ def _get_provider_registry():
             "default_top_p": 0.9,
             "allow_top_p": False,
             "allow_temperature": False,
-            "cost_in": get_model_cost("openai", _CONFIG.get("OPENAI_MODEL", ""),
-                                     "", "", 0.0, 0.0)[0],
-            "cost_out": get_model_cost("openai", _CONFIG.get("OPENAI_MODEL", ""),
-                                      "", "", 0.0, 0.0)[1]
+            **_model_cost("OPENAI_MODEL"),
         },
         "gemini": {
             "type": "api",
@@ -188,10 +198,7 @@ def _get_provider_registry():
             "default_top_p": 0.9,
             "allow_top_p": True,
             "allow_temperature": True,
-            "cost_in": get_model_cost("gemini", _CONFIG.get("GEMINI_MODEL", ""),
-                                     "", "", 0.0, 0.0)[0],
-            "cost_out": get_model_cost("gemini", _CONFIG.get("GEMINI_MODEL", ""),
-                                      "", "", 0.0, 0.0)[1]
+            **_model_cost("GEMINI_MODEL"),
         },
         "minimax": {
             "type": "api",
@@ -210,10 +217,7 @@ def _get_provider_registry():
             "allow_top_p": False,
             "allow_temperature": True,
             "max_tokens": 4096,
-            "cost_in": get_model_cost("minimax", _CONFIG.get("MINIMAX_MODEL", ""),
-                                     "", "", 0.0, 0.0)[0],
-            "cost_out": get_model_cost("minimax", _CONFIG.get("MINIMAX_MODEL", ""),
-                                      "", "", 0.0, 0.0)[1]
+            **_model_cost("MINIMAX_MODEL"),
         },
         "anthropic": {
             "type": "api",
@@ -235,10 +239,7 @@ def _get_provider_registry():
             "allow_top_p": False,
             "allow_temperature": True,
             "max_tokens": 4096,
-            "cost_in": get_model_cost("anthropic", _CONFIG.get("ANTHROPIC_MODEL", ""),
-                                     "", "", 0.0, 0.0)[0],
-            "cost_out": get_model_cost("anthropic", _CONFIG.get("ANTHROPIC_MODEL", ""),
-                                      "", "", 0.0, 0.0)[1]
+            **_model_cost("ANTHROPIC_MODEL"),
         },
         "kimi": {
             "type": "api",
@@ -256,10 +257,7 @@ def _get_provider_registry():
             "default_top_p": 0.9,
             "allow_top_p": True,
             "allow_temperature": True,
-            "cost_in": get_model_cost("kimi", _CONFIG.get("KIMI_MODEL", ""),
-                                     "", "", 0.0, 0.0)[0],
-            "cost_out": get_model_cost("kimi", _CONFIG.get("KIMI_MODEL", ""),
-                                      "", "", 0.0, 0.0)[1]
+            **_model_cost("KIMI_MODEL"),
         },
         "vmcode": {
             "type": "api",
@@ -277,8 +275,7 @@ def _get_provider_registry():
             "default_top_p": 0.9,
             "allow_top_p": True,
             "allow_temperature": True,
-            "cost_in": 0.0,
-            "cost_out": 0.0,
+            **_model_cost("VMCODE_PROXY_MODEL"),
         },
     }
     return _provider_registry_cache
@@ -365,6 +362,7 @@ __all__ = [
     "CONFIG_PATH",
     "PROVIDER_REGISTRY",
     "get_providers",
+    "get_model_cost",
     "LLM_PROVIDER",
     "TOOLS_ENABLED",
     "TOOLS_REQUIRE_CONFIRMATION",

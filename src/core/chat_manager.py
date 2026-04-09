@@ -842,10 +842,11 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         # Update token tracking accurately (include system prompt + messages + tools)
         self._update_context_tokens()
         tokens_after = self.token_tracker.current_context_tokens
-        summary_usage = response.get("usage", {})
-
-        # Add summary generation tokens to cumulative usage
-        self.token_tracker.add_usage(summary_usage)
+        provider_cfg = get_provider_config(self.client.provider)
+        self.token_tracker.add_usage(
+            response,
+            model_name=provider_cfg.get("model", ""),
+        )
 
         # Update context estimate (keeps cumulative API usage intact)
         self.context_token_estimate = tokens_after

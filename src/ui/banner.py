@@ -3,23 +3,13 @@
 import os
 from pathlib import Path
 from rich.console import Console
-from rich.theme import Theme
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 import json
 from llm import config
 
-console = Console(theme=Theme({
-    "markdown.hr": "grey50",
-    "markdown.heading": "default",
-    "markdown.h1": "default",
-    "markdown.h2": "default",
-    "markdown.h3": "default",
-    "markdown.h4": "default",
-    "markdown.h5": "default",
-    "markdown.h6": "default",
-}))
+console = Console()
 
 
 def format_directory_path(path: str) -> str:

@@ -7,11 +7,20 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+import re
+
 from rich.markdown import Markdown
 from rich.text import Text
 
-from utils.markdown import left_align_headings
 from utils.settings import MAX_TOOL_CALLS, MonokaiDarkBGStyle
+
+
+_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
+
+
+def left_align_headings(markdown: str) -> str:
+    """Strip markdown heading markers to avoid Rich's centering."""
+    return _HEADING_RE.sub(lambda m: m.group(2), markdown)
 from tools import (
     read_file,
     list_directory,
@@ -20,6 +29,8 @@ from tools import (
     _tools_for_mode,
 )
 from utils.settings import tool_settings
+
+from llm.config import get_provider_config
 from utils.result_parsers import extract_exit_code
 from core.retry import (
     RETRY_MAX_ATTEMPTS,
@@ -82,7 +93,11 @@ def _handle_tool_limit_reached(chat_manager, console):
         return False
 
     if isinstance(response, dict) and 'usage' in response:
-        chat_manager.token_tracker.add_usage(response['usage'])
+        provider_cfg = get_provider_config(chat_manager.client.provider)
+        chat_manager.token_tracker.add_usage(
+            response,
+            model_name=provider_cfg.get("model", ""),
+        )
 
     try:
         final_message = response["choices"][0]["message"]
@@ -244,7 +259,11 @@ class AgenticOrchestrator:
             # Successful response — parse and return
             # Extract and track usage data
             if isinstance(response, dict) and 'usage' in response:
-                self.chat_manager.token_tracker.add_usage(response['usage'])
+                provider_cfg = get_provider_config(self.chat_manager.client.provider)
+                self.chat_manager.token_tracker.add_usage(
+                    response,
+                    model_name=provider_cfg.get("model", ""),
+                )
 
             try:
                 message = response["choices"][0]["message"]

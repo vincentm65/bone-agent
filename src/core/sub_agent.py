@@ -192,6 +192,7 @@ def run_sub_agent(
                 "completion_tokens": 0,
                 "total_tokens": 0
             },
+            "model": "",
             "error": error_details
         }
 
@@ -199,6 +200,8 @@ def run_sub_agent(
     delta_prompt = temp_chat_manager.token_tracker.total_prompt_tokens
     delta_completion = temp_chat_manager.token_tracker.total_completion_tokens
     delta_total = temp_chat_manager.token_tracker.total_tokens
+    tt = temp_chat_manager.token_tracker
+    delta_cost = tt.total_actual_cost + tt.total_estimated_cost
 
     # Extract final response (last assistant message with content)
     final_content = ""
@@ -210,12 +213,17 @@ def run_sub_agent(
     # Format with usage at end
     result = final_content
 
+    usage = {
+        "prompt_tokens": delta_prompt,
+        "completion_tokens": delta_completion,
+        "total_tokens": delta_total,
+    }
+    if delta_cost > 0:
+        usage["cost"] = delta_cost
+
     return {
         "result": result,
-        "usage": {
-            "prompt_tokens": delta_prompt,
-            "completion_tokens": delta_completion,
-            "total_tokens": delta_total
-        },
+        "usage": usage,
+        "model": temp_chat_manager.client.model,
         "error": None
     }

@@ -29,15 +29,7 @@ def get_bottom_toolbar_text(chat_manager):
 
     # Calculate cost — prefer upstream-reported actual cost (e.g. OpenRouter)
     # over locally estimated cost from token counts × static rates
-    tracker = chat_manager.token_tracker
-    if tracker.has_actual_cost():
-        total_cost = tracker.total_actual_cost
-    else:
-        provider_cfg = get_provider_config(provider_name)
-        cost_in = provider_cfg.get("cost_in", 0.0)
-        cost_out = provider_cfg.get("cost_out", 0.0)
-        cost_info = tracker.calculate_session_cost(cost_in, cost_out)
-        total_cost = cost_info.get("total_cost", 0.0)
+    total_cost = chat_manager.token_tracker.get_display_cost(model)
     
     # Import LAST_COMPLETION_TIME from main
     import importlib
