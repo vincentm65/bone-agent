@@ -11,10 +11,12 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 ENV_API_KEYS = {
     'ANTHROPIC_API_KEY': os.environ.get('ANTHROPIC_API_KEY'),
     'OPENAI_API_KEY': os.environ.get('OPENAI_API_KEY'),
+    'GLM_PLAN_API_KEY': os.environ.get('GLM_PLAN_API_KEY'),
     'GLM_API_KEY': os.environ.get('GLM_API_KEY'),
     'GEMINI_API_KEY': os.environ.get('GEMINI_API_KEY'),
     'OPENROUTER_API_KEY': os.environ.get('OPENROUTER_API_KEY'),
     'KIMI_API_KEY': os.environ.get('KIMI_API_KEY'),
+    'MINIMAX_PLAN_API_KEY': os.environ.get('MINIMAX_PLAN_API_KEY'),
     'MINIMAX_API_KEY': os.environ.get('MINIMAX_API_KEY'),
     'VMCODE_PROXY_API_KEY': os.environ.get('VMCODE_PROXY_API_KEY'),
 }
@@ -146,6 +148,24 @@ def _get_provider_registry():
             "allow_temperature": True,
             **_model_cost("OPENROUTER_MODEL"),
         },
+        "glm_plan": {
+            "type": "api",
+            "api_key": _CONFIG.get("GLM_PLAN_API_KEY", ""),
+            "model": _CONFIG.get("GLM_PLAN_MODEL", ""),
+            "api_base": _CONFIG.get("GLM_PLAN_API_BASE", "https://open.bigmodel.cn/api/paas/v4"),
+            "endpoint": "/chat/completions",
+            "error_prefix": "GLM",
+            "config_keys": {
+                "GLM_PLAN_API_KEY": "",
+                "GLM_PLAN_MODEL": "",
+                "GLM_PLAN_API_BASE": "https://open.bigmodel.cn/api/paas/v4",
+            },
+            "default_temperature": 0.1,
+            "default_top_p": 0.9,
+            "allow_top_p": True,
+            "allow_temperature": True,
+            **_model_cost("GLM_PLAN_MODEL"),
+        },
         "glm": {
             "type": "api",
             "api_key": _CONFIG.get("GLM_API_KEY", ""),
@@ -199,6 +219,25 @@ def _get_provider_registry():
             "allow_top_p": True,
             "allow_temperature": True,
             **_model_cost("GEMINI_MODEL"),
+        },
+        "minimax_plan": {
+            "type": "api",
+            "api_key": _CONFIG.get("MINIMAX_PLAN_API_KEY", ""),
+            "model": _CONFIG.get("MINIMAX_PLAN_MODEL", ""),
+            "api_base": _CONFIG.get("MINIMAX_PLAN_API_BASE", "https://api.minimax.io/anthropic/v1"),
+            "endpoint": "/messages",
+            "error_prefix": "MiniMax",
+            "config_keys": {
+                "MINIMAX_PLAN_API_KEY": "",
+                "MINIMAX_PLAN_MODEL": "",
+                "MINIMAX_PLAN_API_BASE": "https://api.minimax.io/anthropic/v1",
+            },
+            "default_temperature": 0.1,
+            "default_top_p": 0.9,
+            "allow_top_p": False,
+            "allow_temperature": True,
+            "max_tokens": 4096,
+            **_model_cost("MINIMAX_PLAN_MODEL"),
         },
         "minimax": {
             "type": "api",
@@ -291,7 +330,7 @@ def _get_provider():
     if last_provider and last_provider in _provider_registry_cache:
         _cached_provider = last_provider
         return _cached_provider
-    _cached_provider = "glm"
+    _cached_provider = "glm_plan"
     return _cached_provider
 
 

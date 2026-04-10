@@ -19,7 +19,6 @@ if str(src_dir) not in sys.path:
 
 from rich.console import Console
 from rich.theme import Theme
-from rich.markdown import Markdown
 from rich.text import Text
 from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
@@ -33,7 +32,7 @@ from ui.commands import process_command
 from ui.banner import display_startup_banner
 from ui.prompt_utils import get_bottom_toolbar_text, setup_common_bindings, TOOLBAR_STYLE
 from core.agentic import agentic_answer
-from utils.settings import MonokaiDarkBGStyle
+from utils.settings import MonokaiDarkBGStyle, left_align_headings
 from exceptions import VmCodeError
 from tools.loader import load_all_tools
 
@@ -56,15 +55,6 @@ console = Console(theme=Theme({
     "markdown.link": "default",
     "markdown.link_url": "default",
 }))
-
-import re as _re
-_HEADING_RE = _re.compile(r'^(#{1,6})\s+(.+)$', _re.MULTILINE)
-
-
-def left_align_headings(markdown: str) -> str:
-    """Strip markdown heading markers to avoid Rich's centering."""
-    return _HEADING_RE.sub(lambda m: m.group(2), markdown)
-
 
 # Debug mode container (used as mutable reference)
 DEBUG_MODE_CONTAINER = {'debug': False}

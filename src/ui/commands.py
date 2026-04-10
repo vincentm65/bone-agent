@@ -10,18 +10,9 @@ from ui.displays import show_help_table
 from ui.banner import display_startup_banner
 from core.agentic import SubAgentPanel
 from ui.setting_selector import SettingSelector, SettingCategory, SettingOption
-import re
 
-from utils.settings import MonokaiDarkBGStyle, context_settings
+from utils.settings import MonokaiDarkBGStyle, context_settings, left_align_headings
 from rich.markdown import Markdown
-
-
-_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
-
-
-def left_align_headings(markdown: str) -> str:
-    """Strip markdown heading markers to avoid Rich's centering."""
-    return _HEADING_RE.sub(lambda m: m.group(2), markdown)
 from rich.table import Table
 
 from rich import box
@@ -387,9 +378,6 @@ def _open_provider_editor(chat_manager, console, provider):
 
     changes = selector.run()
 
-    # Clear the selector UI
-    display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
-
     if changes is None:
         console.print("[dim]No changes made.[/dim]")
         return False
@@ -436,11 +424,11 @@ def _open_provider_editor(chat_manager, console, provider):
     result = chat_manager.switch_provider(provider)
 
     if change_lines:
-        console.print(f"[green]{provider.capitalize()} updated:[/green]")
+        console.print(f"[green]{provider} updated:[/green]")
         for line in change_lines:
             console.print(line)
     else:
-        console.print(f"[green]{provider.capitalize()} activated.[/green]")
+        console.print(f"[green]{provider} activated.[/green]")
 
     if "Failed" not in result and "failed" not in result:
         console.print(f"[dim]{result}[/dim]")
@@ -481,40 +469,39 @@ def _handle_provider(chat_manager, console, debug_mode_container, args):
 
         return CommandResult(status="handled")
     else:
-        # Show all providers as a browsable list (nav style)
+        # Show all providers as a radio-button list (same style as model selector)
         from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
 
-        provider_settings = []
+        provider_options = []
         for prov in config.get_providers():
             cfg = config.get_provider_config(prov)
             model = cfg.get('model') or cfg.get('api_model') or ''
-            label = prov.capitalize()
+            entry = {"value": prov, "text": prov.capitalize()}
             if model:
-                label += f"  ({model[:35]}{'...' if len(model) > 35 else ''})"
-            if prov == current:
-                label += "  <style fg='green'>(Active)</style>"
-            provider_settings.append(SettingOption(
-                key=prov,
-                text=label,
-                value=False,
-                input_type="nav",
-                on_text="",
-                off_text="",
-            ))
+                entry["description"] = model[:40]
+            provider_options.append(entry)
+
+        provider_setting = SettingOption(
+            key="provider",
+            text="Select Provider",
+            value=current,
+            input_type="options",
+            options=provider_options,
+        )
 
         selector = SettingSelector(
-            categories=[SettingCategory(title="Providers", settings=provider_settings)],
-            title="Provider Settings",
+            categories=[SettingCategory(title="", settings=[provider_setting])],
+            title="",
             show_save=False,
         )
         result = selector.run()
 
-        if result is None or not isinstance(result, dict) or '_nav' not in result:
-            display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
+        if result is None:
             console.print("[dim]Cancelled.[/dim]")
             return CommandResult(status="handled")
 
-        provider = result['_nav']
+        # Get selected provider (from changes, or current if unchanged)
+        provider = result.get('provider', current)
 
     # Open interactive editor for the selected provider
     _open_provider_editor(chat_manager, console, provider)
@@ -533,21 +520,25 @@ def _handle_model(chat_manager, console, debug_mode_container, args):
         cfg = config.get_provider_config(current_provider)
         current_model = cfg.get('model') or cfg.get('api_model') or ''
         
-        # Models available via vmcode proxy (matches pricing table in usage_tracker.py)
+        # Models available via vmcode proxy (OpenRouter-compatible)
+        # Format: (display_name, openrouter_model_id)
         vmcode_models = [
-            # Free model (routes via OpenRouter, $0 cost)
-            ("GLM-4.5-Air (Free)", "z-ai/glm-4.5-air:free"),
-            # GLM models
-            ("GLM-5.1", "glm-5.1"),
-            ("GLM-5", "glm-5"),
-            ("GLM-5-Turbo", "glm-5-turbo"),
-            ("GLM-4.7", "glm-4.7"),
-            ("GLM-4.5-Air", "glm-4.5-air"),
-            # MiniMax models
-            ("MiniMax-2.7", "minimax-2.7"),
-            ("MiniMax-2.7-HighSpeed", "minimax-2.7-highspeed"),
-            ("MiniMax-2.5", "minimax-2.5"),
-            ("MiniMax-2.5-HighSpeed", "minimax-2.5-highspeed"),
+            # DeepSeek
+            ("DeepSeek-V3.2       1×", "deepseek/deepseek-v3.2"),
+            # MiniMax
+            ("MiniMax-M2.5        1×", "minimax/minimax-m2.5"),
+            ("MiniMax-M2.7        1.5×", "minimax/minimax-m2.7"),
+            # Moonshot AI
+            ("Kimi-K2.5           3×", "moonshotai/kimi-k2.5"),
+            # xAI
+            ("Grok-Code-Fast-1    1.5×", "x-ai/grok-code-fast-1"),
+            ("Grok-4.1-Fast       1×", "x-ai/grok-4.1-fast"),
+            # Z-AI
+            ("GLM-4.5-Air (Free)  0×", "z-ai/glm-4.5-air:free"),
+            ("GLM-4.7             3×", "z-ai/glm-4.7"),
+            ("GLM-5               5×", "z-ai/glm-5"),
+            ("GLM-5-Turbo         10×", "z-ai/glm-5-turbo"),
+            ("GLM-5.1            10×", "z-ai/glm-5.1"),
         ]
 
         model_options = []
@@ -576,7 +567,6 @@ def _handle_model(chat_manager, console, debug_mode_container, args):
         result = selector.run()
         
         if result is None or not isinstance(result, dict) or 'model' not in result:
-            display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
             console.print("[dim]Cancelled.[/dim]")
             return CommandResult(status="handled")
         
@@ -1871,9 +1861,6 @@ def _handle_obsidian(chat_manager, console, debug_mode_container, args):
 
     changes = selector.run()
 
-    # Clear selector UI
-    display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode)
-
     if changes is None:
         console.print("[dim]Cancelled.[/dim]")
         return CommandResult(status="handled")
@@ -1901,8 +1888,7 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
     """Handle /project command — manage project structure in Obsidian vault.
 
     Subcommands:
-        init — scaffold project folder structure (Bugs, Tasks, Initiatives, Docs, Dashboard.md)
-        status — show aggregated status of project issues
+        init — scaffold project folder structure (Bugs, Tasks, Docs, Dashboard.md)
     """
     from utils.settings import obsidian_settings
 
@@ -1913,9 +1899,8 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
         return CommandResult(status="handled")
 
     if not args or not args.strip():
-        console.print("[red]Usage: [bold cyan]/project[/bold cyan] [init | status][/red]")
-        console.print("[dim]  init   — scaffold project folder structure in vault[/dim]")
-        console.print("[dim]  status — show aggregated issue status[/dim]")
+        console.print("[red]Usage: [bold cyan]/project[/bold cyan] init[/red]")
+        console.print("[dim]  init — scaffold project folder structure in vault[/dim]")
         console.print()
         return CommandResult(status="handled")
 
@@ -1942,6 +1927,7 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
         folders = {
             "Bugs": (
                 "---\n"
+                "title: {title}\n"
                 "type: bug\n"
                 "status: reported\n"
                 "priority: medium\n"
@@ -1964,6 +1950,7 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
             ),
             "Tasks": (
                 "---\n"
+                "title: {title}\n"
                 "type: task\n"
                 "status: todo\n"
                 "priority: medium\n"
@@ -1980,28 +1967,9 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
                 "\n"
                 "Statuses: `todo` → `in-progress` → `done`\n"
             ),
-            "Initiatives": (
-                "---\n"
-                "type: initiative\n"
-                "status: proposed\n"
-                "priority: medium\n"
-                "date_created: {date}\n"
-                "date_modified: {date}\n"
-                "tags: [initiative]\n"
-                "---\n"
-                "\n"
-                "# {title}\n"
-                "\n"
-                "**Goal:**\n"
-                "\n"
-                "**Motivation:**\n"
-                "\n"
-                "**Child tasks/bugs:**\n"
-                "\n"
-                "Statuses: `proposed` → `in-progress` → `review` → `done`\n"
-            ),
             "Docs": (
                 "---\n"
+                "title: {title}\n"
                 "type: doc\n"
                 "date_created: {date}\n"
                 "date_modified: {date}\n"
@@ -2031,7 +1999,7 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
                 template_path.write_text(content, encoding="utf-8")
 
         # Create Done/ subfolders for archiving completed notes
-        for folder_rel in ("Bugs", "Tasks", "Initiatives"):
+        for folder_rel in ("Bugs", "Tasks"):
             done_path = project_folder / folder_rel / "Done"
             done_path.mkdir(parents=True, exist_ok=True)
             created_folders.append(f"{folder_rel}/Done")
@@ -2039,14 +2007,6 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
         # Create Dashboard
         dashboard_path = project_folder / "Dashboard.md"
         repo_name = project_folder.name
-        dv_init = (
-            f'```dataview\n'
-            f"TABLE status, priority, date_created\n"
-            f'FROM "{session.project_folder_relative}/Initiatives"\n'
-            f'WHERE type = "initiative" AND status != "done"\n'
-            f"SORT date_created DESC\n"
-            f"```\n"
-        )
         dv_tasks = (
             f'```dataview\n'
             f"TABLE status, priority, date_created\n"
@@ -2069,7 +2029,6 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
             f'FROM "{session.project_folder_relative}"\n'
             f'WHERE (type = "task" AND status = "done")\n'
             f'   OR (type = "bug" AND (status = "fixed" OR status = "verified"))\n'
-            f'   OR (type = "initiative" AND status = "done")\n'
             f"SORT date_modified DESC\n"
             f"```\n"
         )
@@ -2084,11 +2043,8 @@ def _handle_project(chat_manager, console, debug_mode_container, args):
             "# {title} Dashboard\n"
             "\n"
             "> [!summary] Project Overview\n"
-            "> Check the Bugs/, Tasks/, and Initiatives/ folders for issue tracking.\n"
+            "> Check the Bugs/ and Tasks/ folders for issue tracking.\n"
             "\n"
-            "## Active Initiatives\n"
-            "\n"
-            f"{dv_init}\n"
             "## Open Tasks\n"
             "\n"
             f"{dv_tasks}\n"

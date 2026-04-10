@@ -516,15 +516,15 @@ def _build_vault_section() -> str:
         "Never prepend vault/project paths to code paths.",
         "",
         "**Content routing (CRITICAL):** "
-        "ALL project notes (bugs, tasks, initiatives, docs) MUST be created in the vault using `create_file` "
+        "ALL project notes (bugs, tasks, docs) MUST be created in the vault using `create_file` "
         f"with absolute vault paths (e.g. `{project_folder}/Bugs/My bug title.md`). "
         "Code changes (source, configs, tests) → relative repo paths. "
         "Scratch/draft work → `.temp/` at repo root ONLY. "
         "NEVER create vault notes in `.temp/`, the repo root, or any repo subdirectory.",
         "",
-        "**Plan routing:** When asked to plan a feature or change, create an initiative note in "
-        f"`{project_folder}/Initiatives/`. Do NOT create plan files in `.temp/` or the repo — "
-        "initiative notes ARE the plan records.",
+        "**Plan routing:** When asked to plan a feature or change, create a task note in "
+        f"`{project_folder}/Tasks/`. Do NOT create plan files in `.temp/` or the repo — "
+        "task notes ARE the plan records.",
         "",
         f"**Search:** `rg` scans both repo and vault (vault results show `[vault]` prefix). "
         f"Excluded: {excluded}.",
@@ -538,8 +538,8 @@ def _build_vault_section() -> str:
         lines.extend([
             "",
             "**Flat folder structure (CRITICAL):** Notes go directly into `Bugs/`, `Tasks/`, "
-            "`Initiatives/`, or `Docs/`. The ONLY allowed subfolder is `Done/` inside each "
-            "(for archiving). NEVER create nested subfolders like `Tasks/Feature Name/` "
+            "or `Docs/`. The ONLY allowed subfolder is `Done/` (for archiving). "
+            "NEVER create nested subfolders like `Tasks/Feature Name/` "
             "or `Bugs/Component/`. Task/bug filenames must be flat: "
             "`Tasks/Enhanced web search - DuckDuckGo adapter.md` (correct) vs "
             "`Tasks/Enhanced Web Search/DuckDuckGo adapter.md` (wrong).",
@@ -548,13 +548,12 @@ def _build_vault_section() -> str:
             "no type prefix (never `Bug: ...` or `Task N: ...`). The H1 heading must match "
             "the title exactly.",
             "",
-            "**Type field (exact values):** `type: bug | task | initiative | doc` — lowercase only.",
+            "**Type field (exact values):** `type: bug | task | doc` — lowercase only.",
             "",
             "**Note schemas:** Every note MUST follow its type template exactly.",
             "",
             "- **Bug:** `Bugs/<title>.md`",
             "  Required FM: title, type (bug), status, priority, date_created, date_modified, tags.",
-            "  Optional FM: parent_initiative (wiki-link to parent initiative).",
             "  Body sections: ## Related Files, ## Steps to Reproduce, ## Expected Behavior, ## Actual Behavior.",
             "  Optional body: ## Root Cause, ## Fix, ## Investigation Summary.",
             "",
@@ -588,9 +587,7 @@ def _build_vault_section() -> str:
             "",
             "- **Task:** `Tasks/<title>.md`",
             "  Required FM: title, type (task), status, priority, date_created, date_modified, tags.",
-            "  Required FM: parent_initiative (wiki-link to parent initiative).",
             "  Body sections: ## Related Files, ## Problem (or ## Scope / ## Description).",
-            "  Do NOT repeat parent initiative in body — FM field is sufficient.",
             "",
             "  Example:",
             "  ```",
@@ -602,7 +599,6 @@ def _build_vault_section() -> str:
             "  date_created: 2025-07-10",
             "  date_modified: 2025-07-10",
             "  tags: [refactor, agentic]",
-            "  parent_initiative: '[[Refactor agentic.py]]'",
             "  ---",
             "",
             "  # Extract retry logic to src/core/retry.py",
@@ -615,48 +611,15 @@ def _build_vault_section() -> str:
             "  Move retry constants and functions from agentic.py into retry.py.",
             "  ```",
             "",
-            "- **Initiative:** `Initiatives/<title>.md`",
-            "  Required FM: title, type (initiative), status, priority, date_created, date_modified, tags, description.",
-            "  Body sections: ## Problem (or ## Motivation), ## Approach, ## Child Tasks, ## Child Bugs.",
-            "  Child links are bulleted wiki-links: `- [[Tasks/Task title]]` / `- [[Bugs/Bug title]]`.",
-            "",
-            "  Example:",
-            "  ```",
-            "  ---",
-            "  title: Context Compaction Bug Cleanup",
-            "  type: initiative",
-            "  status: in-progress",
-            "  priority: high",
-            "  date_created: 2025-07-10",
-            "  date_modified: 2025-07-10",
-            "  tags: [initiative, compaction, bugs]",
-            "  description: Fix bugs in the context compaction system.",
-            "  ---",
-            "",
-            "  # Context Compaction Bug Cleanup",
-            "",
-            "  ## Problem",
-            "  The compaction system has accumulated multiple bugs.",
-            "",
-            "  ## Approach",
-            "  Fix in priority order: critical API-breaking bugs first.",
-            "",
-            "  ## Child Tasks",
-            "  - [[Make compact_history robust for huge inputs]]",
-            "",
-            "  ## Child Bugs",
-            "  - [[compact_history Case 2 Invalid Message Sequence]]",
-            "  ```",
-            "",
             "- **Doc:** `Docs/<title>.md`",
             "  Required FM: title, type (doc), date_created, date_modified, tags.",
             "  Optional FM: priority.",
             "  No required body sections — free-form markdown.",
             "",
             "**Common mistakes to avoid:**",
-            "- NEVER create `Bugs/`, `Tasks/`, `Initiatives/` folders in the repo root",
+            "- NEVER create `Bugs/`, `Tasks/` folders in the repo root",
             "- NEVER put vault notes in `.temp/`",
-            "- NEVER use `# Bug:`, `# Task:`, `# Initiative:` prefixes in H1 headings",
+            "- NEVER use `# Bug:`, `# Task:` prefixes in H1 headings",
             "- NEVER use quoted strings for title values in frontmatter",
             "- NEVER nest folders (e.g. `Tasks/Some Feature/subtask.md`)",
             "- NEVER use uppercase or mixed-case type values",
@@ -664,8 +627,8 @@ def _build_vault_section() -> str:
 
     lines.extend([
         "",
-        "**Archiving:** Terminal status (bug: fixed/verified, task: done, initiative: done/review) "
-        "→ move to `Done/` subfolder (e.g. `Bugs/Done/`) via `execute_command mv`. "
+        "**Archiving:** Terminal status (bug: fixed/verified, task: done) "
+        "→ move to `Done/` folder via `execute_command mv`. "
         "User asks to sweep → `mv` each done note.",
     ])
 

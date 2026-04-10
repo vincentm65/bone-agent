@@ -1,4 +1,5 @@
 """Centralized configuration for vmCode."""
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Set
@@ -14,6 +15,14 @@ from pygments.styles.monokai import MonokaiStyle
 class MonokaiDarkBGStyle(MonokaiStyle):
     """Monokai style with dark background for code highlighting."""
     background_color = "#141414"
+
+
+_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
+
+
+def left_align_headings(text: str) -> str:
+    """Strip markdown heading markers to avoid Rich's centering."""
+    return _HEADING_RE.sub(lambda m: m.group(2), text)
 
 
 @dataclass

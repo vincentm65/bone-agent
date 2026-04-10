@@ -7,20 +7,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-import re
-
 from rich.markdown import Markdown
 from rich.text import Text
 
-from utils.settings import MAX_TOOL_CALLS, MonokaiDarkBGStyle
-
-
-_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
-
-
-def left_align_headings(markdown: str) -> str:
-    """Strip markdown heading markers to avoid Rich's centering."""
-    return _HEADING_RE.sub(lambda m: m.group(2), markdown)
+from utils.settings import MAX_TOOL_CALLS, MonokaiDarkBGStyle, left_align_headings
 from tools import (
     read_file,
     list_directory,
