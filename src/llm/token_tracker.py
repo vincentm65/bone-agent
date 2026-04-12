@@ -48,6 +48,13 @@ class TokenTracker:
         # Config-estimated cost (fallback when upstream cost is absent)
         self.total_estimated_cost = 0.0    # Cumulative estimated cost (never reset by compaction)
         self.conv_estimated_cost = 0.0     # Per-conversation estimated cost (reset on /new)
+
+        # Cache tokens: tracked when providers return cache breakdowns
+        # Only input tokens can be cached (no output caching in any known API)
+        self.total_cache_read_tokens = 0       # Cumulative input tokens read from cache
+        self.total_cache_creation_tokens = 0   # Cumulative input tokens written to cache
+        self.conv_cache_read_tokens = 0        # Per-conversation cache read tokens
+        self.conv_cache_creation_tokens = 0    # Per-conversation cache creation tokens
     def add_usage(self, usage_data, model_name: str = ""):
         """Add token usage from an API response.
 
@@ -85,6 +92,24 @@ class TokenTracker:
         self.conv_prompt_tokens += prompt_tokens
         self.conv_completion_tokens += completion_tokens
         self.conv_total_tokens += prompt_tokens + completion_tokens
+
+        # Extract cache tokens from provider responses (if available)
+        # Anthropic: cache_read_input_tokens, cache_creation_input_tokens
+        # OpenAI: prompt_tokens_details.cached_tokens
+        # Use explicit is-not-None checks to avoid treating 0 as falsy
+        cache_read = usage_data.get('cache_read_input_tokens')
+        if cache_read is None:
+            cache_read = usage_data.get('cached_tokens')
+        if cache_read is None:
+            details = usage_data.get('prompt_tokens_details')
+            cache_read = details.get('cached_tokens') if details else None
+        cache_read = cache_read or 0
+
+        cache_creation = usage_data.get('cache_creation_input_tokens', 0)
+        self.total_cache_read_tokens += cache_read
+        self.total_cache_creation_tokens += cache_creation
+        self.conv_cache_read_tokens += cache_read
+        self.conv_cache_creation_tokens += cache_creation
 
         # Record cost: upstream-reported takes priority; compute from config as fallback
         upstream_cost = usage_data.get('cost')
@@ -162,7 +187,10 @@ class TokenTracker:
         }
 
     def reset(self, prompt_tokens=None, completion_tokens=None, total_tokens=None):
-        """Reset counters to zero or to specified values.
+        """Reset token counters to zero or to specified values.
+
+        Used by /clear to reset conversation context while preserving cumulative
+        billing costs across the session.
 
         Args:
             prompt_tokens: If provided, set total_prompt_tokens to this value
@@ -176,7 +204,22 @@ class TokenTracker:
         else:
             self.total_tokens = total_tokens
         self.current_context_tokens = 0  # Reset context tokens
+        self.total_cache_read_tokens = 0
+        self.total_cache_creation_tokens = 0
         # Note: total_actual_cost and total_estimated_cost are preserved across resets (cumulative billing)
+
+    def reset_all(self):
+        """Full reset of all counters including cost accumulators.
+
+        Used on provider switch to clear stale cost state from the previous
+        provider. Unlike reset(), this zeros actual/estimated costs so the
+        new provider starts with a clean billing slate.
+        """
+        self.reset()
+        self.total_actual_cost = 0.0
+        self.total_estimated_cost = 0.0
+        self.total_cache_read_tokens = 0
+        self.total_cache_creation_tokens = 0
 
     @staticmethod
     def estimate_tokens(text, model=""):
@@ -232,6 +275,8 @@ class TokenTracker:
         self.conv_total_tokens = 0
         self.conv_actual_cost = 0.0
         self.conv_estimated_cost = 0.0
+        self.conv_cache_read_tokens = 0
+        self.conv_cache_creation_tokens = 0
 
     def get_usage_for_prompt(self, context_limit: int = 200_000) -> str:
         """Get formatted usage information for inclusion in agent prompts.

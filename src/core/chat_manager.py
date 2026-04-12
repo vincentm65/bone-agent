@@ -75,8 +75,15 @@ class ChatManager:
         """
         self._compaction_locked = locked
 
-    def _init_messages(self, reset_totals: bool = True):
-        """Initialize message history with system prompt and agents.md as initial exchange."""
+    def _init_messages(self, reset_totals: bool = True, reset_costs: bool = False):
+        """Initialize message history with system prompt and agents.md as initial exchange.
+
+        Args:
+            reset_totals: Reset cumulative token counts (default True).
+            reset_costs: Reset cost accumulators (default False).
+                         Set True on provider switch to clear stale billing state.
+                         Kept False on /clear to preserve cumulative session costs.
+        """
         # Start new conversation logging session
         if self.markdown_logger:
             self.markdown_logger.start_session()
@@ -98,7 +105,10 @@ class ChatManager:
         # Reset session totals if requested (keep totals across /clear)
         # For a fresh conversation, cumulative totals start at 0 (no API calls made yet)
         if reset_totals:
-            self.token_tracker.reset(prompt_tokens=0, completion_tokens=0)
+            if reset_costs:
+                self.token_tracker.reset_all()
+            else:
+                self.token_tracker.reset(prompt_tokens=0, completion_tokens=0)
 
         # Always reset conversation tokens (resets on /new and fresh starts)
         self.token_tracker.reset_conversation()
@@ -1166,13 +1176,13 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             self.cleanup()
 
         if self.client.switch_provider(provider_name):
-            self._init_messages()
+            self._init_messages(reset_costs=True)
             if provider_name == "local":
                 server = self.start_server_if_needed()
                 if not server:
                     # Failed to start server - revert
                     self.client.switch_provider(previous_provider)
-                    self._init_messages()
+                    self._init_messages(reset_costs=True)
                     return f"Failed to start local server. Reverted to {previous_provider} provider."
                 self.server_process = server
                 return f"Switched to {provider_name} provider (server ready)."

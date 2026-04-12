@@ -643,6 +643,9 @@ def main():
                 else:
                     console.print("\n[dim](Press Ctrl+C again to exit, or type 'exit' to quit)[/dim]")
                     continue
+            except EOFError:
+                # stdin closed (Ctrl+D or piped input ended)
+                break
 
     finally:
         # Display session summary before cleanup

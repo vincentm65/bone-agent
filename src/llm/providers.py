@@ -177,8 +177,13 @@ class AnthropicHandler:
         openai_format_usage = {
             'prompt_tokens': anthropic_usage.get('input_tokens', 0),
             'completion_tokens': anthropic_usage.get('output_tokens', 0),
-            'total_tokens': anthropic_usage.get('input_tokens', 0) + anthropic_usage.get('output_tokens', 0)
+            'total_tokens': anthropic_usage.get('input_tokens', 0) + anthropic_usage.get('output_tokens', 0),
         }
+        # Preserve Anthropic cache token fields for the token tracker
+        if 'cache_read_input_tokens' in anthropic_usage:
+            openai_format_usage['cache_read_input_tokens'] = anthropic_usage['cache_read_input_tokens']
+        if 'cache_creation_input_tokens' in anthropic_usage:
+            openai_format_usage['cache_creation_input_tokens'] = anthropic_usage['cache_creation_input_tokens']
 
         result = {
             "choices": [],
@@ -278,8 +283,13 @@ class AnthropicHandler:
             openai_format_usage = {
                 'prompt_tokens': usage_data.get('input_tokens', 0),
                 'completion_tokens': usage_data.get('output_tokens', 0),
-                'total_tokens': usage_data.get('input_tokens', 0) + usage_data.get('output_tokens', 0)
+                'total_tokens': usage_data.get('input_tokens', 0) + usage_data.get('output_tokens', 0),
             }
+            # Preserve Anthropic cache token fields for the token tracker
+            if 'cache_read_input_tokens' in usage_data:
+                openai_format_usage['cache_read_input_tokens'] = usage_data['cache_read_input_tokens']
+            if 'cache_creation_input_tokens' in usage_data:
+                openai_format_usage['cache_creation_input_tokens'] = usage_data['cache_creation_input_tokens']
             yield {'__usage__': openai_format_usage}
 
     @staticmethod

@@ -302,6 +302,17 @@ def _handle_clear(chat_manager, console, debug_mode_container, args):
     console.print(f"  Out: {conv_out:,} tokens")
     console.print(f"  Total: {conv_total:,} tokens")
 
+    # Show cache token breakdown if any cache was used
+    conv_cache_read = chat_manager.token_tracker.conv_cache_read_tokens
+    conv_cache_creation = chat_manager.token_tracker.conv_cache_creation_tokens
+    if conv_cache_read > 0 or conv_cache_creation > 0:
+        cache_hit_pct = (
+            conv_cache_read / conv_in * 100
+        ) if conv_in > 0 else 0
+        console.print(f"  Cache read:   {conv_cache_read:,} tokens")
+        console.print(f"  Cache write:  {conv_cache_creation:,} tokens")
+        console.print(f"  ({cache_hit_pct:.0f}% of input served from cache)")
+
     # Display cost — combined actual + estimated, with config-based fallback
     tracker_conv = chat_manager.token_tracker
     if tracker_conv.has_actual_cost():
@@ -802,6 +813,18 @@ def _handle_usage(chat_manager, console, debug_mode_container, args):
     console.print(f"  Input tokens:  {tracker.total_prompt_tokens:,}")
     console.print(f"  Output tokens: {tracker.total_completion_tokens:,}")
     console.print(f"  Total tokens:  {tracker.total_tokens:,}")
+
+    # Display cache token breakdown (if any cache tokens were recorded)
+    has_cache = tracker.total_cache_read_tokens > 0 or tracker.total_cache_creation_tokens > 0
+    if has_cache:
+        cache_hit_pct = (
+            tracker.total_cache_read_tokens
+            / tracker.total_prompt_tokens * 100
+        ) if tracker.total_prompt_tokens > 0 else 0
+        console.print()
+        console.print(f"[#5F9EA0]Input Cache ({cache_hit_pct:.0f}% hit rate):[/#5F9EA0]")
+        console.print(f"  Cache read:   {tracker.total_cache_read_tokens:,} tokens")
+        console.print(f"  Cache write:  {tracker.total_cache_creation_tokens:,} tokens")
     console.print()
     
 
