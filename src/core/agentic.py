@@ -174,7 +174,15 @@ class AgenticOrchestrator:
         # Log user message
         self.chat_manager.log_message({"role": "user", "content": user_input})
 
+        from tools.base import ToolRegistry
+
         while True:
+            # Decrement plugin TTLs after previous iteration's tool execution.
+            # Evicted plugins are excluded from the next LLM call's context window.
+            evicted = ToolRegistry.decrement_plugin_ttls()
+            if evicted and self.debug_mode:
+                self.console.print(f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]")
+
             # Get response from LLM
             response = self._get_llm_response(allowed_tools=allowed_tools)
             if response is None:
@@ -366,7 +374,9 @@ class AgenticOrchestrator:
                 continue
 
             # Check if tool is in allowed_tools whitelist (if provided)
-            if allowed_tools and function_name not in allowed_tools:
+            # Plugin-tier tools bypass the whitelist — they are already vetted
+            # by the manifest and activated on-demand via search_plugins.
+            if allowed_tools and function_name not in allowed_tools and not ToolRegistry.is_plugin_active(function_name):
                 # Silent fail - skip this tool
                 if self.debug_mode:
                     self.console.print(f"[dim]Silently filtered non-allowed tool: {function_name}[/dim]")
@@ -807,6 +817,9 @@ class AgenticOrchestrator:
 
         tool = ToolRegistry.get(function_name)
         if tool:
+            # Reset TTL for plugin-tier tools when they are actually called
+            if ToolRegistry.is_plugin_active(function_name):
+                ToolRegistry.touch_plugin(function_name)
             try:
                 context = build_context(
                     repo_root=self.repo_root,

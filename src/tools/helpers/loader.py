@@ -148,13 +148,19 @@ def load_builtin_tools() -> int:
 def load_plugin_tools() -> int:
     """Load plugin tools from tool_plugins/ directory.
 
+    Plugin modules are imported, which triggers @tool(tier="plugin") decorator
+    registration into the PluginManifest (NOT ToolRegistry). This keeps plugin
+    schemas out of the LLM context window until activated via search_plugins.
+
     Returns:
-        Number of tools loaded
+        Number of plugin modules loaded
 
     Note:
         - tool_plugins/ directory at repository root
-        - Plugin tools can override built-in tools
+        - Plugin tools registered in PluginManifest, not ToolRegistry
     """
+    from .plugin_manifest import plugin_manifest
+
     # Get repository root (assumes we're in src/tools/helpers/)
     current_dir = Path(__file__).parent
     repo_root = current_dir.parent.parent.parent
@@ -165,7 +171,14 @@ def load_plugin_tools() -> int:
     ]
 
     # Discover tools in plugin directories
-    return discover_tools(plugin_directories)
+    modules_loaded = discover_tools(plugin_directories)
+
+    logger.info(
+        f"Plugin manifest: {plugin_manifest.plugin_count()} plugins available "
+        f"(categories: {plugin_manifest.get_categories()})"
+    )
+
+    return modules_loaded
 
 
 def load_all_tools() -> int:

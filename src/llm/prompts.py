@@ -464,6 +464,31 @@ Do not manufacture issues or inflate severity. If nothing is wrong, say so in th
 
 # Builder functions to compose prompts from sections
 
+# Mapping of prompt section keys to the tool names they depend on.
+# If ALL listed tools are disabled, the section is omitted from the prompt.
+# Sections not listed have no tool dependency and are always included.
+SECTION_TOOL_DEPS = {
+    "trust_subagent_context": ["sub_agent"],
+    "when_to_use_sub_agent": ["sub_agent"],
+    "ask_questions": ["select_option"],
+    "editing_pattern": ["edit_file"],
+    "task_lists_pattern": ["create_task_list", "complete_task", "show_task_list", "edit_file"],
+    "temp_folder": ["create_file"],
+}
+
+
+def _should_include_section(section_key: str) -> bool:
+    """Check whether a prompt section should be included based on tool availability.
+
+    A section is skipped only when ALL of its dependent tools are disabled.
+    Uses lazy import to avoid circular dependency with tools module.
+    """
+    deps = SECTION_TOOL_DEPS.get(section_key)
+    if not deps:
+        return True
+    from tools.helpers.base import ToolRegistry
+    return not all(ToolRegistry.is_disabled(t) for t in deps)
+
 
 def _build_vault_section() -> str:
     """Build the Obsidian vault section for the system prompt.
@@ -658,29 +683,30 @@ def build_system_prompt(mode: str, plan_type: str = None) -> str:
     if mode == "plan" and plan_type and plan_type not in PLAN_TYPE_SECTIONS:
         raise ValueError(f"Unknown plan_type: {plan_type}. Must be one of {list(PLAN_TYPE_SECTIONS.keys())}")
     
-    # Start with all base sections (common rules for all modes)
-    sections = [
-        BASE_SECTIONS["intro"],
-        BASE_SECTIONS["tone_and_style"],
-        BASE_SECTIONS["communication_style"],
-        BASE_SECTIONS["trust_subagent_context"],  # MOVED EARLIER for emphasis
-        BASE_SECTIONS["context_reliability"],  # NEW: critical for understanding runtime behavior
-        BASE_SECTIONS["conversational_tool_calling"],
-        BASE_SECTIONS["professional_objectivity"],
-        BASE_SECTIONS["think_before_acting"],
-        BASE_SECTIONS["batch_independent_calls"],
-        BASE_SECTIONS["code_references"],
-        BASE_SECTIONS["exploration_pattern"],
-        BASE_SECTIONS["targeted_searching"],
-        BASE_SECTIONS["editing_pattern"],
-        BASE_SECTIONS["task_lists_pattern"],
-        BASE_SECTIONS["casual_interactions"],
-        BASE_SECTIONS["ask_questions"],
-        BASE_SECTIONS["tool_preferences"],
-        BASE_SECTIONS["when_to_use_sub_agent"],
-        BASE_SECTIONS["error_handling"],
-        BASE_SECTIONS["temp_folder"],
+    # Base section keys in display order — filtered by tool availability
+    _base_keys = [
+        "intro",
+        "tone_and_style",
+        "communication_style",
+        "trust_subagent_context",
+        "context_reliability",
+        "conversational_tool_calling",
+        "professional_objectivity",
+        "think_before_acting",
+        "batch_independent_calls",
+        "code_references",
+        "exploration_pattern",
+        "targeted_searching",
+        "editing_pattern",
+        "task_lists_pattern",
+        "casual_interactions",
+        "ask_questions",
+        "tool_preferences",
+        "when_to_use_sub_agent",
+        "error_handling",
+        "temp_folder",
     ]
+    sections = [BASE_SECTIONS[k] for k in _base_keys if _should_include_section(k)]
 
     # Obsidian vault section (inserted before mode section)
     vault_section = _build_vault_section()
@@ -712,23 +738,36 @@ def build_sub_agent_prompt(sub_agent_type: str = "research") -> str:
     else:
         mode_section = SUB_AGENT_SECTIONS["mode"]
 
-    sections = [
-        BASE_SECTIONS["intro"],
-        BASE_SECTIONS["tone_and_style"],
-        BASE_SECTIONS["communication_style"],
-        BASE_SECTIONS["conversational_tool_calling"],
-        BASE_SECTIONS["professional_objectivity"],
-        BASE_SECTIONS["think_before_acting"],
-        BASE_SECTIONS["batch_independent_calls"],
-        BASE_SECTIONS["code_references"],
-        SUB_AGENT_SECTIONS["response_format"],
-        BASE_SECTIONS["exploration_pattern"],
-        BASE_SECTIONS["targeted_searching"],
-        BASE_SECTIONS["casual_interactions"],
-        BASE_SECTIONS["temp_folder"],
-        mode_section,
+    # Base section keys in display order — filtered by tool availability
+    _sub_base_keys = [
+        "intro",
+        "tone_and_style",
+        "communication_style",
+        "conversational_tool_calling",
+        "professional_objectivity",
+        "think_before_acting",
+        "batch_independent_calls",
+        "code_references",
+        "exploration_pattern",
+        "targeted_searching",
+        "casual_interactions",
+        "temp_folder",
     ]
-    return "\n\n".join(sections)
+    sections = [BASE_SECTIONS[k] for k in _sub_base_keys if _should_include_section(k)]
+    # Insert response_format between code_references and exploration_pattern
+    # to match the original prompt ordering (before the plugin-tier refactor).
+    response_format = SUB_AGENT_SECTIONS["response_format"]
+    inserted = False
+    result = []
+    for section in sections:
+        result.append(section)
+        if not inserted and section is BASE_SECTIONS.get("code_references"):
+            result.append(response_format)
+            inserted = True
+    if not inserted:
+        result.append(response_format)
+    result.append(mode_section)
+    return "\n\n".join(result)
 
 
 

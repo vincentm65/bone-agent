@@ -44,6 +44,12 @@ def _fetch_page_content(url, console=None):
                 console.print(f"  [dim]Skipped {url} (non-HTML: {content_type})[/dim]")
             return ""
 
+        # Check for empty response before parsing
+        if not response.text or not response.text.strip():
+            if console:
+                console.print(f"  [dim]Empty response from {url}[/dim]")
+            return ""
+
         # Use readability to extract the main article content
         doc = Document(response.text)
         summary_html = doc.summary()

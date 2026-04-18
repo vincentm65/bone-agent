@@ -43,6 +43,19 @@ def _handle_exit(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="exit")
 
 
+def _handle_setup(chat_manager, console, debug_mode_container, args):
+    """Re-run the first-run setup wizard."""
+    from ui.setup_wizard import run_wizard as _run_setup_wizard
+    _run_setup_wizard(console)
+    # Reload config so changes take effect immediately
+    try:
+        from llm import config as llm_config
+        llm_config.reload_config()
+    except Exception:
+        pass
+    return CommandResult(status="handled")
+
+
 def _handle_help(chat_manager, console, debug_mode_container, args):
     """Handle help command."""
     show_help_table(console)
@@ -2387,6 +2400,7 @@ _COMMAND_HANDLERS = {
     "/obsidian": _handle_obsidian,
     "/tools": _handle_tools,
     "/cd": _handle_cd,
+    "/setup": _handle_setup,
 }
 
 

@@ -57,6 +57,9 @@ from .loader import (
     list_tools_for_mode,
 )
 
+# Plugin manifest for on-demand tool discovery
+from .plugin_manifest import PluginManifest, plugin_manifest
+
 # Parallel execution
 from .parallel_executor import (
     ToolCall,
@@ -98,6 +101,9 @@ __all__ = [
     'load_all_tools',
     'list_registered_tools',
     'list_tools_for_mode',
+    # Plugin manifest
+    'PluginManifest',
+    'plugin_manifest',
     # Parallel execution
     'ToolCall',
     'ToolResult',

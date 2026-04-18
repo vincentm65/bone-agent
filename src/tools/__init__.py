@@ -56,6 +56,9 @@ from . import sub_agent
 from . import task_list
 from . import select_option
 
+# search_plugins — core meta-tool for plugin discovery
+from . import search_plugins
+
 # Obsidian tools — conditional registration (register() pattern, NOT @tool at import)
 # Only imported and registered when vault is configured and enabled.
 # This ensures zero token cost when no vault is linked.
@@ -120,6 +123,15 @@ try:
         ToolRegistry.disable(tool_name)
 except Exception as e:
     _logger.debug("Failed to apply disabled tools: %s", e)
+
+# Load plugin tools into the PluginManifest (not ToolRegistry).
+# Plugin modules with @tool(tier="plugin") register into the manifest
+# and are only activated in ToolRegistry on-demand via search_plugins.
+try:
+    from .helpers.loader import load_plugin_tools
+    load_plugin_tools()
+except Exception as e:
+    _logger.debug("Failed to load plugin tools: %s", e)
 
 # Make base module available for backward compatibility
 import sys

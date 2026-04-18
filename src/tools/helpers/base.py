@@ -5,11 +5,15 @@ decorator-based pattern. Tools are automatically registered and can be
 filtered by interaction mode.
 """
 
+import logging
 import inspect
 from typing import Dict, List, Optional, Callable, Any
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
+
+
+_logger = logging.getLogger(__name__)
 
 
 # Terminal policy constants for thinking indicator handoff
@@ -30,6 +34,9 @@ class ToolDefinition:
         requires_approval: Whether this tool requires user confirmation
         terminal_policy: How this tool interacts with the thinking indicator
         handler: Function that executes the tool
+        tier: "core" (always in context) or "plugin" (on-demand via search_plugins)
+        tags: List of searchable tags for plugin discovery
+        category: Category grouping for plugin discovery (e.g., "email", "database")
     """
     name: str
     description: str
@@ -38,6 +45,9 @@ class ToolDefinition:
     requires_approval: bool = False
     terminal_policy: str = TERMINAL_NONE  # Default: indicator keeps running
     handler: Optional[Callable] = None
+    tier: str = "core"
+    tags: List[str] = field(default_factory=list)
+    category: str = ""
 
     def to_openai_schema(self) -> Dict[str, Any]:
         """Convert tool definition to OpenAI function-calling schema.
@@ -115,6 +125,8 @@ class ToolRegistry:
     _instance: Optional['ToolRegistry'] = None
     _tools: Dict[str, ToolDefinition] = {}
     _disabled: Dict[str, None] = {}  # dict used as ordered set — mirrors _tools pattern
+    _plugin_ttl: Dict[str, int] = {}  # tracks remaining turns for activated plugins
+    _default_plugin_ttl: int = 10
 
     def __new__(cls):
         if cls._instance is None:
@@ -265,28 +277,38 @@ class ToolRegistry:
         return cls._tools.get(name)
 
     @classmethod
-    def get_all(cls) -> List[ToolDefinition]:
+    def get_all(cls, include_plugins: bool = False) -> List[ToolDefinition]:
         """Get all registered and enabled tools.
 
+        Args:
+            include_plugins: If True, include plugin-tier tools. Default: core only.
+
         Returns:
-            List of all ToolDefinitions (excluding disabled)
+            List of all ToolDefinitions (excluding disabled, excluding plugins unless requested)
         """
-        return [t for t in cls._tools.values() if t.name not in cls._disabled]
+        tools = [t for t in cls._tools.values() if t.name not in cls._disabled]
+        if not include_plugins:
+            tools = [t for t in tools if t.tier != "plugin"]
+        return tools
 
     @classmethod
-    def get_tools_for_mode(cls, mode: str) -> List[ToolDefinition]:
+    def get_tools_for_mode(cls, mode: str, include_plugins: bool = False) -> List[ToolDefinition]:
         """Get tools allowed in a specific interaction mode.
 
         Args:
             mode: Interaction mode ('edit' or 'plan')
+            include_plugins: If True, include plugin-tier tools. Default: core only.
 
         Returns:
-            List of ToolDefinitions for that mode (excluding disabled)
+            List of ToolDefinitions for that mode (excluding disabled, excluding plugins unless requested)
         """
-        return [
+        tools = [
             tool for tool in cls._tools.values()
             if tool.is_allowed_in_mode(mode) and tool.name not in cls._disabled
         ]
+        if not include_plugins:
+            tools = [t for t in tools if t.tier != "plugin"]
+        return tools
 
     @classmethod
     def unregister(cls, name: str) -> bool:
@@ -306,6 +328,7 @@ class ToolRegistry:
         """Clear all registered tools (mainly for testing)."""
         cls._tools.clear()
         cls._disabled.clear()
+        cls._plugin_ttl.clear()
 
     @classmethod
     def tool_count(cls) -> int:
@@ -315,6 +338,88 @@ class ToolRegistry:
             Number of enabled tools (excludes disabled tools)
         """
         return len(cls._tools) - len(cls._disabled)
+
+    # =========================================================================
+    # Plugin activation and TTL management
+    # =========================================================================
+
+    @classmethod
+    def activate_plugin(cls, tool_def, ttl=None) -> None:
+        """Activate a plugin-tier tool by registering it with a TTL.
+
+        Args:
+            tool_def: ToolDefinition with tier="plugin"
+            ttl: Number of turns before eviction (default: cls._default_plugin_ttl)
+        """
+        if ttl is None:
+            ttl = cls._default_plugin_ttl
+        cls._tools[tool_def.name] = tool_def
+        cls._plugin_ttl[tool_def.name] = ttl
+        _logger.debug(f"Plugin activated: {tool_def.name} (TTL={ttl})")
+
+    @classmethod
+    def deactivate_plugin(cls, name: str) -> bool:
+        """Deactivate and remove a plugin-tier tool.
+
+        Args:
+            name: Plugin tool name to deactivate
+
+        Returns:
+            True if plugin was found and removed
+        """
+        if name in cls._plugin_ttl:
+            del cls._plugin_ttl[name]
+        return cls._tools.pop(name, None) is not None
+
+    @classmethod
+    def decrement_plugin_ttls(cls):
+        """Decrement TTL for all activated plugins. Evict those at zero.
+
+        Returns:
+            List of evicted plugin names
+        """
+        evicted = []
+        expired = [name for name, ttl in cls._plugin_ttl.items() if ttl <= 1]
+        for name in expired:
+            cls.deactivate_plugin(name)
+            evicted.append(name)
+            _logger.debug(f"Plugin evicted (TTL expired): {name}")
+        # Decrement remaining
+        for name in cls._plugin_ttl:
+            cls._plugin_ttl[name] -= 1
+        return evicted
+
+    @classmethod
+    def touch_plugin(cls, name: str) -> None:
+        """Reset TTL for an activated plugin (called when plugin is used).
+
+        Args:
+            name: Plugin tool name
+        """
+        if name in cls._plugin_ttl:
+            cls._plugin_ttl[name] = cls._default_plugin_ttl
+            _logger.debug(f"Plugin TTL reset: {name}")
+
+    @classmethod
+    def active_plugin_names(cls) -> set:
+        """Get the set of currently activated plugin names.
+
+        Returns:
+            Set of active plugin tool names
+        """
+        return set(cls._plugin_ttl.keys())
+
+    @classmethod
+    def is_plugin_active(cls, name: str) -> bool:
+        """Check if a plugin is currently activated in the registry.
+
+        Args:
+            name: Tool name
+
+        Returns:
+            True if tool is an active plugin
+        """
+        return name in cls._plugin_ttl
 
 
 def get_terminal_policy(tool_name: str) -> str:
@@ -338,7 +443,10 @@ def tool(
     parameters: Dict[str, Any],
     allowed_modes: Optional[List[str]] = None,
     requires_approval: bool = False,
-    terminal_policy: str = TERMINAL_NONE
+    terminal_policy: str = TERMINAL_NONE,
+    tier: str = "core",
+    tags: Optional[List[str]] = None,
+    category: str = ""
 ) -> Callable:
     """Decorator for registering tool functions.
 
@@ -364,6 +472,10 @@ def tool(
         parameters: JSON Schema for parameters
         allowed_modes: List of allowed modes (default: all modes)
         requires_approval: Whether confirmation is required (default: False)
+        terminal_policy: Terminal policy for thinking indicator (default: TERMINAL_NONE)
+        tier: "core" or "plugin" (default: "core")
+        tags: List of searchable tags for plugin discovery
+        category: Category grouping for plugin discovery
 
     Returns:
         Decorator function
@@ -371,8 +483,18 @@ def tool(
     Note:
         The decorated function should return a string with exit_code=N prefix,
         e.g., "exit_code=0\nResult content here"
+
+        Plugin-tier tools (tier="plugin") are registered in the PluginManifest
+        instead of ToolRegistry, so they don't consume context tokens by default.
+        They are activated on-demand via the search_plugins core tool.
     """
     def decorator(func: Callable) -> Callable:
+        # Validate tier
+        if tier not in ("core", "plugin"):
+            raise ValueError(
+                f"Invalid tier '{tier}' for tool '{name}'. Must be 'core' or 'plugin'."
+            )
+
         # Create tool definition
         tool_def = ToolDefinition(
             name=name,
@@ -381,11 +503,19 @@ def tool(
             allowed_modes=allowed_modes or ["edit", "plan"],
             requires_approval=requires_approval,
             terminal_policy=terminal_policy,
-            handler=func
+            handler=func,
+            tier=tier,
+            tags=tags or [],
+            category=category,
         )
 
-        # Register tool
-        ToolRegistry.register(tool_def)
+        # Plugin-tier tools go to the manifest, not the registry
+        if tier == "plugin":
+            from .plugin_manifest import plugin_manifest
+            plugin_manifest.register(tool_def)
+        else:
+            # Register core tool normally
+            ToolRegistry.register(tool_def)
 
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -451,7 +581,7 @@ def get_tool_schemas() -> list:
     Returns:
         List of tool schemas in OpenAI function-calling format
     """
-    return [tool.to_openai_schema() for tool in ToolRegistry.get_all()]
+    return [tool.to_openai_schema() for tool in ToolRegistry.get_all(include_plugins=True)]
 
 
 def get_tools_for_mode(interaction_mode: str) -> list:
@@ -465,7 +595,7 @@ def get_tools_for_mode(interaction_mode: str) -> list:
     """
     return [
         tool.to_openai_schema()
-        for tool in ToolRegistry.get_tools_for_mode(interaction_mode)
+        for tool in ToolRegistry.get_tools_for_mode(interaction_mode, include_plugins=True)
     ]
 
 

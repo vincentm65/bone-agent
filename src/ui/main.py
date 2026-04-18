@@ -395,33 +395,18 @@ def main():
     # This populates the ToolRegistry with all decorated tools
     load_all_tools()
 
-    # Check for config.yaml and provide helpful message if missing
-    # Use same resolution as llm.config for consistency
-    _inst_dir = os.environ.get('VMCODE_CONFIG_DIR')
-    if _inst_dir:
-        _cfg_base = Path(_inst_dir).resolve().parents[1]
-    else:
-        _cfg_base = Path(__file__).resolve().parents[1].parent
-    config_path = _cfg_base / "config.yaml"
-    config_example = _cfg_base / "config.yaml.example"
-    
-    if not config_path.exists():
-        console.print("\n[yellow]No config.yaml found![/yellow]")
-        console.print("\n[#5F9EA0]Getting Started:[/#5F9EA0]\n")
-        
-        if config_example.exists():
-            console.print(f"1. Copy the example config:")
-            console.print(f"   [dim]cp config.yaml.example config.yaml[/dim]\n")
-            console.print(f"2. Edit config.yaml and add your API keys\n")
-            console.print(f"3. Or set environment variables:")
-            console.print(f"   [dim]export OPENAI_API_KEY='sk-your-key'[/dim]\n")
-            console.print(f"4. Then run: [green]vmcode[/green]\n")
-            console.print(f"[dim]You can also set keys interactively with: [bold #5F9EA0]/key[/bold #5F9EA0] <your-key>[/dim]\n")
-        else:
-            console.print("[red]config.yaml.example not found. Please reinstall vmcode.[/red]\n")
-        
-        # Continue anyway - user can set keys via /key command
-        console.print("[yellow]Continuing... You can set API keys with the [bold #5F9EA0]/key[/bold #5F9EA0] command.[/yellow]\n")
+    # Check for config.yaml — run setup wizard on first run
+    from ui.setup_wizard import is_first_run, run_wizard as _run_setup_wizard
+
+    if is_first_run():
+        console.print("\n[#5F9EA0]No config found — launching setup wizard.[/#5F9EA0]\n")
+        _run_setup_wizard(console)
+        # Reload config after wizard writes it
+        try:
+            from llm import config as llm_config
+            llm_config.reload_config()
+        except Exception:
+            pass
     
     chat_manager = ChatManager()
     thinking_indicator = ThinkingIndicator(console)
