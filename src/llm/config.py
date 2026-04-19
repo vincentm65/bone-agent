@@ -5,14 +5,20 @@ import yaml
 
 # Provider selection - loaded from config (see after PROVIDER_REGISTRY definition)
 
-# Config path resolution: prefer VMCODE_CONFIG_DIR env var (set by npm wrapper),
-# otherwise fall back to __file__-based resolution (for direct Python/dev installs)
-# When VMCODE_CONFIG_DIR is set, it's the src/ directory, so we use parents[1] to get repo root
-_INSTALL_DIR = os.environ.get('VMCODE_CONFIG_DIR')
-if _INSTALL_DIR:
-    CONFIG_PATH = Path(_INSTALL_DIR).resolve().parents[1] / "config.yaml"
-else:
-    CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
+def resolve_config_path() -> Path:
+    """Resolve config.yaml path.
+
+    Resolution order:
+    1. VMCODE_CONFIG_PATH — explicit user config path (set by npm wrapper)
+    2. ~/.vmcode/config.yaml — user home dotfile (dev and npm installs)
+    """
+    _user_cfg = os.environ.get('VMCODE_CONFIG_PATH')
+    if _user_cfg:
+        return Path(_user_cfg).resolve()
+    return Path.home() / '.vmcode' / 'config.yaml'
+
+# Module-level config path (single source of truth)
+CONFIG_PATH = resolve_config_path()
 
 # Environment variable names for API keys (env vars take precedence over config file)
 ENV_API_KEYS = {
@@ -49,12 +55,7 @@ def _load_config():
     
     Environment variables take precedence over values in config.yaml.
     """
-    # Use same resolution logic as CONFIG_PATH
-    _inst_dir = os.environ.get('VMCODE_CONFIG_DIR')
-    if _inst_dir:
-        config_path = Path(_inst_dir).resolve().parents[1] / "config.yaml"
-    else:
-        config_path = Path(__file__).resolve().parents[2] / "config.yaml"
+    config_path = resolve_config_path()
     if not config_path.exists():
         return {}
     try:

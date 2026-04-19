@@ -5,6 +5,7 @@
  */
 
 const { spawn, spawnSync } = require('child_process');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
@@ -62,19 +63,25 @@ function installDependencies(pythonCmd) {
 }
 
 function setupConfig() {
-  const configFile = path.join(packageDir, 'config.yaml');
+  // User config lives in ~/.vmcode/config.yaml (persists across npm updates)
+  const vmcodeDir = path.join(os.homedir(), '.vmcode');
+  const configFile = path.join(vmcodeDir, 'config.yaml');
   const configExample = path.join(packageDir, 'config.yaml.example');
-  
+
+  if (!fs.existsSync(vmcodeDir)) {
+    fs.mkdirSync(vmcodeDir, { recursive: true });
+  }
+
   if (!fs.existsSync(configFile) && fs.existsSync(configExample)) {
     console.log('Creating config.yaml from example...');
     try {
       fs.copyFileSync(configExample, configFile);
-      console.log('✓ config.yaml created');
-      console.log('\n⚠️  IMPORTANT: Edit config.yaml and add your API keys!');
+      console.log('✓ Config created: ~/.vmcode/config.yaml');
+      console.log('\n⚠️  IMPORTANT: Edit ~/.vmcode/config.yaml and add your API keys!');
       console.log('   Or set them via environment variables:\n');
       console.log('   export OPENAI_API_KEY="sk-your-key-here"\n');
     } catch (e) {
-      console.log('⚠️  Failed to create config.yaml:', e.message);
+      console.log('⚠️  Failed to create config:', e.message);
     }
   }
 }

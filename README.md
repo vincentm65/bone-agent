@@ -36,7 +36,7 @@ npx vmcode-cli
 The npm package automatically:
 1. Checks for Python 3.9+ on your system
 2. Installs Python dependencies via pip
-3. Creates `config.yaml` from `config.yaml.example` if missing
+3. Creates `~/.vmcode/config.yaml` from `config.yaml.example` if missing (persists across updates)
 4. Sets up the `vmcode` command globally
 
 **Requirements:**
@@ -80,7 +80,7 @@ Run the app and use the built-in commands:
 
 #### Option 2: Edit config.yaml Directly
 
-Edit `config.yaml` in the project root and add your keys:
+Edit `~/.vmcode/config.yaml` and add your keys:
 
 ```yaml
 # OpenAI
@@ -94,11 +94,11 @@ ANTHROPIC_MODEL: claude-3-5-sonnet-20241022
 # Or any other supported provider...
 ```
 
-**Note:** `config.yaml` is automatically created from `config.yaml.example` on first run and is in `.gitignore` to protect your secrets.
+**Note:** Config is stored at `~/.vmcode/config.yaml` — it persists across npm updates and is never tracked by git.
 
 #### Option 3: Environment Variables
 
-Set environment variables (they take precedence over config.yaml):
+Set environment variables (they take precedence over ~/.vmcode/config.yaml):
 
 ```bash
 export OPENAI_API_KEY="sk-your-key-here"
@@ -144,7 +144,6 @@ vmCode-CLI/
 │   ├── npm-wrapper.js  # npm entry point
 │   ├── rg              # ripgrep binary (Linux/macOS)
 │   └── rg.exe          # ripgrep binary (Windows)
-├── config.yaml         # Your API keys and settings (not in git)
 ├── config.yaml.example # Configuration template
 ├── requirements.txt    # Python dependencies
 ├── package.json        # npm package definition
@@ -172,7 +171,7 @@ Available plans: **Free**, **Lite**, and **Pro**. Use `/plan` to see details and
 
 ## Security
 
-- `config.yaml` is excluded from git via `.gitignore`
+- User config lives at `~/.vmcode/config.yaml` — outside the repo and git, persists across updates
 - Never commit API keys or sensitive configuration
 - Use environment variables for CI/CD or shared environments
 

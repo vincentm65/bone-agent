@@ -5,6 +5,7 @@
  */
 
 const { spawn } = require('child_process');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
@@ -73,7 +74,7 @@ function checkPythonDependencies(pythonCmd) {
   
   try {
     // Try importing a key module to check if dependencies are installed
-    const result = spawnSync(pythonCmd, ['-c', 'import rich, requests, yaml'], {
+    const result = spawnSync(pythonCmd, ['-c', 'import rich, requests, yaml, readability, html2text, ddgs, pathspec, prompt_toolkit, pygments'], {
       stdio: 'ignore',
       cwd: packageDir
     });
@@ -118,26 +119,28 @@ function showSetupMessage() {
   console.log('Then run vmcode again.\n');
 }
 
-function checkConfig() {
-  const configFile = path.join(packageDir, 'config.yaml');
+function ensureUserConfig() {
+  // User config lives in ~/.vmcode/config.yaml (persists across npm updates)
+  const vmcodeDir = path.join(os.homedir(), '.vmcode');
+  const configFile = path.join(vmcodeDir, 'config.yaml');
   const configExample = path.join(packageDir, 'config.yaml.example');
-  
+
+  if (!fs.existsSync(vmcodeDir)) {
+    fs.mkdirSync(vmcodeDir, { recursive: true });
+  }
+
   if (!fs.existsSync(configFile)) {
     if (fs.existsSync(configExample)) {
-      console.log('\n⚠️  No config.yaml found!');
-      console.log('Creating from config.yaml.example...\n');
-      
       try {
         fs.copyFileSync(configExample, configFile);
-        console.log('✓ config.yaml created');
-        console.log('\nIMPORTANT: Edit config.yaml and add your API keys!');
-        console.log('Or set them via environment variables:');
-        console.log('  export OPENAI_API_KEY="sk-your-key-here"\n');
+        console.log('✓ Config created: ~/.vmcode/config.yaml');
       } catch (e) {
-        console.log('Failed to create config.yaml:', e.message);
+        console.log('Failed to create config:', e.message);
       }
     }
   }
+
+  return configFile;
 }
 
 async function main() {
@@ -165,18 +168,17 @@ async function main() {
     }
   }
   
-  // Check/create config
-  checkConfig();
+  // Ensure user config exists in ~/.vmcode/ (persists across npm updates)
+  const userConfigPath = ensureUserConfig();
   
-  // Run the Python application with install directory in environment
-  // VMCODE_CONFIG_DIR points to src/ (where config.py lives), which has parents[1] -> repo root
-  const srcDir = path.join(packageDir, 'src');
+  // Run the Python application
+  // VMCODE_CONFIG_PATH points to user's persistent config.yaml in ~/.vmcode/
   const pythonProcess = spawn(pythonCmd, [pythonScript], {
     stdio: 'inherit',
-    cwd: packageDir,
+    cwd: process.cwd(),
     env: {
       ...process.env,
-      VMCODE_CONFIG_DIR: srcDir,
+      VMCODE_CONFIG_PATH: userConfigPath,
     }
   });
   

@@ -35,12 +35,8 @@ _API_PROVIDERS = [p for p in WIZARD_PROVIDERS if p[2] == "api" and p[0] != "vmco
 
 
 def _resolve_config_path() -> Path:
-    """Resolve config.yaml path using same logic as llm.config."""
-    import os
-    _inst_dir = os.environ.get("VMCODE_CONFIG_DIR")
-    if _inst_dir:
-        return Path(_inst_dir).resolve().parents[1] / "config.yaml"
-    return Path(__file__).resolve().parents[2] / "config.yaml"
+    """Resolve config.yaml path (delegates to llm_config)."""
+    return llm_config.resolve_config_path()
 
 
 def is_first_run() -> bool:
