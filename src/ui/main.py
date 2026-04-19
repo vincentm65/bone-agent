@@ -33,6 +33,7 @@ from ui.banner import display_startup_banner
 from ui.prompt_utils import get_bottom_toolbar_text, setup_common_bindings, TOOLBAR_STYLE
 from core.agentic import agentic_answer
 from utils.settings import MonokaiDarkBGStyle, left_align_headings
+from utils.paths import REPO_ROOT, RG_EXE_PATH
 from exceptions import VmCodeError
 from tools.loader import load_all_tools
 
@@ -68,17 +69,6 @@ CTRL_C_TRACKER = {
 
 # Block input during thinking/agentic processing (prevents key presses from being queued)
 INPUT_BLOCKED = {'blocked': False}
-
-# Path constants
-REPO_ROOT = Path.cwd().resolve()
-APP_ROOT = (
-    Path(sys.executable).resolve().parent
-    if getattr(sys, "frozen", False)
-    else Path(__file__).resolve().parents[2]
-)
-# Platform-agnostic ripgrep path: 'rg' on Unix/Linux, 'rg.exe' on Windows
-RG_EXE_NAME = "rg.exe" if os.name == "nt" else "rg"
-RG_EXE_PATH = (APP_ROOT / "bin" / RG_EXE_NAME).resolve()
 
 
 class ThinkingIndicator:
@@ -423,6 +413,17 @@ def main():
 
     display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode, clear_screen=True)
 
+    # Start cron scheduler (background thread for scheduled jobs)
+    cron_scheduler = None
+    try:
+        from core.cron import CronScheduler
+        cron_scheduler = CronScheduler(console=console)
+        cron_scheduler.start()
+    except Exception as e:
+        import logging as _log
+        _log.warning("Cron scheduler failed to start: %s", e)
+        console.print(f"[yellow]Cron scheduler unavailable: {e}[/yellow]")
+
     # First-run onboarding: check if active provider needs an API key but has none
     try:
         from llm import config as llm_config
@@ -512,7 +513,7 @@ def main():
                     continue
 
                 # Process commands
-                cmd_result, modified_input = process_command(chat_manager, user_input, console, DEBUG_MODE_CONTAINER)
+                cmd_result, modified_input = process_command(chat_manager, user_input, console, DEBUG_MODE_CONTAINER, cron_scheduler)
                 if cmd_result == "exit":
                     break
                 elif cmd_result == "handled":
@@ -643,9 +644,23 @@ def main():
         summary = chat_manager.token_tracker.get_session_summary()
         console.print(f"\n[white]Session Summary: {summary}[/white]")
 
+        # Stop cron scheduler if running
+        if cron_scheduler:
+            cron_scheduler.stop()
+
         chat_manager.cleanup()
         console.print("[yellow]Goodbye![/yellow]")
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="vmCode CLI")
+    parser.add_argument("--cron-run", metavar="JOB_ID", help="Run a cron job headlessly and exit")
+    args = parser.parse_args()
+
+    if args.cron_run:
+        from core.cron import run_job_headless
+        sys.exit(run_job_headless(args.cron_run))
+
     main()

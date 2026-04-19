@@ -101,17 +101,10 @@ def search_plugins(
     lines = [f"exit_code=0\nFound {len(matches)} plugin(s) matching '{query}':\n"]
 
     for tool_def in matches:
-        status = "already active" if tool_def.name in already_active else "activated"
-        cat_info = f" [{tool_def.category}]" if tool_def.category else ""
-        lines.append(f"- **{tool_def.name}**{cat_info} ({status}): {tool_def.description}")
+        status = "activated" if tool_def.name in activated else "already active"
+        cat_part = f" [{tool_def.category}]" if tool_def.category else ""
+        lines.append(f"- **{tool_def.name}**{cat_part} ({status}): {tool_def.description}")
         if tool_def.tags:
             lines.append(f"  Tags: {', '.join(tool_def.tags)}")
-
-    if activated:
-        lines.append(
-            f"\nActivated {len(activated)} plugin(s). Their schemas will be "
-            f"available in your next response. Plugins auto-evict after 10 turns "
-            f"of non-use."
-        )
 
     return "\n".join(lines)

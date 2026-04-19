@@ -115,7 +115,7 @@ class AgenticOrchestrator:
     with tool calling, providing a cleaner, more maintainable structure.
     """
 
-    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, force_parallel_execution=False):
+    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, force_parallel_execution=False, cron_job_id=None, cron_allowlist=None, cron_interactive=False):
         """Initialize the orchestrator.
 
         Args:
@@ -128,6 +128,9 @@ class AgenticOrchestrator:
             is_sub_agent: If True, running as sub-agent (for visual framing)
             panel_updater: Optional SubAgentPanel callback for live panel updates
             force_parallel_execution: If True, force parallel execution (for sub-agent)
+            cron_job_id: Optional cron job ID for command allow list gating
+            cron_allowlist: Optional CronAllowlist instance for cron command gating
+            cron_interactive: If True, cron job is running in interactive test mode
         """
         self.chat_manager = chat_manager
         self.repo_root = repo_root
@@ -138,6 +141,9 @@ class AgenticOrchestrator:
         self.is_sub_agent = is_sub_agent
         self.panel_updater = panel_updater
         self.force_parallel_execution = force_parallel_execution
+        self.cron_job_id = cron_job_id
+        self.cron_allowlist = cron_allowlist
+        self.cron_interactive = cron_interactive
         self.tool_calls_count = 0
         self.empty_response_count = 0
         self.gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
@@ -629,6 +635,7 @@ class AgenticOrchestrator:
                             with_colon=True
                         ),
                         "list_directory": lambda a: f"list_directory: {a.get('path_str', '')}",
+                        "search_plugins": lambda a: f"search_plugins: {a.get('query', '')}",
                         "create_file": lambda a: f"create_file: {a.get('path_str', '')}",
                         "web_search": lambda a: f"web search | {a.get('query', '')}",
                         "create_task_list": lambda a: "create_task_list",
@@ -864,7 +871,10 @@ class AgenticOrchestrator:
                         result, should_exit, command_executed = handle_command_approval(
                             command, arguments, tool, context, console,
                             thinking_indicator, self.chat_manager.approve_mode,
-                            self.debug_mode)
+                            self.debug_mode,
+                            cron_job_id=self.cron_job_id,
+                            cron_allowlist=self.cron_allowlist,
+                            cron_interactive=self.cron_interactive)
                         if should_exit:
                             return True, result
 

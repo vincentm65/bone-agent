@@ -1,6 +1,7 @@
 """Interactive selection tool for presenting multiple-choice questions to the user."""
 
 import asyncio
+from html import escape as _html_escape
 from threading import Timer
 from typing import Optional, List, Dict, Any, Union
 
@@ -115,7 +116,7 @@ class SelectionPanel:
             is_focused: Whether this option has the cursor
             lines: List to append rendered lines to
         """
-        text = opt.get("text", "")
+        text = _html_escape(opt.get("text", ""))
         description = opt.get("description", "")
         is_custom = opt.get("value") == CUSTOM_INPUT_SENTINEL
         multi = self._is_multi_select(q_idx)
@@ -124,13 +125,13 @@ class SelectionPanel:
         if is_focused:
             if is_custom and self._editing_custom_input:
                 # Editing mode: show text field with user input
-                typed = self._custom_input_texts.get(q_idx, "")
+                typed = _html_escape(self._custom_input_texts.get(q_idx, ""))
                 lines.append(f'<style fg="white" bold="true">{self._CURSOR}{typed}</style>')
                 lines.append(f'<style fg="gray">   Type your answer, Enter to confirm, Esc to go back</style>')
             else:
                 # Navigation mode
                 if is_custom:
-                    typed = self._custom_input_texts.get(q_idx, "")
+                    typed = _html_escape(self._custom_input_texts.get(q_idx, ""))
                     display = typed if typed else text
                 else:
                     display = text
@@ -142,12 +143,12 @@ class SelectionPanel:
                     lines.append(f'<style fg="white" bold="true">{self._CURSOR}{display}</style>')
 
                 if description:
-                    for wl in self._wrap_description(description, "   "):
+                    for wl in self._wrap_description(_html_escape(description), "   "):
                         lines.append(f'<style fg="white">   {wl}</style>')
         else:
             # Unfocused option
             if is_custom:
-                typed = self._custom_input_texts.get(q_idx, "")
+                typed = _html_escape(self._custom_input_texts.get(q_idx, ""))
                 display = typed if typed else text
             else:
                 display = text
@@ -163,7 +164,7 @@ class SelectionPanel:
 
             if description:
                 color = "#5F9EA0" if (multi and checked) else "gray"
-                for wl in self._wrap_description(description, "   "):
+                for wl in self._wrap_description(_html_escape(description), "   "):
                     lines.append(f'<style fg="{color}">   {wl}</style>')
 
     def _get_display_text(self) -> HTML:
@@ -181,7 +182,7 @@ class SelectionPanel:
                 lines.append("<b>Selection Summary</b>")
                 lines.append("")
 
-                question = self.questions[0].get("question", "")
+                question = _html_escape(self.questions[0].get("question", ""))
                 selected_value = self.selections[0]
                 options = self.questions[0].get("options", [])
 
@@ -190,7 +191,7 @@ class SelectionPanel:
                     selected_texts = []
                     for val in selected_value:
                         opt = next((o for o in options if o.get("value") == val), None)
-                        selected_texts.append(opt.get("text", val) if opt else str(val))
+                        selected_texts.append(_html_escape(opt.get("text", val) if opt else str(val)))
                     lines.append(f"<b>Question:</b> {question}")
                     lines.append(f'<style fg="gray">  Selected: {", ".join(selected_texts)}</style>')
                 else:
@@ -198,14 +199,14 @@ class SelectionPanel:
                     selected_opt = next((opt for opt in options if opt.get("value") == selected_value), None)
                     selected_text = selected_opt.get("text", selected_value) if selected_opt else selected_value
                     lines.append(f"<b>Question:</b> {question}")
-                    lines.append(f'<style fg="gray">  Selected: {str(selected_text)}</style>')
+                    lines.append(f'<style fg="gray">  Selected: {_html_escape(str(selected_text))}</style>')
                 lines.append("")
             else:
                 lines.append("<b>Selections Summary</b>")
                 lines.append("")
 
                 for q_idx, q in enumerate(self.questions):
-                    question = q.get("question", "")
+                    question = _html_escape(q.get("question", ""))
                     selected_value = self.selections[q_idx] if q_idx < len(self.selections) else None
                     options = q.get("options", [])
 
@@ -213,28 +214,28 @@ class SelectionPanel:
                         selected_texts = []
                         for val in selected_value:
                             opt = next((o for o in options if o.get("value") == val), None)
-                            selected_texts.append(opt.get("text", val) if opt else str(val))
+                            selected_texts.append(_html_escape(opt.get("text", val) if opt else str(val)))
                         lines.append(f"<b>Question {q_idx + 1}:</b> {question}")
                         lines.append(f'<style fg="gray">  Selected: {", ".join(selected_texts)}</style>')
                     else:
                         selected_opt = next((opt for opt in options if opt.get("value") == selected_value), None)
                         selected_text = selected_opt.get("text", selected_value) if selected_opt else selected_value
                         lines.append(f"<b>Question {q_idx + 1}:</b> {question}")
-                        lines.append(f'<style fg="gray">  Selected: {str(selected_text)}</style>')
+                        lines.append(f'<style fg="gray">  Selected: {_html_escape(str(selected_text))}</style>')
                     lines.append("")
         # --- Option list view ---
         else:
             if is_single:
                 q_idx = 0
                 question = self.questions[0]
-                lines.append(f"<b>{question.get('question', '')}</b>")
+                lines.append(f"<b>{_html_escape(question.get('question', ''))}</b>")
                 lines.append("")
             else:
                 q_idx = self.current_question_idx
                 question = self.questions[q_idx]
                 q_num = q_idx + 1
                 q_total = len(self.questions)
-                lines.append(f"<b>Question {q_num}/{q_total}: {question.get('question', '')}</b>")
+                lines.append(f"<b>Question {q_num}/{q_total}: {_html_escape(question.get('question', ''))}</b>")
                 lines.append("")
 
             options = question.get("options", [])

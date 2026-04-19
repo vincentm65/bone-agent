@@ -69,6 +69,7 @@ def show_help_table(console):
     table.add_row("[bold #5F9EA0]/obsidian[/bold #5F9EA0] [set|enable|disable|status|init]", "Manage vault integration, scaffold project folders")
     table.add_row("[bold #5F9EA0]/tools[/bold #5F9EA0] [list|enable|disable|enable-group|disable-group]", "Toggle tools or groups (e.g. file_ops, task_mgmt)")
     table.add_row("[bold #5F9EA0]/setup[/bold #5F9EA0]", "Re-run the first-run setup wizard")
+    table.add_row("[bold #5F9EA0]/cron[/bold #5F9EA0] [list|add|remove|enable|disable|run]", "Manage scheduled cron jobs")
 
 
     console.print(Panel(table, title="[bold #5F9EA0]Commands[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
@@ -102,6 +103,42 @@ def show_help_table(console):
     keybinds.add_row("Ctrl+C (2x)", "Exit program")
 
     console.print(Panel(keybinds, title="[bold #5F9EA0]Keybinds[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
+    console.print("")
+
+
+def show_cron_help_table(console):
+    """Display cron command help table.
+
+    Args:
+        console: Rich Console instance for output.
+    """
+    console.print("")
+    table = Table(show_header=True, box=box.SIMPLE_HEAD)
+    table.add_column("Command", no_wrap=True)
+    table.add_column("Description")
+
+    table.add_row("[bold #5F9EA0]/cron list[/bold #5F9EA0]", "Show all cron jobs (default)")
+    table.add_row("[bold #5F9EA0]/cron add[/bold #5F9EA0] <id> <schedule> <cmd>", "Add a new cron job")
+    table.add_row("[bold #5F9EA0]/cron remove[/bold #5F9EA0] <id>", "Remove a cron job")
+    table.add_row("[bold #5F9EA0]/cron enable[/bold #5F9EA0] <id>", "Enable a cron job")
+    table.add_row("[bold #5F9EA0]/cron disable[/bold #5F9EA0] <id>", "Disable a cron job")
+    table.add_row("[bold #5F9EA0]/cron run[/bold #5F9EA0] <id>", "Run a job immediately (interactive)")
+    table.add_row("[bold #5F9EA0]/cron allowlist[/bold #5F9EA0] [list|add|remove|clear]", "Manage allowed commands for a job")
+
+    console.print(Panel(table, title="[bold #5F9EA0]Commands[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
+
+    # Schedule formats section
+    console.print()
+    sched_table = Table(show_header=True, box=box.SIMPLE_HEAD)
+    sched_table.add_column("Format")
+    sched_table.add_column("Example")
+
+    sched_table.add_row("every <n> <unit>", "every 5 minutes, every 1 hour, every 3 days")
+    sched_table.add_row("daily at <time>", "daily at 8am, daily at 17:30")
+    sched_table.add_row("<day>s at <time>", "weekdays at 9am, mondays at 10:30pm")
+    sched_table.add_row("<time>", "08:00, 17:30")
+
+    console.print(Panel(sched_table, title="[bold #5F9EA0]Schedule Formats[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
     console.print("")
 
 

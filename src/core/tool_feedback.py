@@ -300,6 +300,119 @@ def handle_list_directory_feedback(tool_result, console, panel_updater):
         console.print()
 
 
+def handle_search_plugins_feedback(tool_result, console, panel_updater):
+    """Handle feedback for search_plugins tool.
+
+    Display a tree of found plugins with query and category info,
+    similar to list_directory feedback style.
+    """
+    lines = tool_result.split('\n')
+
+    # Extract query from "Found N plugin(s) matching 'query':" line
+    query = ""
+    query_match = re.search(r"matching '([^']+)':", tool_result)
+    if query_match:
+        query = query_match.group(1)
+
+    # Parse plugin entries: - **name** [category] (status): description
+    #                         Tags: tag1, tag2
+    plugins = []
+    i = 0
+    while i < len(lines):
+        plugin_match = re.match(r'^- \*\*(.+?)\*\*(?:\s+\[(.+?)\])?\s+\((.+?)\):\s+(.+)$', lines[i])
+        if plugin_match:
+            name = plugin_match.group(1)
+            category = plugin_match.group(2) or ""
+            status = plugin_match.group(3)
+            description = plugin_match.group(4)
+
+            # Check next line for tags
+            tags = ""
+            if i + 1 < len(lines) and lines[i + 1].strip().startswith("Tags:"):
+                tags = lines[i + 1].strip().replace("Tags: ", "")
+                i += 1
+
+            plugins.append({
+                "name": name,
+                "category": category,
+                "status": status,
+                "description": description,
+                "tags": tags,
+            })
+        i += 1
+
+    if not plugins:
+        # No plugins found — just show the message
+        prefix = "╰─ " if not panel_updater else ""
+        # Extract the informational message (skip exit_code line)
+        msg_lines = [l for l in lines if l.strip() and not l.startswith("exit_code=")]
+        output = prefix + "\n".join(msg_lines) if msg_lines else f"{prefix}No plugins found"
+        _print_or_append(output, console, panel_updater)
+        if not panel_updater:
+            console.print()
+        return
+
+    # Build tree display
+    max_display = 10
+    display_plugins = plugins[:max_display]
+    remaining = max(0, len(plugins) - max_display)
+
+    # Count activated vs already active
+    activated_count = sum(1 for p in plugins if p["status"] == "activated")
+    already_active_count = sum(1 for p in plugins if p["status"] == "already active")
+
+    tree_lines = []
+    for i, plugin in enumerate(display_plugins):
+        is_last = (i == len(display_plugins) - 1) and (remaining == 0)
+        connector = "└─" if is_last else "├─"
+
+        # Build the plugin line: name [category] (status)
+        cat_part = f" [{plugin['category']}]" if plugin['category'] else ""
+        status_part = plugin['status']
+
+        if status_part == "activated":
+            status_display = f"[green]{status_part}[/green]"
+        else:
+            status_display = f"[dim]{status_part}[/dim]"
+
+        line = f"   {connector} **{plugin['name']}**{cat_part} ({status_display}): {plugin['description']}"
+        tree_lines.append(line)
+
+        # Tags on sub-line
+        if plugin["tags"]:
+            tag_connector = "│  " if not is_last else "   "
+            tree_lines.append(f"{tag_connector}   Tags: [dim]{plugin['tags']}[/dim]")
+
+    # Add overflow indicator
+    if remaining > 0:
+        tree_lines.append(f"   └─ ... and {remaining} more")
+
+    # Build header
+    if query:
+        header = f"plugins matching '{query}' ({len(plugins)} found)"
+    else:
+        header = f"plugins ({len(plugins)} found)"
+
+    prefix = "╰─ " if not panel_updater else ""
+    output = f"{prefix}{header}\n"
+    output += "\n".join(tree_lines)
+
+    # Activation summary
+    if activated_count > 0 or already_active_count > 0:
+        summary_parts = []
+        if activated_count > 0:
+            summary_parts.append(f"{activated_count} activated")
+        if already_active_count > 0:
+            summary_parts.append(f"{already_active_count} already active")
+        summary = ", ".join(summary_parts)
+        output += f"\n{prefix}[dim]{summary}. Schemas available next turn. Auto-evict after 10 turns of non-use.[/dim]"
+
+    _print_or_append(output, console, panel_updater)
+
+    if not panel_updater:
+        console.print()
+
+
 def handle_execute_command_feedback(tool_result, console, panel_updater):
     """Handle feedback for execute_command tool.
 
@@ -371,6 +484,8 @@ def display_tool_feedback(command, tool_result, console, indent=False, panel_upd
             tool_name = "rg"
         elif command.startswith("list_directory"):
             tool_name = "list_directory"
+        elif command.startswith("search_plugins"):
+            tool_name = "search_plugins"
         elif command.startswith(("create_task_list", "complete_task", "show_task_list")):
             tool_name = command.split()[0]
         elif command.startswith("web search"):
@@ -456,6 +571,11 @@ def display_tool_feedback(command, tool_result, console, indent=False, panel_upd
     # For list_directory: parse and display directory tree
     if command.startswith("list_directory"):
         handle_list_directory_feedback(tool_result, console, panel_updater)
+        return
+
+    # For search_plugins: display tree of found plugins
+    if command.startswith("search_plugins"):
+        handle_search_plugins_feedback(tool_result, console, panel_updater)
         return
 
     # For create_file: display preview of created file
@@ -600,6 +720,19 @@ def build_panel_tool_message(tool_name, tool_result, command):
         if items_count > 0:
             return f"[grey]list_directory {path}[/grey]\n[dim]╰─ {items_count} item{'s' if items_count != 1 else ''}[/dim]"
         return f"[grey]list_directory {path}[/grey]\n[dim]╰─ No items[/dim]"
+
+    if tool_name == "search_plugins":
+        query = ""
+        query_match = re.search(r"matching '([^']+)':", tool_result or "")
+        if query_match:
+            query = query_match.group(1)
+
+        # Count plugin entries
+        plugin_count = len(re.findall(r'^- \*\*.*?\*\*', tool_result or "", re.MULTILINE))
+        if plugin_count > 0:
+            label = f"plugins matching '{query}'" if query else "plugins"
+            return f"[grey]search_plugins {query}[/grey]\n[dim]╰─ {plugin_count} {label}[/dim]"
+        return f"[grey]search_plugins {query}[/grey]\n[dim]╰─ No plugins found[/dim]"
 
     if tool_name == "web_search":
         query = ""

@@ -102,10 +102,15 @@ def resolve_edit_preview(result):
 
 
 def handle_command_approval(command, arguments, tool, context, console,
-                            thinking_indicator, approve_mode, debug_mode):
+                            thinking_indicator, approve_mode, debug_mode,
+                            cron_job_id=None, cron_allowlist=None,
+                            cron_interactive=False):
     """Handle execute_command approval workflow.
 
     Checks for silent blocks, auto-approval, and prompts user if needed.
+    When a cron_job_id and cron_allowlist are provided, commands on the
+    job's allow list are auto-approved; unlisted commands are blocked
+    (in scheduled mode) or prompted interactively (in test-run mode).
 
     Args:
         command: The shell command string.
@@ -116,6 +121,9 @@ def handle_command_approval(command, arguments, tool, context, console,
         thinking_indicator: ThinkingIndicator instance (may be None).
         approve_mode: Current approval mode string.
         debug_mode: Whether debug mode is active (for silent block logging).
+        cron_job_id: Optional cron job ID for allow list checking.
+        cron_allowlist: Optional CronAllowlist instance for cron command gating.
+        cron_interactive: If True, cron job is in interactive test-run mode.
 
     Returns:
         (result, should_exit, command_executed) tuple.
@@ -133,40 +141,80 @@ def handle_command_approval(command, arguments, tool, context, console,
         result = f"exit_code=1\n{reprompt_msg}"
         return result, False, False
 
-    # Check if command should be auto-approved
+    # Check if command should be auto-approved (global safe commands)
     auto_approve = is_auto_approved_command(command)
 
-    if not auto_approve:
-        # Stop thinking indicator while waiting for user input
-        if thinking_indicator:
-            thinking_indicator.stop()
+    # Check cron allow list
+    cron_auto_approved = False
+    if cron_job_id and cron_allowlist:
+        if cron_allowlist.is_allowed(cron_job_id, command):
+            cron_auto_approved = True
+        elif not auto_approve:
+            # Command not on allow list and not globally safe
+            # Determine if we're in interactive test-run or scheduled mode
+            if cron_interactive:
+                # Interactive test run (/cron run) — prompt the user
+                pass  # Fall through to normal interactive approval below
+            else:
+                # Scheduled run — block the command, let agent adapt
+                allowed_cmds = cron_allowlist.get_commands(cron_job_id)
+                allowed_preview = ", ".join(f"'{c}'" for c in allowed_cmds[:5])
+                if len(allowed_cmds) > 5:
+                    allowed_preview += f", ... ({len(allowed_cmds)} total)"
+                if not allowed_preview:
+                    allowed_preview = "(none - run '/cron run <id>' to build the allow list)"
+                result = (
+                    f"exit_code=1\n"
+                    f"Command not in cron allow list for job '{cron_job_id}'.\n"
+                    f"Command: {command}\n"
+                    f"Allowed: {allowed_preview}\n"
+                    f"Do not retry this command. Use only approved commands or "
+                    f"ask the user to run '/cron run {cron_job_id}' to add it."
+                )
+                return result, False, False
 
-        action, guidance = confirm_tool(
-            f"execute_command: {command[:80]}{'...' if len(command) > 80 else ''}",
-            console,
-            reason=arguments.get('reason', 'Execute shell command'),
-            requires_approval=True,
-            approve_mode=approve_mode
-        )
-
-        if action == "accept":
-            result = tool.execute(arguments, context)
-            command_executed = True
-        elif action == "advise":
-            result = f"Command not executed. User advice: {guidance}"
-            command_executed = False
-        elif action == "cancel":
-            result = "Command canceled by user. Do not retry this operation."
-            if thinking_indicator:
-                thinking_indicator.start()
-            return result, True, False
-
-        # Restart thinking indicator after user input
-        if thinking_indicator:
-            thinking_indicator.start()
-    else:
+    if cron_auto_approved or auto_approve:
         # Auto-approved command - execute without prompting
         result = tool.execute(arguments, context)
         command_executed = True
+
+        # In cron test-run mode, auto-save newly approved commands to allow list
+        # Skip globally-safe commands — they're auto-approved regardless of the allow list
+        if cron_job_id and cron_allowlist and cron_interactive and not auto_approve:
+            cron_allowlist.add_command(cron_job_id, command)
+
+        return result, False, command_executed
+
+    # Interactive approval (test-run mode or normal session)
+    # Stop thinking indicator while waiting for user input
+    if thinking_indicator:
+        thinking_indicator.stop()
+
+    action, guidance = confirm_tool(
+        f"execute_command: {command[:80]}{'...' if len(command) > 80 else ''}",
+        console,
+        reason=arguments.get('reason', 'Execute shell command'),
+        requires_approval=True,
+        approve_mode=approve_mode
+    )
+
+    if action == "accept":
+        result = tool.execute(arguments, context)
+        command_executed = True
+        # Auto-save approved command to cron allow list during test run
+        if cron_job_id and cron_allowlist:
+            cron_allowlist.add_command(cron_job_id, command)
+    elif action == "advise":
+        result = f"Command not executed. User advice: {guidance}"
+        command_executed = False
+    elif action == "cancel":
+        result = "Command canceled by user. Do not retry this operation."
+        if thinking_indicator:
+            thinking_indicator.start()
+        return result, True, False
+
+    # Restart thinking indicator after user input
+    if thinking_indicator:
+        thinking_indicator.start()
 
     return result, False, command_executed

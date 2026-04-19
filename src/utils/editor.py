@@ -28,7 +28,7 @@ def get_editor() -> str:
         return "notepad.exe"
     else:
         # Try to find common editors
-        for cmd in ["nano", "vi", "vim"]:
+        for cmd in ["nvim", "nano", "vi", "vim"]:
             if shutil.which(cmd):
                 return cmd
         # Fallback to nano even if not found (will error later)

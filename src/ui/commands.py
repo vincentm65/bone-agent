@@ -1,11 +1,12 @@
 """Command routing and help display."""
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 from llm import config
 
 from core.config_manager import ConfigManager as ConfigManagerClass
-from ui.displays import show_help_table
+from ui.displays import show_help_table, show_cron_help_table
 from ui.banner import display_startup_banner
 from core.agentic import SubAgentPanel
 from ui.setting_selector import SettingSelector, SettingCategory, SettingOption
@@ -38,12 +39,12 @@ class CommandResult:
 
 # Command handler functions
 
-def _handle_exit(chat_manager, console, debug_mode_container, args):
+def _handle_exit(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle exit command."""
     return CommandResult(status="exit")
 
 
-def _handle_setup(chat_manager, console, debug_mode_container, args):
+def _handle_setup(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Re-run the first-run setup wizard."""
     from ui.setup_wizard import run_wizard as _run_setup_wizard
     _run_setup_wizard(console)
@@ -56,13 +57,273 @@ def _handle_setup(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_help(chat_manager, console, debug_mode_container, args):
+_CRON_ADD_EXAMPLES = [
+    "[dim]  /cron add morning_brief weekdays at 8am Give me a morning briefing[/dim]",
+    "[dim]  /cron add cleanup every 1 hour Clean up temp files[/dim]",
+    "[dim]  /cron add news daily at 5am Draft an email with AI news[/dim]",
+]
+
+
+def _print_cron_add_usage(console, prefix=None):
+    """Print /cron add usage and examples."""
+    if prefix:
+        console.print(prefix)
+    console.print("[red]Usage: /cron add <id> <schedule> <command>[/red]")
+    console.print("[dim]Examples:[/dim]")
+    for line in _CRON_ADD_EXAMPLES:
+        console.print(line)
+
+
+def _cron_list(console, cron_config):
+    """Display all cron jobs in a table."""
+    if not cron_config.jobs:
+        console.print("[dim]No cron jobs defined. Use [bold #5F9EA0]/cron help[/bold #5F9EA0] to get started.[/dim]")
+        return CommandResult(status="handled")
+
+    table = Table(
+        title="Cron Jobs",
+        box=box.SIMPLE_HEAVY,
+        title_style="bold #5F9EA0",
+        border_style="grey23",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("ID", style="bold white")
+    table.add_column("Schedule")
+    table.add_column("Command", max_width=40, no_wrap=False)
+    table.add_column("Status", justify="center")
+    table.add_column("Last Run", justify="right")
+
+    for job in cron_config.jobs.values():
+        status = "[green]ON[/green]" if job.enabled else "[red]OFF[/red]"
+        last = job.last_run or "[dim]never[/dim]"
+        cmd_display = job.command[:37] + "..." if len(job.command) > 40 else job.command
+        table.add_row(job.id, job.schedule, cmd_display, status, last)
+
+    console.print(table)
+    return CommandResult(status="handled")
+
+
+def _cron_add(console, sub_args, cron_config, notify_scheduler):
+    """Add a new cron job."""
+    from core.cron import CronJob, parse_schedule
+
+    tokens = sub_args.strip().split()
+    if len(tokens) < 3:
+        _print_cron_add_usage(console)
+        return CommandResult(status="handled")
+
+    job_id = tokens[0]
+    # Greedily consume tokens for the schedule (min 1, max 6 words)
+    schedule = None
+    cmd_start = 2
+    for end in range(2, min(len(tokens) + 1, 8)):
+        candidate = " ".join(tokens[1:end])
+        try:
+            parse_schedule(candidate)
+            schedule = candidate
+            cmd_start = end
+            break
+        except ValueError:
+            continue
+
+    if schedule is None:
+        attempted = " ".join(tokens[1:min(len(tokens), 7)])
+        _print_cron_add_usage(console, prefix=f"[red]Cannot parse schedule: '{attempted}'[/red]")
+        return CommandResult(status="handled")
+
+    command = " ".join(tokens[cmd_start:])
+
+    if not re.match(r'^[a-zA-Z0-9_-]+$', job_id):
+        console.print(f"[red]Invalid job ID '{job_id}'. Use only letters, numbers, underscores, and hyphens.[/red]")
+        return CommandResult(status="handled")
+
+    if job_id in cron_config.jobs:
+        console.print(f"[red]Job '{job_id}' already exists. Remove it first or use a different ID.[/red]")
+        return CommandResult(status="handled")
+
+    job = CronJob(id=job_id, schedule=schedule, command=command)
+    cron_config.add_job(job)
+    notify_scheduler()
+    console.print(f"[green]Added cron job '{job_id}' (schedule: {schedule})[/green]")
+    return CommandResult(status="handled")
+
+
+def _cron_remove(console, sub_args, cron_config, notify_scheduler):
+    """Remove a cron job by ID."""
+    job_id = sub_args.strip()
+    if not job_id:
+        console.print("[red]Usage: /cron remove <id>[/red]")
+        return CommandResult(status="handled")
+    if cron_config.remove_job(job_id):
+        notify_scheduler()
+        console.print(f"[green]Removed cron job '{job_id}'[/green]")
+    else:
+        console.print(f"[red]Job '{job_id}' not found[/red]")
+    return CommandResult(status="handled")
+
+
+def _cron_toggle(console, sub_args, cron_config, notify_scheduler, enable):
+    """Enable or disable a cron job."""
+    verb = "enable" if enable else "disable"
+    style = "green" if enable else "yellow"
+    job_id = sub_args.strip()
+    if not job_id:
+        console.print(f"[red]Usage: /cron {verb} <id>[/red]")
+        return CommandResult(status="handled")
+    if job_id in cron_config.jobs:
+        cron_config.update_job(job_id, enabled=enable)
+        notify_scheduler()
+        console.print(f"[{style}]{verb.title()}d '{job_id}'[/{style}]")
+    else:
+        console.print(f"[red]Job '{job_id}' not found[/red]")
+    return CommandResult(status="handled")
+
+
+def _cron_run(console, sub_args, cron_config):
+    """Manually trigger a cron job immediately."""
+    from core.cron import run_single_job
+    from datetime import datetime
+
+    job_id = sub_args.strip()
+    if not job_id:
+        console.print("[red]Usage: /cron run <id>[/red]")
+        return CommandResult(status="handled")
+    job = cron_config.get_job(job_id)
+    if not job:
+        console.print(f"[red]Job '{job_id}' not found[/red]")
+        return CommandResult(status="handled")
+    console.print(f"[#5F9EA0]Running cron job '{job_id}'...[/#5F9EA0]")
+    try:
+        run_single_job(job, console=console, interactive=True)
+        cron_config.update_job(job_id, last_run=datetime.now().isoformat(), last_status="ok")
+        console.print(f"[green]Job '{job_id}' completed.[/green]")
+    except Exception as e:
+        cron_config.update_job(job_id, last_status="error")
+        console.print(f"[red]Job '{job_id}' failed: {e}[/red]")
+    return CommandResult(status="handled")
+
+
+def _cron_allowlist(console, sub_args):
+    """Manage cron command allowlists."""
+    from core.cron_allowlist import CronAllowlist
+    allowlist = CronAllowlist()
+
+    allow_parts = sub_args.strip().split(maxsplit=1)
+    allow_sub = allow_parts[0].lower() if allow_parts else ""
+    allow_rest = allow_parts[1] if len(allow_parts) > 1 else ""
+
+    if allow_sub == "list" and allow_rest:
+        jid = allow_rest.strip()
+        cmds = allowlist.get_commands(jid)
+        if not cmds:
+            console.print(f"[dim]No allowed commands for '{jid}'.[/dim]")
+            return CommandResult(status="handled")
+        console.print(f"[bold]{jid}[/bold] ({len(cmds)} command{'s' if len(cmds) != 1 else ''})")
+        for cmd in cmds:
+            console.print(f"  [green]✓[/green] {cmd}")
+        return CommandResult(status="handled")
+
+    if not allow_sub or allow_sub == "list":
+        all_jobs = allowlist.all_jobs()
+        if not all_jobs:
+            console.print("[dim]No cron command allow lists. Run '/cron run <id>' to build one.[/dim]")
+            return CommandResult(status="handled")
+        for jid, cmds in all_jobs.items():
+            console.print(f"[bold]{jid}[/bold] ({len(cmds)} command{'s' if len(cmds) != 1 else ''})")
+            if cmds:
+                for cmd in cmds:
+                    console.print(f"  [green]✓[/green] {cmd}")
+            else:
+                console.print("  [dim](empty)[/dim]")
+        return CommandResult(status="handled")
+
+    if allow_sub == "add":
+        tokens = allow_rest.strip().split(maxsplit=1)
+        if len(tokens) < 2:
+            console.print("[red]Usage: /cron allowlist add <job_id> <command>[/red]")
+            return CommandResult(status="handled")
+        jid, cmd = tokens[0], tokens[1]
+        if allowlist.add_command(jid, cmd):
+            console.print(f"[green]Added '{cmd}' to '{jid}' allow list.[/green]")
+        else:
+            console.print(f"[dim]Command already in '{jid}' allow list.[/dim]")
+        return CommandResult(status="handled")
+
+    if allow_sub in ("remove", "rm"):
+        tokens = allow_rest.strip().split(maxsplit=1)
+        if len(tokens) < 2:
+            console.print("[red]Usage: /cron allowlist remove <job_id> <command>[/red]")
+            return CommandResult(status="handled")
+        jid, cmd = tokens[0], tokens[1]
+        if allowlist.remove_command(jid, cmd):
+            console.print(f"[green]Removed '{cmd}' from '{jid}' allow list.[/green]")
+        else:
+            console.print(f"[red]Command not found in '{jid}' allow list.[/red]")
+        return CommandResult(status="handled")
+
+    if allow_sub == "clear":
+        jid = allow_rest.strip()
+        if not jid:
+            console.print("[red]Usage: /cron allowlist clear <job_id>[/red]")
+            return CommandResult(status="handled")
+        count = allowlist.clear_job(jid)
+        console.print(f"[green]Cleared {count} command{'s' if count != 1 else ''} from '{jid}' allow list.[/green]")
+        return CommandResult(status="handled")
+
+    console.print(f"[red]Unknown allowlist sub-command: '{allow_sub}'[/red]")
+    console.print("[dim]Sub-commands: list [job_id], add, remove, clear[/dim]")
+    return CommandResult(status="handled")
+
+
+def _handle_cron(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
+    """Manage cron jobs: list, add, remove, enable, disable."""
+    from core.cron import CronConfig
+
+    if cron_scheduler is not None:
+        cron_config = cron_scheduler.config
+    else:
+        cron_config = CronConfig()
+
+    def notify_scheduler():
+        """Immediately reload scheduler config after a mutation."""
+        if cron_scheduler is not None:
+            cron_scheduler.reload()
+
+    if not args or args.strip() == "list":
+        return _cron_list(console, cron_config)
+
+    parts = args.strip().split(maxsplit=1)
+    sub_cmd = parts[0].lower()
+    sub_args = parts[1] if len(parts) > 1 else ""
+
+    dispatch = {
+        "add": lambda: _cron_add(console, sub_args, cron_config, notify_scheduler),
+        "remove": lambda: _cron_remove(console, sub_args, cron_config, notify_scheduler),
+        "rm": lambda: _cron_remove(console, sub_args, cron_config, notify_scheduler),
+        "enable": lambda: _cron_toggle(console, sub_args, cron_config, notify_scheduler, enable=True),
+        "disable": lambda: _cron_toggle(console, sub_args, cron_config, notify_scheduler, enable=False),
+        "run": lambda: _cron_run(console, sub_args, cron_config),
+        "allowlist": lambda: _cron_allowlist(console, sub_args),
+        "help": lambda: show_cron_help_table(console) or CommandResult(status="handled"),
+    }
+
+    handler = dispatch.get(sub_cmd)
+    if handler:
+        return handler()
+
+    console.print(f"[red]Unknown cron sub-command: '{sub_cmd}'[/red]")
+    console.print("[dim]Sub-commands: list, add, remove, enable, disable, run, allowlist, help[/dim]")
+    return CommandResult(status="handled")
+
+
+def _handle_help(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle help command."""
     show_help_table(console)
     return CommandResult(status="handled")
 
 
-def _handle_compact(chat_manager, console, debug_mode_container, args):
+def _handle_compact(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle manual context compaction."""
     # Show current context summary immediately using the same format as the status bar
     num_messages = len(chat_manager.messages)
@@ -92,7 +353,7 @@ def _handle_compact(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_config(chat_manager, console, debug_mode_container, args):
+def _handle_config(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle config command - interactive runtime settings editor."""
     from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
 
@@ -281,7 +542,7 @@ def _handle_config(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_clear(chat_manager, console, debug_mode_container, args):
+def _handle_clear(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle clear/reset command."""
     # Display conversation cost for the previous chat
     costs = config_manager.get_usage_costs()
@@ -444,7 +705,7 @@ def _open_provider_editor(chat_manager, console, provider):
     return True
 
 
-def _handle_provider(chat_manager, console, debug_mode_container, args):
+def _handle_provider(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle provider switching and configuration command."""
     current = getattr(chat_manager.client, 'provider', 'unknown')
 
@@ -517,7 +778,7 @@ def _handle_provider(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_model(chat_manager, console, debug_mode_container, args):
+def _handle_model(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle model setting command."""
     current_provider = getattr(chat_manager.client, 'provider', 'unknown')
     
@@ -606,7 +867,7 @@ def _handle_model(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_key(chat_manager, console, debug_mode_container, args):
+def _handle_key(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle API key setting command."""
     if not args:
         # Show current API key status for current provider
@@ -653,7 +914,7 @@ def _handle_key(chat_manager, console, debug_mode_container, args):
 
 
 
-def _handle_edit(chat_manager, console, debug_mode_container, args):
+def _handle_edit(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle external editor command for multi-line input.
 
     Opens an external editor for composing prompts. After the editor closes,
@@ -691,7 +952,7 @@ def _handle_edit(chat_manager, console, debug_mode_container, args):
 
 
 
-def _handle_usage(chat_manager, console, debug_mode_container, args):
+def _handle_usage(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle usage command - show/calculate token costs or set cost rates."""
     console.print()
     
@@ -845,7 +1106,7 @@ def _handle_usage(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_review(chat_manager, console, debug_mode_container, args):
+def _handle_review(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle review command - run code review on git changes."""
     import subprocess
     import os
@@ -925,15 +1186,10 @@ def _handle_review(chat_manager, console, debug_mode_container, args):
     console.print(f"[dim]Reviewing {file_count} changed file(s)...[/dim]")
     console.print()
 
-    # Compute paths (same logic as main.py)
-    repo_root = Path.cwd().resolve()
-    app_root = (
-        Path(sys.executable).resolve().parent
-        if getattr(sys, "frozen", False)
-        else Path(__file__).resolve().parents[2]
-    )
-    rg_exe_name = "rg.exe" if os.name == "nt" else "rg"
-    rg_exe_path = str((app_root / "bin" / rg_exe_name).resolve())
+    # Compute paths from shared module
+    from utils.paths import REPO_ROOT, RG_EXE_PATH as _RG_EXE_PATH
+    repo_root = REPO_ROOT
+    rg_exe_path = str(_RG_EXE_PATH)
 
     # Create a live panel for the review sub-agent
     panel = SubAgentPanel("Reviewing git diff", console)
@@ -1062,7 +1318,7 @@ def _require_proxy_provider(chat_manager, console):
 # Account command handlers
 # ============================================
 
-def _handle_plan(chat_manager, console, debug_mode_container, args):
+def _handle_plan(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /plan — show available plans."""
     _, api_base = _get_proxy_config(chat_manager)
 
@@ -1107,7 +1363,7 @@ def _handle_plan(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_signup(chat_manager, console, debug_mode_container, args):
+def _handle_signup(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /signup <email> — create account and switch to vmcode."""
     if not args or not args.strip():
         console.print("[red]Usage: /signup <email>[/red]")
@@ -1187,7 +1443,7 @@ def _handle_signup(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_account(chat_manager, console, debug_mode_container, args):
+def _handle_account(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /account — show account info."""
     if not _require_proxy_provider(chat_manager, console):
         return CommandResult(status="handled")
@@ -1269,7 +1525,7 @@ def _send_reset_key_email(console, api_base, email):
     return CommandResult(status="handled")
 
 
-def _handle_login(chat_manager, console, debug_mode_container, args):
+def _handle_login(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /login <email> — log in to an existing vmcode account on this device.
 
     Two paths:
@@ -1368,7 +1624,7 @@ def _handle_login(chat_manager, console, debug_mode_container, args):
 
 
 
-def _handle_resend(chat_manager, console, debug_mode_container, args):
+def _handle_resend(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /resend [email] — resend verification email.
 
     If no email is given, fetches it from the account endpoint.
@@ -1419,7 +1675,7 @@ def _handle_resend(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_reset_key(chat_manager, console, debug_mode_container, args):
+def _handle_reset_key(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /reset-key [email] — request a new API key via email.
 
     If no email is given, fetches it from the account endpoint (requires API key).
@@ -1445,7 +1701,7 @@ def _handle_reset_key(chat_manager, console, debug_mode_container, args):
     return _send_reset_key_email(console, api_base, email)
 
 
-def _handle_manage(chat_manager, console, debug_mode_container, args):
+def _handle_manage(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /manage — open Stripe Customer Portal for subscription management."""
     if not _require_proxy_provider(chat_manager, console):
         return CommandResult(status="handled")
@@ -1492,7 +1748,7 @@ def _handle_manage(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_upgrade(chat_manager, console, debug_mode_container, args):
+def _handle_upgrade(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /upgrade — show plan selector, then open checkout or billing portal."""
     if not _require_proxy_provider(chat_manager, console):
         return CommandResult(status="handled")
@@ -1618,7 +1874,7 @@ def _handle_upgrade(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_rotate_key(chat_manager, console, debug_mode_container, args):
+def _handle_rotate_key(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /rotate-key — invalidate current API key and generate a new one."""
     if not _require_proxy_provider(chat_manager, console):
         return CommandResult(status="handled")
@@ -1765,7 +2021,7 @@ def _apply_obsidian_changes(chat_manager, console, obsidian_settings, changes):
     return change_lines
 
 
-def _handle_obsidian(chat_manager, console, debug_mode_container, args):
+def _handle_obsidian(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /obsidian command — manage vault integration.
 
     No args: Launch interactive SettingSelector UI (same UX as /config).
@@ -1917,7 +2173,7 @@ def _persist_disabled_tools(console):
         return False
 
 
-def _handle_tools(chat_manager, console, debug_mode_container, args):
+def _handle_tools(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /tools command — toggle individual tools or groups on/off.
 
     No args: Launch interactive SettingSelector with tools grouped by category.
@@ -2129,7 +2385,7 @@ def _handle_tools(chat_manager, console, debug_mode_container, args):
     return CommandResult(status="handled")
 
 
-def _handle_cd(chat_manager, console, debug_mode_container, args):
+def _handle_cd(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle /cd command — change working directory.
 
     Usage: /cd <path>
@@ -2401,10 +2657,11 @@ _COMMAND_HANDLERS = {
     "/tools": _handle_tools,
     "/cd": _handle_cd,
     "/setup": _handle_setup,
+    "/cron": _handle_cron,
 }
 
 
-def process_command(chat_manager, user_input, console, debug_mode_container):
+def process_command(chat_manager, user_input, console, debug_mode_container, cron_scheduler=None):
     """Process command and optionally return replacement content.
 
     Args:
@@ -2412,6 +2669,7 @@ def process_command(chat_manager, user_input, console, debug_mode_container):
         user_input: User's input string
         console: Rich console for output
         debug_mode_container: Dict with 'debug' key for debug mode state
+        cron_scheduler: Optional CronScheduler instance for immediate reload
 
     Returns:
         tuple: (status, replacement_content)
@@ -2426,7 +2684,7 @@ def process_command(chat_manager, user_input, console, debug_mode_container):
     # Look up handler in registry
     handler = _COMMAND_HANDLERS.get(cmd)
     if handler:
-        result = handler(chat_manager, console, debug_mode_container, args)
+        result = handler(chat_manager, console, debug_mode_container, args, cron_scheduler)
         return (result.status, result.replacement_input)
     elif cmd.startswith('/'):
         console.print(f"[red]Unknown command: {user_input}[/red]")

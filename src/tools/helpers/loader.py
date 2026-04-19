@@ -113,6 +113,11 @@ def discover_tools(directories: List[str]) -> int:
             # Create unique module name
             module_name = f"tools_{py_file.stem}_{hash(str(py_file)) & 0xFFFFFFFF}"
 
+            # Skip modules already loaded (e.g. cron re-calling load_all_tools)
+            if module_name in sys.modules:
+                logger.debug(f"Module already loaded, skipping: {module_name}")
+                continue
+
             module = _load_module_from_path(module_name, py_file)
             if module:
                 loaded_count += 1

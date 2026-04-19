@@ -666,6 +666,22 @@ def _build_vault_section() -> str:
     return "\n".join(lines)
 
 
+def _build_context_section() -> str:
+    """Build a dynamic section with current date, time, and location."""
+    from datetime import datetime
+
+    now = datetime.now()
+    date_str = now.strftime("%A, %B %d, %Y")
+    time_str = now.strftime("%I:%M %p")
+    timezone = now.astimezone().tzinfo
+
+    return (
+        "## Current Context\n\n"
+        f"**Date:** {date_str}\n"
+        f"**Time:** {time_str} ({timezone})\n"
+    )
+
+
 def build_system_prompt(mode: str, plan_type: str = None) -> str:
     """Build system prompt for main agent (plan/edit modes).
 
@@ -707,6 +723,9 @@ def build_system_prompt(mode: str, plan_type: str = None) -> str:
         "temp_folder",
     ]
     sections = [BASE_SECTIONS[k] for k in _base_keys if _should_include_section(k)]
+
+    # Dynamic date/time/location context (inserted right after intro)
+    sections.insert(1, _build_context_section())
 
     # Obsidian vault section (inserted before mode section)
     vault_section = _build_vault_section()
@@ -754,6 +773,10 @@ def build_sub_agent_prompt(sub_agent_type: str = "research") -> str:
         "temp_folder",
     ]
     sections = [BASE_SECTIONS[k] for k in _sub_base_keys if _should_include_section(k)]
+
+    # Dynamic date/time/location context (inserted right after intro)
+    sections.insert(1, _build_context_section())
+
     # Insert response_format between code_references and exploration_pattern
     # to match the original prompt ordering (before the plugin-tier refactor).
     response_format = SUB_AGENT_SECTIONS["response_format"]
