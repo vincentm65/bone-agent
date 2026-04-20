@@ -29,7 +29,7 @@ from tools.helpers.base import tool
         },
         "required": ["input"]
     },
-    allowed_modes=["edit"]
+    requires_approval=False
 )
 def my_tool(input: str, repo_root: Path) -> str:
     """Your tool implementation."""
@@ -45,7 +45,6 @@ Your tool function can accept these parameters (they'll be injected automaticall
 - `console` - Rich console for output
 - `gitignore_spec` - PathSpec for .gitignore filtering
 - `debug_mode: bool` - Whether debug mode is enabled
-- `interaction_mode: str` - Current interaction mode ("edit", "plan", or "learn")
 
 ## Return Format
 
@@ -62,7 +61,6 @@ return f"exit_code=1\nError: Something went wrong"
 - `name: str` - Tool identifier (used by LLM)
 - `description: str` - Description for LLM
 - `parameters: dict` - JSON Schema for parameters
-- `allowed_modes: list` - Modes where tool is available (default: all modes)
 - `requires_approval: bool` - Whether user confirmation is needed (default: False)
 - `tier: str` - Tool tier: `"core"` (always loaded) or `"plugin"` (on-demand, discovered via `search_plugins`)
 - `tags: list[str]` - Searchable keywords for plugin discovery (e.g., `["email", "gmail"]`)

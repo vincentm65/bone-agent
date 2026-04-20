@@ -30,7 +30,6 @@ class ToolDefinition:
         name: Tool identifier (e.g., "read_file")
         description: Human-readable description of what the tool does
         parameters: JSON Schema for tool parameters
-        allowed_modes: List of interaction modes where this tool is allowed
         requires_approval: Whether this tool requires user confirmation
         terminal_policy: How this tool interacts with the thinking indicator
         handler: Function that executes the tool
@@ -41,7 +40,6 @@ class ToolDefinition:
     name: str
     description: str
     parameters: Dict[str, Any]
-    allowed_modes: List[str] = field(default_factory=lambda: ["edit", "plan"])
     requires_approval: bool = False
     terminal_policy: str = TERMINAL_NONE  # Default: indicator keeps running
     handler: Optional[Callable] = None
@@ -63,17 +61,6 @@ class ToolDefinition:
                 "parameters": self.parameters
             }
         }
-
-    def is_allowed_in_mode(self, mode: str) -> bool:
-        """Check if tool is allowed in given interaction mode.
-
-        Args:
-            mode: Interaction mode ('edit' or 'plan')
-
-        Returns:
-            True if tool is allowed in this mode
-        """
-        return mode in self.allowed_modes
 
     def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> str:
         """Execute the tool with given arguments and context.
@@ -292,25 +279,6 @@ class ToolRegistry:
         return tools
 
     @classmethod
-    def get_tools_for_mode(cls, mode: str, include_plugins: bool = False) -> List[ToolDefinition]:
-        """Get tools allowed in a specific interaction mode.
-
-        Args:
-            mode: Interaction mode ('edit' or 'plan')
-            include_plugins: If True, include plugin-tier tools. Default: core only.
-
-        Returns:
-            List of ToolDefinitions for that mode (excluding disabled, excluding plugins unless requested)
-        """
-        tools = [
-            tool for tool in cls._tools.values()
-            if tool.is_allowed_in_mode(mode) and tool.name not in cls._disabled
-        ]
-        if not include_plugins:
-            tools = [t for t in tools if t.tier != "plugin"]
-        return tools
-
-    @classmethod
     def unregister(cls, name: str) -> bool:
         """Remove a tool from the registry by name.
 
@@ -441,7 +409,6 @@ def tool(
     name: str,
     description: str,
     parameters: Dict[str, Any],
-    allowed_modes: Optional[List[str]] = None,
     requires_approval: bool = False,
     terminal_policy: str = TERMINAL_NONE,
     tier: str = "core",
@@ -461,7 +428,6 @@ def tool(
                 },
                 "required": ["input"]
             },
-            allowed_modes=["edit"]
         )
         def my_tool(input: str, repo_root: Path):
             return f"exit_code=0\nProcessed: {input}"
@@ -470,7 +436,6 @@ def tool(
         name: Tool identifier
         description: Human-readable description
         parameters: JSON Schema for parameters
-        allowed_modes: List of allowed modes (default: all modes)
         requires_approval: Whether confirmation is required (default: False)
         terminal_policy: Terminal policy for thinking indicator (default: TERMINAL_NONE)
         tier: "core" or "plugin" (default: "core")
@@ -500,7 +465,6 @@ def tool(
             name=name,
             description=description,
             parameters=parameters,
-            allowed_modes=allowed_modes or ["edit", "plan"],
             requires_approval=requires_approval,
             terminal_policy=terminal_policy,
             handler=func,
@@ -531,7 +495,6 @@ def build_context(
     console: Any = None,
     gitignore_spec: Any = None,
     debug_mode: bool = False,
-    interaction_mode: str = "edit",
     chat_manager: Any = None,
     rg_exe_path: str = None,
     panel_updater: Any = None,
@@ -544,7 +507,6 @@ def build_context(
         console: Rich console for output
         gitignore_spec: PathSpec for .gitignore filtering
         debug_mode: Whether debug mode is enabled
-        interaction_mode: Current interaction mode
         chat_manager: ChatManager instance
         rg_exe_path: Path to rg executable
         panel_updater: Optional SubAgentPanel for live updates
@@ -557,8 +519,7 @@ def build_context(
         "repo_root": repo_root,
         "console": console,
         "gitignore_spec": gitignore_spec,
-        "debug_mode": debug_mode,
-        "interaction_mode": interaction_mode
+        "debug_mode": debug_mode
     }
     if chat_manager is not None:
         context["chat_manager"] = chat_manager
@@ -584,33 +545,6 @@ def get_tool_schemas() -> list:
     return [tool.to_openai_schema() for tool in ToolRegistry.get_all(include_plugins=True)]
 
 
-def get_tools_for_mode(interaction_mode: str) -> list:
-    """Get tool schemas filtered by interaction mode.
-
-    Args:
-        interaction_mode: 'plan' or 'edit'
-
-    Returns:
-        List of tool schemas suitable for the mode
-    """
-    return [
-        tool.to_openai_schema()
-        for tool in ToolRegistry.get_tools_for_mode(interaction_mode, include_plugins=True)
-    ]
-
-
-# Export TOOLS as a callable that ensures it always reflects the current
-# state of the registry (which is populated at runtime after tool modules are imported).
-TOOLS = get_tool_schemas
-
-
-def _tools_for_mode(interaction_mode):
-    """Filter tools based on interaction mode using the registry.
-
-    Args:
-        interaction_mode: 'plan' or 'edit'
-
-    Returns:
-        List of tool definitions suitable for the mode
-    """
-    return get_tools_for_mode(interaction_mode)
+def TOOLS():
+    """Get tool schemas. Callable for backward compatibility."""
+    return get_tool_schemas()

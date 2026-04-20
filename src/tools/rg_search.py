@@ -64,7 +64,6 @@ _VAULT_MAX_MATCHES = 20
         },
         "required": ["pattern"]
     },
-    allowed_modes=["edit", "plan"],
     requires_approval=False
 )
 def rg(

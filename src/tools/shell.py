@@ -246,7 +246,6 @@ def run_shell_command(command, repo_root, rg_exe_path, console, debug_mode, giti
         },
         "required": ["command"]
     },
-    allowed_modes=["edit", "plan"],
     requires_approval=True,
     terminal_policy="stop"
 )

@@ -232,7 +232,6 @@ def _read_file_content(
         },
         "required": ["path_str"]
     },
-    allowed_modes=["edit", "plan"]
 )
 def read_file(
     path_str: str,

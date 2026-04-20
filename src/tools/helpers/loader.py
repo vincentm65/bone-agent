@@ -228,13 +228,4 @@ def list_registered_tools() -> List[str]:
     return [tool.name for tool in ToolRegistry.get_all()]
 
 
-def list_tools_for_mode(mode: str) -> List[str]:
-    """List names of tools allowed in a specific mode.
 
-    Args:
-        mode: Interaction mode ('edit' or 'plan')
-
-    Returns:
-        List of tool names
-    """
-    return [tool.name for tool in ToolRegistry.get_tools_for_mode(mode)]

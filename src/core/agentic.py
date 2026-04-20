@@ -16,7 +16,6 @@ from tools import (
     list_directory,
     create_file,
     TOOLS,
-    _tools_for_mode,
 )
 from utils.settings import tool_settings
 
@@ -236,7 +235,7 @@ class AgenticOrchestrator:
                 tool_names = [t["function"]["name"] for t in tools]
                 self.console.print(f"[dim]Available tools: {tool_names}[/dim]")
         else:
-            tools = _tools_for_mode(self.chat_manager.interaction_mode)
+            tools = TOOLS()
 
         # Retry loop for timeout/connection errors
         last_error = None
@@ -320,7 +319,7 @@ class AgenticOrchestrator:
             self.chat_manager.compact_tool_results()
 
             # Update context tokens with current mode's tools
-            tools_for_mode = _tools_for_mode(self.chat_manager.interaction_mode)
+            tools_for_mode = TOOLS()
             self.chat_manager._update_context_tokens(tools_for_mode)
 
             self.console.print()
@@ -439,8 +438,7 @@ class AgenticOrchestrator:
         # Check if we should use parallel execution
         use_parallel = (
             tool_settings.enable_parallel_execution and
-            len(tool_calls) > 1 and
-            (self.chat_manager.interaction_mode != "plan" or self.force_parallel_execution)  # Sequential in plan mode unless forced
+            len(tool_calls) > 1
         )
 
         # Force sequential if any edit_file or execute_command in the batch (safety)
@@ -536,7 +534,7 @@ class AgenticOrchestrator:
                 self.chat_manager.log_message(tool_msg)
 
         # Update context tokens with current mode's tools
-        tools_for_mode = _tools_for_mode(self.chat_manager.interaction_mode)
+        tools_for_mode = TOOLS()
         self.chat_manager._update_context_tokens(tools_for_mode)
 
         # Pre-send guard: ensure context fits before next LLM call
@@ -572,7 +570,6 @@ class AgenticOrchestrator:
                 'debug_mode': self.debug_mode,
                 'gitignore_spec': self.gitignore_spec,
                 'panel_updater': self.panel_updater,
-                'interaction_mode': self.chat_manager.interaction_mode,
                 'vault_root': vault_root_str(),
             }
 
@@ -774,7 +771,7 @@ class AgenticOrchestrator:
                     self.chat_manager.log_message(tool_msg)
 
             # Update context tokens with current mode's tools
-            tools_for_mode = _tools_for_mode(self.chat_manager.interaction_mode)
+            tools_for_mode = TOOLS()
             self.chat_manager._update_context_tokens(tools_for_mode)
 
             # Pre-send guard: ensure context fits before next LLM call
@@ -799,10 +796,6 @@ class AgenticOrchestrator:
         """
         tool_id = tool_call["id"]
         function_name = tool_call["function"]["name"]
-
-        # Check for edit_file in plan mode
-        if function_name == "edit_file" and self.chat_manager.interaction_mode == "plan":
-            return False, "exit_code=1\nedit_file is disabled in plan mode. Focus on theoretical outlines and provide a summary of changes at the end."
 
         # Parse arguments
         try:
@@ -833,7 +826,6 @@ class AgenticOrchestrator:
                     console=self.console,
                     gitignore_spec=self.gitignore_spec,
                     debug_mode=self.debug_mode,
-                    interaction_mode=self.chat_manager.interaction_mode,
                     chat_manager=self.chat_manager,
                     rg_exe_path=self.rg_exe_path,
                     panel_updater=panel_to_use,

@@ -420,11 +420,7 @@ __all__ = [
     "WEB_SEARCH_REQUIRE_CONFIRMATION",
     "APPROVE_MODES",
     "APPROVE_MODE_LABELS",
-    "INTERACTION_MODES",
-    "INTERACTION_MODE_LABELS",
 
-    "PLAN_TYPES",
-    "PLAN_TYPE_LABELS",
     "get_provider_config",
     "generate_config_template",
     "reload_config",
@@ -456,22 +452,6 @@ APPROVE_MODE_LABELS = {
     "safe": "Safe",
     "accept_edits": "Accept Edits",
     "danger": "Danger",
-}
-
-# Interaction modes
-INTERACTION_MODES = ("edit", "plan")
-INTERACTION_MODE_LABELS = {
-    "edit": "Edit (Full Access)",
-    "plan": "Plan (Read-Only)",
-}
-
-# Plan types (planning behavior options for Plan interaction mode)
-PLAN_TYPES = ("feature", "refactor", "debug", "optimize")
-PLAN_TYPE_LABELS = {
-    "feature": "Feature",
-    "refactor": "Refactor",
-    "debug": "Debug",
-    "optimize": "Optimize"
 }
 
 def get_provider_config(provider: str):

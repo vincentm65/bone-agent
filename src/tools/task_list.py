@@ -122,7 +122,6 @@ def _format_task_list(task_list, title=None):
         },
         "required": ["tasks", "title"]
     },
-    allowed_modes=["edit"],
     requires_approval=False
 )
 def create_task_list(
@@ -140,11 +139,6 @@ def create_task_list(
     Returns:
         Formatted task list result
     """
-    # Validate interaction mode
-    interaction_mode = getattr(chat_manager, 'interaction_mode', 'edit')
-    if interaction_mode == "plan":
-        return "exit_code=1\nerror: Task lists are disabled in PLAN mode. Switch to EDIT mode.\n\n"
-
     # Validate title
     if not isinstance(title, str):
         return "exit_code=1\nerror: 'title' must be a string.\n\n"
@@ -199,7 +193,6 @@ def create_task_list(
             }
         }
     },
-    allowed_modes=["edit"],
     requires_approval=False
 )
 def complete_task(
@@ -217,11 +210,6 @@ def complete_task(
     Returns:
         Formatted task list result
     """
-    # Validate interaction mode
-    interaction_mode = getattr(chat_manager, 'interaction_mode', 'edit')
-    if interaction_mode == "plan":
-        return "exit_code=1\nerror: Task lists are disabled in PLAN mode. Switch to EDIT mode.\n\n"
-
     # Normalize to list: prefer task_ids if both provided
     if task_ids is not None:
         ids_raw = task_ids
@@ -262,7 +250,6 @@ def complete_task(
     name="show_task_list",
     description="Show the current task list without modifying it.",
     parameters={"type": "object", "properties": {}},
-    allowed_modes=["edit"],
     requires_approval=False
 )
 def show_task_list(
@@ -276,11 +263,6 @@ def show_task_list(
     Returns:
         Formatted task list result
     """
-    # Validate interaction mode
-    interaction_mode = getattr(chat_manager, 'interaction_mode', 'edit')
-    if interaction_mode == "plan":
-        return "exit_code=1\nerror: Task lists are disabled in PLAN mode. Switch to EDIT mode.\n\n"
-
     task_list = getattr(chat_manager, "task_list", None) or []
     title = getattr(chat_manager, "task_list_title", None)
 

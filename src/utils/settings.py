@@ -80,7 +80,6 @@ class SubAgentSettings:
     enable_compaction: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("enable_compaction", True))
     compact_trigger_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("compact_trigger_tokens", 50_000))
     allowed_tools: list = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("allowed_tools", ["rg", "read_file", "list_directory", "web_search"]))
-    interaction_mode: str = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("interaction_mode", "plan"))
 
 
 # Context compaction settings

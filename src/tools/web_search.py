@@ -29,7 +29,6 @@ from exceptions import LLMConnectionError
         },
         "required": ["query"]
     },
-    allowed_modes=["edit", "plan"],
     requires_approval=False
 )
 def web_search(

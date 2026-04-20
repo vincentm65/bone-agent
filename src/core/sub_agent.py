@@ -64,13 +64,12 @@ def _load_codebase_map(chat_manager):
 def _configure_isolation(chat_manager):
     """Apply isolation settings for sub-agent context.
 
-    Disables conversation logging and sets interaction mode from config.
+    Disables conversation logging.
 
     Args:
         chat_manager: ChatManager instance to configure
     """
     chat_manager.markdown_logger = None
-    chat_manager.interaction_mode = sub_agent_settings.interaction_mode
 
 
 def _create_chat_manager(sub_agent_type: str = "research"):

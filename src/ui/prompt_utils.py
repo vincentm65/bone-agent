@@ -4,7 +4,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
-from llm.config import get_provider_config, APPROVE_MODE_LABELS, PLAN_TYPE_LABELS, STATUS_BAR_SETTINGS
+from llm.config import get_provider_config, APPROVE_MODE_LABELS, STATUS_BAR_SETTINGS
 
 
 def get_bottom_toolbar_text(chat_manager):
@@ -38,16 +38,10 @@ def get_bottom_toolbar_text(chat_manager):
         model_display = model
     
     # Determine mode label and color
-    if chat_manager.interaction_mode == "plan":
-        mode_label = "Plan"
-        val = PLAN_TYPE_LABELS.get(chat_manager.plan_type, chat_manager.plan_type.upper())
-        colors = {"feature": "#5F9EA0", "refactor": "#6B8E23", "debug": "#CD5C5C", "optimize": "#DAA520"}
-        mode_val_colored = f'<style fg="{colors.get(chat_manager.plan_type, "white")}">{val}</style>'
-    else:
-        mode_label = "Approval"
-        val = APPROVE_MODE_LABELS.get(chat_manager.approve_mode, chat_manager.approve_mode.upper())
-        colors = {"safe": "#6B8E23", "accept_edits": "#DAA520", "danger": "#CD5C5C"}
-        mode_val_colored = f'<style fg="{colors.get(chat_manager.approve_mode, "white")}">{val}</style>'
+    mode_label = "Approval"
+    val = APPROVE_MODE_LABELS.get(chat_manager.approve_mode, chat_manager.approve_mode.upper())
+    colors = {"safe": "#6B8E23", "accept_edits": "#DAA520", "danger": "#CD5C5C"}
+    mode_val_colored = f'<style fg="{colors.get(chat_manager.approve_mode, "white")}">{val}</style>'
 
     # Build toolbar string based on configuration
     # Model and mode are always shown

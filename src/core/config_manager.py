@@ -116,11 +116,9 @@ class ConfigManager:
                 'bone': 'BONE_PROXY_MODEL',
                 'openrouter': 'OPENROUTER_MODEL',
                 'glm': 'GLM_MODEL',
-                'glm_plan': 'GLM_PLAN_MODEL',
                 'openai': 'OPENAI_MODEL',
                 'gemini': 'GEMINI_MODEL',
                 'minimax': 'MINIMAX_MODEL',
-                'minimax_plan': 'MINIMAX_PLAN_MODEL',
                 'anthropic': 'ANTHROPIC_MODEL',
                 'kimi': 'KIMI_MODEL'
             }
@@ -146,11 +144,9 @@ class ConfigManager:
             'bone': 'BONE_PROXY_MODEL',
             'openrouter': 'OPENROUTER_MODEL',
             'glm': 'GLM_MODEL',
-            'glm_plan': 'GLM_PLAN_MODEL',
             'openai': 'OPENAI_MODEL',
             'gemini': 'GEMINI_MODEL',
             'minimax': 'MINIMAX_MODEL',
-            'minimax_plan': 'MINIMAX_PLAN_MODEL',
             'anthropic': 'ANTHROPIC_MODEL',
             'kimi': 'KIMI_MODEL'
         }
@@ -176,11 +172,9 @@ class ConfigManager:
             'openrouter': 'OPENROUTER_API_KEY',
             'bone': 'BONE_PROXY_API_KEY',
             'glm': 'GLM_API_KEY',
-            'glm_plan': 'GLM_PLAN_API_KEY',
             'openai': 'OPENAI_API_KEY',
             'gemini': 'GEMINI_API_KEY',
             'minimax': 'MINIMAX_API_KEY',
-            'minimax_plan': 'MINIMAX_PLAN_API_KEY',
             'anthropic': 'ANTHROPIC_API_KEY',
             'kimi': 'KIMI_API_KEY'
         }

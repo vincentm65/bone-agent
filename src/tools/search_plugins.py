@@ -34,7 +34,6 @@ from tools.helpers.base import tool, ToolRegistry, TERMINAL_NONE
         },
         "required": ["query"]
     },
-    allowed_modes=["edit", "plan"],
     requires_approval=False,
     terminal_policy=TERMINAL_NONE,
     tier="core",

@@ -372,15 +372,6 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             on_text="ON", off_text="OFF",
         ),
         SettingOption(
-            key="mode", text="Interaction Mode",
-            value=chat_manager.interaction_mode,
-            input_type="select",
-            options=[
-                {"value": "edit", "text": "EDIT"},
-                {"value": "plan", "text": "PLAN (Read-Only)"},
-            ],
-        ),
-        SettingOption(
             key="approve", text="Approval Mode",
             value=chat_manager.approve_mode,
             input_type="select",
@@ -473,10 +464,6 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             chat_manager.set_logging(value)
             state = "enabled" if value else "disabled"
             change_lines.append(f"  Conversation Logging: {state}")
-        elif key == "mode":
-            chat_manager.set_interaction_mode(value)
-            labels = {"edit": "EDIT", "plan": "PLAN"}
-            change_lines.append(f"  Interaction Mode: {labels.get(value, value.upper())}")
         elif key == "approve":
             chat_manager.approve_mode = value
             labels = {"safe": "SAFE", "accept_edits": "ACCEPT EDITS", "danger": "DANGER"}
@@ -583,7 +570,7 @@ def _handle_clear(chat_manager, console, debug_mode_container, args, cron_schedu
     console.print()
 
     chat_manager.reset_session()
-    display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode, clear_screen=True)
+    display_startup_banner(chat_manager.approve_mode, clear_screen=True)
     return CommandResult(status="handled")
 
 
@@ -2209,12 +2196,11 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
                 groups = tool_to_group.get(t.name, [])
                 group_label = groups[0] if groups else "Other"
                 is_off = t.name in disabled
-                modes = ", ".join(t.allowed_modes)
                 if group_label != current_group:
                     current_group = group_label
                     console.print(f"  [bold]{group_label}[/bold]")
                 status = "[red]off[/red]" if is_off else "[green]on[/green] "
-                console.print(f"    {status} {t.name}  [dim]({modes})[/dim]")
+                console.print(f"    {status} {t.name}")
 
             console.print()
             console.print("[dim]Groups:[/dim] " + ", ".join(
@@ -2298,7 +2284,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
             if not t:
                 continue
             is_off = tname in disabled
-            modes = ", ".join(t.allowed_modes)
             group_options.append(SettingOption(
                 key=tname,
                 text=tname,
@@ -2306,7 +2291,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
                 input_type="boolean",
                 on_text="ON",
                 off_text="OFF",
-                description=f"Modes: {modes}",
             ))
         if group_options:
             categories.append(SettingCategory(title=gdef["label"], settings=group_options))
@@ -2323,7 +2307,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
         other_options = []
         for t in ungrouped:
             is_off = t.name in disabled
-            modes = ", ".join(t.allowed_modes)
             other_options.append(SettingOption(
                 key=t.name,
                 text=t.name,

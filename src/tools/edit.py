@@ -427,7 +427,6 @@ def run_edit_file(arguments, repo_root, console, gitignore_spec=None, vault_root
         },
         "required": ["path", "search", "replace"]
     },
-    allowed_modes=["edit", "plan"],
     requires_approval=True,
     terminal_policy="stop"
 )
@@ -458,11 +457,6 @@ def edit_file(
     Returns:
         Edit result with diff
     """
-    # Check if edit_file is disabled in plan mode
-    interaction_mode = getattr(chat_manager, 'interaction_mode', 'edit')
-    if interaction_mode == "plan":
-        return "exit_code=1\nedit_file is disabled in plan mode. Focus on theoretical outlines and provide a summary of changes at the end."
-
     # Validate path doesn't contain JSON-like syntax or invalid characters
     invalid_chars = '[]{}"\n\r\t'
     if any(char in path for char in invalid_chars):

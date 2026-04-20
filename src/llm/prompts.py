@@ -15,8 +15,7 @@ BASE_SECTIONS = {
 
 **Important:** Default to concise explanations
 
-- In edit mode: Show only changed code snippets when making edits via tools, never in explanations
-- In plan mode: Describe what will change, not how - no code examples unless asked
+- Show only changed code snippets when making edits via tools, never in explanations
 - Use bullet points instead of prose when possible
 - Target: 3-5 sentences max for explanations, 10-15 lines max for plans
 - Explain the "why" and "what", skip the "how" unless requested
@@ -158,7 +157,7 @@ If search appears multiple times, add more context. Copy character-for-character
 
 **Before editing multiple files**: If there are multiple valid implementation approaches with different trade-offs, use select_option to clarify which approach the user prefers.""",
 
-    "task_lists_pattern": """## Task Lists (Edit mode)
+    "task_lists_pattern": """## Task Lists
 For multi-file edit sequences: `create_task_list` → `edit_file` → `complete_task(task_ids=[N,M,...])` (batch completions). Don't complete failed/rejected edits. Use `show_task_list` if lost. Don't paste task lists in responses; don't show after completing unless asked.
 
 Single task: `complete_task(task_id=0)`
@@ -205,7 +204,7 @@ Not every question needs code exploration.""",
 3. Include brief descriptions for each option
 4. Proceed based on user selection
 
-This works in any mode (edit, plan).""",
+This works in any mode.""",
 
     "tool_preferences": """## Tool Preferences
 
@@ -261,24 +260,9 @@ Keeps test files separate from production code and easy to clean up.""",
 }
 
 
-# Mode-specific sections for main agent
+# Mode section for main agent
 
-MODE_SECTIONS = {
-    "plan": """## Current mode: Plan
-
-**Important:** No code in explanations — describe what/where/why, not how
-
-Use read-only tools plus `create_file` for plan documents. Workflow:
-1. Explore and understand requirements
-2. Identify components and relationships
-3. **Clarify trade-offs** - Use select_option when multiple valid approaches exist with different trade-offs
-4. Propose architectural approach
-5. End with '## Summary of Changes' (bullet list of what changes)
-6. Ask: 'Do you approve this plan? Reply with yes/approve to proceed.'
-
-Keep plans concise: bullet points, high-level approach, no code snippets unless asked.""",
-
-    "edit": """## Current mode: Edit
+MODE_SECTION = """## Current mode: Edit
 
 **Important:** Explain changes conceptually, show code only in edit tools
 
@@ -288,88 +272,14 @@ Workflow:
 3. **Check for trade-offs** - If multiple valid approaches exist, use select_option to clarify
 4. Proceed with edits
 
-Show code only when using `edit_file`/`create_file` tools. Keep text explanations concise.""",
+When the user asks for a plan (e.g. "plan this out", "what's involved", "before you start"):
+- Explore and understand requirements first
+- Propose a structured plan with bullet points: what changes, where, and why
+- Highlight trade-offs and ambiguities using select_option
+- End with a summary of the proposed changes
+- Ask: 'Do you approve this plan?' before proceeding with edits
 
-}
-
-
-# Plan type sections for Plan mode
-
-PLAN_TYPE_SECTIONS = {
-    "feature": """## Plan type: Feature
-
-Focus on adding new functionality, creative solutions, and implementing requested features.
-
-**Planning Approach:**
-- Propose innovative approaches while considering existing architecture
-- Consider extensibility and future maintenance when suggesting implementations
-- Identify new components, modules, or classes needed
-- Plan integration points with existing code
-- Consider edge cases and error handling for new features
-- **Use select_option** when multiple valid approaches have different trade-offs
-
-**Emphasis:**
-- Creative problem-solving
-- Feature completeness
-- User experience considerations
-- Backward compatibility where relevant
-- Testing strategies for new functionality""",
-
-    "refactor": """## Plan type: Refactor
-
-Focus on improving code structure, organization, and maintainability without changing functionality.
-
-**Planning Approach:**
-- Identify code smells, duplication, and violations of SOLID principles
-- Propose applying appropriate design patterns
-- Improve naming conventions and code organization
-- Suggest breaking down complex functions into smaller, focused units
-- Plan reorganization of modules and dependencies
-
-**Emphasis:**
-- Maintain identical behavior (no functional changes)
-- Code readability and clarity
-- Maintainability and extensibility
-- Reducing technical debt
-- Preserving all existing functionality""",
-
-    "debug": """## Plan type: Debug
-
-Focus on identifying, diagnosing, and troubleshooting issues through systematic investigation.
-
-**Planning Approach:**
-- Perform systematic analysis to understand the root cause of the issue
-- Propose diagnostic steps and debugging strategies
-- Identify reproduction steps and conditions that trigger the problem
-- Plan verification steps to confirm the diagnosis
-- Consider potential side effects and edge cases
-
-**Emphasis:**
-- Systematic investigation and root cause analysis
-- Understanding the underlying behavior and logic
-- Identifying failure points and error conditions
-- Diagnostic clarity and reproducibility
-- Clear description of the issue, symptoms, and potential causes""",
-
-    "optimize": """## Plan type: Optimize
-
-Focus on improving performance, efficiency, and resource usage.
-
-**Planning Approach:**
-- Analyze bottlenecks and performance hotspots
-- Identify algorithmic improvements (time/space complexity)
-- Reduce computational overhead and memory usage
-- Propose caching strategies where appropriate
-- Plan measurements and benchmarks to validate improvements
-- **Use select_option** to clarify optimization priorities (speed vs memory vs maintainability)
-
-**Emphasis:**
-- Proven performance improvements (avoid premature optimization)
-- Algorithmic efficiency over micro-optimizations
-- Resource usage (memory, CPU, I/O)
-- Measurable improvements with benchmarks
-- Trade-offs between performance and maintainability""",
-}
+Show code only when using `edit_file`/`create_file` tools. Keep text explanations concise."""
 
 
 # Sub-agent specific sections (research-focused, read-only tools passed via function calling)
@@ -682,22 +592,13 @@ def _build_context_section() -> str:
     )
 
 
-def build_system_prompt(mode: str, plan_type: str = None) -> str:
-    """Build system prompt for main agent (plan/edit modes).
-
-    Args:
-        mode: Interaction mode ('plan' or 'edit')
-        plan_type: Plan type ('feature', 'refactor', 'debug', or 'optimize'),
-                   only used when mode == 'plan'
+def build_system_prompt() -> str:
+    """Build system prompt for main agent.
 
     Returns:
         Complete system prompt string
     """
-    if mode not in MODE_SECTIONS:
-        raise ValueError(f"Unknown mode: {mode}. Must be one of {list(MODE_SECTIONS.keys())}")
-    
-    if mode == "plan" and plan_type and plan_type not in PLAN_TYPE_SECTIONS:
-        raise ValueError(f"Unknown plan_type: {plan_type}. Must be one of {list(PLAN_TYPE_SECTIONS.keys())}")
+
     
     # Base section keys in display order — filtered by tool availability
     _base_keys = [
@@ -733,11 +634,7 @@ def build_system_prompt(mode: str, plan_type: str = None) -> str:
         sections.append(vault_section)
 
     # Mode section
-    sections.append(MODE_SECTIONS[mode])
-
-    # Add plan type section if in plan mode and plan_type is specified
-    if mode == "plan" and plan_type:
-        sections.append(PLAN_TYPE_SECTIONS[plan_type])
+    sections.append(MODE_SECTION)
 
     return "\n\n".join(sections)
 

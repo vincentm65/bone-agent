@@ -36,12 +36,11 @@ def _get_version() -> str:
         return "?.?.?"
 
 
-def display_startup_banner(approve_mode: str, interaction_mode: str = "edit", *, clear_screen: bool = False):
+def display_startup_banner(approve_mode: str, *, clear_screen: bool = False):
     """Ultra-minimalist startup screen for bone-agent.
 
     Args:
         approve_mode: Current approval mode setting.
-        interaction_mode: Current interaction mode ('plan' or 'edit').
         clear_screen: If True, clear the terminal before rendering.
     """
     if clear_screen:

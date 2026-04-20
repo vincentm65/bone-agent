@@ -71,7 +71,7 @@ except Exception as e:
     _logger.debug("Obsidian tools not loaded: %s", e)
 
 # Tool schema exports (now in helpers/base.py, merged from definitions.py)
-from .helpers.base import TOOLS, _tools_for_mode
+from .helpers.base import TOOLS
 
 __all__ = [
     # Command execution
@@ -96,7 +96,6 @@ __all__ = [
     'constants',
     # Tool definitions
     'TOOLS',
-    '_tools_for_mode',
 ]
 
 # =============================================================================
@@ -109,7 +108,6 @@ from .helpers import (
     tool,
     build_context,
     get_tool_schemas,
-    get_tools_for_mode,
     get_terminal_policy,
     TERMINAL_NONE,
     TERMINAL_YIELD,
@@ -145,9 +143,7 @@ _base_module.__dict__.update({
     'tool': tool,
     'build_context': build_context,
     'get_tool_schemas': get_tool_schemas,
-    'get_tools_for_mode': get_tools_for_mode,
     'TOOLS': TOOLS,
-    '_tools_for_mode': _tools_for_mode,
 })
 sys.modules['tools.base'] = _base_module
 
@@ -195,7 +191,6 @@ from .helpers.loader import (
     load_plugin_tools,
     load_all_tools,
     list_registered_tools,
-    list_tools_for_mode,
 )
 _loader_module.__dict__.update({
     'discover_tools': discover_tools,
@@ -203,7 +198,6 @@ _loader_module.__dict__.update({
     'load_plugin_tools': load_plugin_tools,
     'load_all_tools': load_all_tools,
     'list_registered_tools': list_registered_tools,
-    'list_tools_for_mode': list_tools_for_mode,
 })
 sys.modules['tools.loader'] = _loader_module
 

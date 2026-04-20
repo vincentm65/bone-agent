@@ -15,13 +15,11 @@ from .base import (
     tool,
     build_context,
     get_tool_schemas,
-    get_tools_for_mode,
     get_terminal_policy,
     TERMINAL_NONE,
     TERMINAL_YIELD,
     TERMINAL_STOP,
     TOOLS,
-    _tools_for_mode,
 )
 
 # File operation helpers
@@ -54,7 +52,6 @@ from .loader import (
     load_plugin_tools,
     load_all_tools,
     list_registered_tools,
-    list_tools_for_mode,
 )
 
 # Plugin manifest for on-demand tool discovery
@@ -74,13 +71,11 @@ __all__ = [
     'tool',
     'build_context',
     'get_tool_schemas',
-    'get_tools_for_mode',
     'get_terminal_policy',
     'TERMINAL_NONE',
     'TERMINAL_YIELD',
     'TERMINAL_STOP',
     'TOOLS',
-    '_tools_for_mode',
     # File operation helpers
     '_is_reserved_windows_name',
     'GitignoreFilter',
@@ -100,7 +95,6 @@ __all__ = [
     'load_plugin_tools',
     'load_all_tools',
     'list_registered_tools',
-    'list_tools_for_mode',
     # Plugin manifest
     'PluginManifest',
     'plugin_manifest',

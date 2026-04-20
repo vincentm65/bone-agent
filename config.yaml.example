@@ -23,12 +23,7 @@ GEMINI_API_KEY: "your-gemini-key-here"
 GEMINI_MODEL: gemini-1.5-flash
 GEMINI_API_BASE: "https://generativelanguage.googleapis.com/v1beta"
 
-# Zhipu AI (GLM) - Coding plan
-GLM_PLAN_API_KEY: "your-glm-key-here"
-GLM_PLAN_MODEL: glm-4-flash
-GLM_PLAN_API_BASE: "https://open.bigmodel.cn/api/paas/v4"
-
-# Zhipu AI (GLM) - API plan
+# Zhipu AI (GLM)
 GLM_API_KEY: "your-glm-key-here"
 GLM_MODEL: glm-4-flash
 GLM_API_BASE: "https://open.bigmodel.cn/api/paas/v4"
@@ -43,12 +38,7 @@ KIMI_API_KEY: "your-kimi-key-here"
 KIMI_MODEL: moonshot-v1-8k
 KIMI_API_BASE: "https://api.moonshot.cn/v1"
 
-# MiniMax (Anthropic-compatible API) - Coding plan
-MINIMAX_PLAN_API_KEY: "your-minimax-key-here"
-MINIMAX_PLAN_MODEL: "MiniMax-M2"
-MINIMAX_PLAN_API_BASE: "https://api.minimax.io/anthropic/v1"
-
-# MiniMax - API plan
+# MiniMax (Anthropic-compatible API)
 MINIMAX_API_KEY: "your-minimax-key-here"
 MINIMAX_MODEL: "MiniMax-M2"
 MINIMAX_API_BASE: "https://api.minimax.io/anthropic/v1"

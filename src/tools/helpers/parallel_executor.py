@@ -164,14 +164,12 @@ class ParallelToolExecutor:
                 if tool.requires_approval:
                     # Build context from context dict
                     cm = context.get('chat_manager')
-                    interaction_mode = getattr(cm, 'interaction_mode', 'edit') if cm else 'edit'
 
                     tool_context = build_context(
                         repo_root=context.get('repo_root'),
                         console=context.get('console'),
                         gitignore_spec=context.get('gitignore_spec'),
                         debug_mode=context.get('debug_mode', False),
-                        interaction_mode=interaction_mode,
                         chat_manager=cm,
                         rg_exe_path=context.get('rg_exe_path'),
                         panel_updater=context.get('panel_updater'),
@@ -194,14 +192,12 @@ class ParallelToolExecutor:
                 # Normal execution for tools without approval
                 # Build context from context dict
                 cm = context.get('chat_manager')
-                interaction_mode = getattr(cm, 'interaction_mode', 'edit') if cm else 'edit'
 
                 tool_context = build_context(
                     repo_root=context.get('repo_root'),
                     console=context.get('console'),
                     gitignore_spec=context.get('gitignore_spec'),
                     debug_mode=context.get('debug_mode', False),
-                    interaction_mode=interaction_mode,
                     chat_manager=cm,
                     rg_exe_path=context.get('rg_exe_path'),
                     panel_updater=context.get('panel_updater'),

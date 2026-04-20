@@ -411,7 +411,7 @@ def main():
         console.print("[red]Failed to start local server![/red]")
         return
 
-    display_startup_banner(chat_manager.approve_mode, chat_manager.interaction_mode, clear_screen=True)
+    display_startup_banner(chat_manager.approve_mode, clear_screen=True)
 
     # Start cron scheduler (background thread for scheduled jobs)
     cron_scheduler = None
@@ -448,33 +448,13 @@ def main():
     bindings = setup_common_bindings(chat_manager)
 
     def get_prompt(chat_manager):
-        """Return colored prompt based on current mode."""
-        if chat_manager.interaction_mode == "plan":
-            prompt_text = Text.assemble(
-                (" Plan", "bold #5F9EA0"),
-                (" > ", "white")
-            )
-        elif chat_manager.interaction_mode == "edit":
-            prompt_text = Text.assemble(
-                (" Edit", "#6B8E23"),
-                (" > ", "white")
-            )
-        else:
-            prompt_text = Text.assemble(
-                (" Learn", "magenta"),
-                (" > ", "white")
-            )         
+        """Return colored prompt."""
+        prompt_text = Text.assemble(
+            (" > ", "white")
+        )         
         with console.capture() as capture:
             console.print(prompt_text, end="")
         return ANSI(capture.get())
-
-    @bindings.add('tab')
-    def toggle_mode(event):
-        """Toggle between Plan and Edit modes (blocked during thinking)."""
-        if INPUT_BLOCKED.get('blocked', False):
-            return
-        chat_manager.toggle_interaction_mode()
-        event.app.invalidate()
 
     @bindings.add('escape', 'escape')
     def clear_input(event):

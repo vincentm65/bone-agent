@@ -38,8 +38,6 @@ class ChatManager:
         self.server_process: Optional[subprocess.Popen] = None
         self._log_file: Optional[IO] = None  # Track llama_server log file handle
         self.approve_mode = "safe"
-        self.interaction_mode = "edit"  # Default to edit mode
-        self.plan_type = "feature"  # Default plan type (for plan interaction mode)
         self.token_tracker = TokenTracker()
         self.context_token_estimate = 0
         # In-session, memory-only task list (used in EDIT workflows)
@@ -92,7 +90,7 @@ class ChatManager:
         if self.markdown_logger:
             self.markdown_logger.start_session()
 
-        # Start with system prompt only (uses current self.interaction_mode)
+        # Start with system prompt only
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
 
         # Add agents.md as initial user/assistant exchange (only if it exists in cwd)
@@ -121,17 +119,12 @@ class ChatManager:
         self._update_context_tokens()
         self.context_token_estimate = self.token_tracker.current_context_tokens
 
-        # NOTE: interaction_mode is NOT reset - it persists across /clear
-
     def _build_system_prompt(self) -> str:
-        """Build system prompt with mode-specific rules."""
-        if self.interaction_mode == "plan":
-            return build_system_prompt(self.interaction_mode, plan_type=self.plan_type)
-        else:
-            return build_system_prompt(self.interaction_mode)
+        """Build system prompt."""
+        return build_system_prompt()
 
     def update_system_prompt(self):
-        """Rebuild system prompt after mode change."""
+        """Rebuild system prompt (e.g. after session reset)."""
         if not self.messages:
             raise RuntimeError("Cannot update system prompt: messages array is empty")
 
@@ -188,8 +181,8 @@ class ChatManager:
                 self.context_token_estimate = message_tokens
                 return
             else:
-                from tools import _tools_for_mode
-                tools = _tools_for_mode(self.interaction_mode)
+                from tools import TOOLS
+                tools = TOOLS()
 
         if tools:
             # Use character-based approximation for Anthropic (tiktoken doesn't support Claude)
@@ -1287,16 +1280,11 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         return None
 
     def cycle_approve_mode(self) -> str:
-        """Cycle to next approval mode (for Edit mode) or plan type (for Plan mode).
+        """Cycle to next approval mode.
 
         Returns:
-            str: The new approval mode or plan type.
+            str: The new approval mode.
         """
-        # In Plan mode, cycle plan types instead of approval modes
-        if self.interaction_mode == "plan":
-            return self.cycle_plan_type()
-
-        # In Edit/Learn mode, cycle approval modes
         from llm.config import CYCLEABLE_APPROVE_MODES
         modes = CYCLEABLE_APPROVE_MODES
         try:
@@ -1305,59 +1293,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             next_index = 0
         self.approve_mode = modes[next_index]
         return self.approve_mode
-
-    def cycle_plan_type(self) -> str:
-        """Cycle to next plan type (for Plan interaction mode).
-
-        Returns:
-            str: The new plan type.
-        """
-        from llm.config import PLAN_TYPES
-        modes = PLAN_TYPES
-        try:
-            next_index = (modes.index(self.plan_type) + 1) % len(modes)
-        except ValueError:
-            next_index = 0
-        self.plan_type = modes[next_index]
-        # Update system prompt to reflect new plan type
-        if self.interaction_mode == "plan":
-            self.update_system_prompt()
-            # Sync conversation log to reflect plan type changes
-            self.sync_log()
-        return self.plan_type
-
-    def toggle_interaction_mode(self) -> str:
-        """Toggle between plan/edit modes.
-
-        Returns:
-            str: The new interaction mode.
-        """
-        modes = ("edit", "plan")
-        current_index = modes.index(self.interaction_mode)
-        self.interaction_mode = modes[(current_index + 1) % len(modes)]
-        self.update_system_prompt()
-        # Sync conversation log to reflect mode changes
-        self.sync_log()
-        return self.interaction_mode
-
-    def set_interaction_mode(self, mode: str) -> str:
-        """Set interaction mode to a specific value.
-
-        Args:
-            mode: The desired mode ('edit' or 'plan').
-
-        Returns:
-            str: The new interaction mode.
-        """
-        modes = ("edit", "plan")
-        if mode not in modes:
-            raise ValueError(f"Invalid mode '{mode}'. Must be one of {modes}")
-        if mode == self.interaction_mode:
-            return self.interaction_mode
-        self.interaction_mode = mode
-        self.update_system_prompt()
-        self.sync_log()
-        return self.interaction_mode
 
     def reset_session(self):
         """Reset chat session (clear messages and task list).

@@ -48,7 +48,6 @@ def _validate_create_path(
         },
         "required": ["path_str"]
     },
-    allowed_modes=["edit", "plan"]
 )
 def create_file(
     path_str: str,
