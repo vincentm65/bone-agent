@@ -1,6 +1,5 @@
 """Interactive selection tool for presenting multiple-choice questions to the user."""
 
-import asyncio
 from html import escape as _html_escape
 from threading import Timer
 from typing import Optional, List, Dict, Any, Union
@@ -49,6 +48,7 @@ class SelectionPanel:
         # Inline custom input editing state
         self._editing_custom_input = False
         self._custom_input_texts: Dict[int, str] = {}  # question_idx -> typed text
+        self._auto_advance_timer: Optional[Timer] = None  # Track for cancellation
 
         # Multi-select state: per-question set of checked option indices
         self._checked_indices: Dict[int, set] = {
@@ -265,7 +265,8 @@ class SelectionPanel:
             # Single question - show summary then auto-exit
             self._showing_summary = True
             event.app.invalidate()
-            Timer(1.0, lambda: event.app.exit(result=self.selections[0])).start()
+            self._auto_advance_timer = Timer(1.0, lambda: event.app.exit(result=self.selections[0]))
+            self._auto_advance_timer.start()
         else:
             # Multi-question - advance or finish
             if self.current_question_idx < len(self.questions) - 1:
@@ -275,7 +276,8 @@ class SelectionPanel:
             else:
                 self._showing_summary = True
                 event.app.invalidate()
-                Timer(1.0, lambda: event.app.exit(result=self.selections)).start()
+                self._auto_advance_timer = Timer(1.0, lambda: event.app.exit(result=self.selections))
+                self._auto_advance_timer.start()
 
     def run(self) -> Optional[Union[str, List[str]]]:
         """Display the selection panel and wait for user input.
@@ -401,6 +403,9 @@ class SelectionPanel:
                 event.app.invalidate()
             else:
                 # Cancel entire selection
+                if self._auto_advance_timer:
+                    self._auto_advance_timer.cancel()
+                    self._auto_advance_timer = None
                 event.app.exit(result=None)
 
         # Printable character input for custom input editing
@@ -465,8 +470,10 @@ class SelectionPanel:
             style=TOOLBAR_STYLE,
         )
 
-        # Use run_async with asyncio to properly await coroutines
-        result = asyncio.run(application.run_async())
+        # Use prompt_toolkit's synchronous runner — avoids creating/destroying
+        # an event loop with asyncio.run(), which corrupts the parent
+        # PromptSession's event loop state and causes 100% CPU hangs.
+        result = application.run()
 
         return result
 

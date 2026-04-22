@@ -380,7 +380,7 @@ class AgenticOrchestrator:
             self.chat_manager.log_message(response)
 
             # NEW: Compact tool results after final answer (per-message compaction)
-            self.chat_manager.compact_tool_results()
+            self.chat_manager.compact_tool_results(skip_token_update=True)
 
             # Update context tokens with current mode's tools
             tools_for_mode = TOOLS()
@@ -596,6 +596,9 @@ class AgenticOrchestrator:
                 self.chat_manager.messages.append(tool_msg)
                 # Log tool result
                 self.chat_manager.log_message(tool_msg)
+
+        # Compact completed tool blocks once after all tools complete
+        self.chat_manager.compact_tool_results(skip_token_update=True)
 
         # Update context tokens with current mode's tools
         tools_for_mode = TOOLS()
@@ -834,6 +837,10 @@ class AgenticOrchestrator:
                     # Log tool result
                     self.chat_manager.log_message(tool_msg)
 
+            # Mid-loop compaction: compact older completed tool blocks
+            # after all parallel results are appended (safe — only compacts completed blocks)
+            self.chat_manager.compact_tool_results(skip_token_update=True)
+
             # Update context tokens with current mode's tools
             tools_for_mode = TOOLS()
             self.chat_manager._update_context_tokens(tools_for_mode)
@@ -1015,6 +1022,10 @@ class AgenticOrchestrator:
 
                 return False, str(result)
             except Exception as e:
+                # If thinking_indicator was paused (TERMINAL_YIELD) and tool
+                # raised, resume it so the spinner reappears for the next iteration
+                if policy == TERMINAL_YIELD and thinking_indicator:
+                    thinking_indicator.resume()
                 return False, f"Error executing tool '{function_name}': {str(e)}"
 
         return False, f"Error: Unknown tool '{function_name}'."

@@ -97,7 +97,8 @@ CONTEXT_SETTINGS:
   conversations_dir: conversations
   tool_compaction:
     enable_per_message_compaction: true
-    keep_recent_tool_blocks: 3
+    uncompacted_tail_tokens: 40000
+    min_tool_blocks: 5
     compact_failed_tools: true
 
 # -- Sub-Agent Settings -------------------------------------------------------

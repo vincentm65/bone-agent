@@ -68,7 +68,8 @@ class FileSettings:
 class ToolCompactionSettings:
     """Per-message tool result compaction settings."""
     enable_per_message_compaction: bool = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("enable_per_message_compaction", True))
-    keep_recent_tool_blocks: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("keep_recent_tool_blocks", 3))
+    uncompacted_tail_tokens: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("uncompacted_tail_tokens", 40_000))
+    min_tool_blocks: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("min_tool_blocks", 5))
     compact_failed_tools: bool = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("compact_failed_tools", True))
 
 

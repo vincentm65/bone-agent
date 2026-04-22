@@ -422,8 +422,13 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             on_text="ON", off_text="OFF",
         ),
         SettingOption(
-            key="keep_recent_tool_blocks", text="Keep Recent Tool Blocks",
-            value=context_settings.tool_compaction.keep_recent_tool_blocks,
+            key="uncompacted_tail_tokens", text="Uncompacted Tail Tokens",
+            value=context_settings.tool_compaction.uncompacted_tail_tokens,
+            input_type="number",
+        ),
+        SettingOption(
+            key="min_tool_blocks", text="Min Tool Blocks Preserved",
+            value=context_settings.tool_compaction.min_tool_blocks,
             input_type="number",
         ),
     ]
@@ -482,16 +487,19 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             context_settings.tool_compaction.enable_per_message_compaction = value
             state = "enabled" if value else "disabled"
             change_lines.append(f"  Per-Message Tool Compaction: {state}")
-        elif key == "keep_recent_tool_blocks":
-            context_settings.tool_compaction.keep_recent_tool_blocks = int(value)
-            change_lines.append(f"  Keep Recent Tool Blocks: {value}")
+        elif key == "uncompacted_tail_tokens":
+            context_settings.tool_compaction.uncompacted_tail_tokens = int(value)
+            change_lines.append(f"  Uncompacted Tail Tokens: {value:,}")
+        elif key == "min_tool_blocks":
+            context_settings.tool_compaction.min_tool_blocks = int(value)
+            change_lines.append(f"  Min Tool Blocks Preserved: {value}")
         elif key in sb_labels:
             sb_changes[key] = value
             state = "ON" if value else "OFF"
             change_lines.append(f"  {sb_labels[key]}: {state}")
 
     # Persist context setting changes to config
-    ctx_changes = {k: v for k, v in changes.items() if k in ("compact_trigger_tokens", "enable_tool_compaction", "keep_recent_tool_blocks")}
+    ctx_changes = {k: v for k, v in changes.items() if k in ("compact_trigger_tokens", "enable_tool_compaction", "uncompacted_tail_tokens", "min_tool_blocks")}
     if ctx_changes:
         try:
             cfg_data = config_manager.load(force_reload=True)
@@ -503,8 +511,10 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
                 cfg_data["CONTEXT_SETTINGS"]["compact_trigger_tokens"] = int(ctx_changes["compact_trigger_tokens"])
             if "enable_tool_compaction" in ctx_changes:
                 cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["enable_per_message_compaction"] = ctx_changes["enable_tool_compaction"]
-            if "keep_recent_tool_blocks" in ctx_changes:
-                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["keep_recent_tool_blocks"] = int(ctx_changes["keep_recent_tool_blocks"])
+            if "uncompacted_tail_tokens" in ctx_changes:
+                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["uncompacted_tail_tokens"] = int(ctx_changes["uncompacted_tail_tokens"])
+            if "min_tool_blocks" in ctx_changes:
+                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["min_tool_blocks"] = int(ctx_changes["min_tool_blocks"])
             config_manager.save(cfg_data)
         except Exception as e:
             console.print(f"[red]Failed to save context settings: {e}[/red]")

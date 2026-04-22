@@ -1,10 +1,10 @@
 {
-  "name": "bone-agent-cli",
-  "version": "1.2.2",
+  "name": "bone-agent",
+  "version": "1.3.1",
   "description": "A terminal-based AI coding assistant powered by OpenAI-style function calling",
   "main": "src/ui/main.py",
   "bin": {
-    "bone-agent": "bin/npm-wrapper.js"
+    "bone": "bin/npm-wrapper.js"
   },
   "files": [
     "package.json",
@@ -18,7 +18,7 @@
     "src/**/*.py"
   ],
   "scripts": {
-    "postinstall": "echo 'bone-agent installed! Run with: bone-agent'",
+    "postinstall": "echo 'bone-agent installed! Run with: bone'",
     "start": "node bin/npm-wrapper.js"
   },
   "keywords": [
@@ -29,18 +29,19 @@
     "function-calling",
     "python",
     "gpt",
-    "claude"
+    "claude",
+    "bone-agent"
   ],
   "author": "Vincent Miranda <vincentmiranda65@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vincentm65/bone-agent-cli.git"
+    "url": "git+https://github.com/vincentm65/bone-agent.git"
   },
   "bugs": {
-    "url": "https://github.com/vincentm65/bone-agent-cli/issues"
+    "url": "https://github.com/vincentm65/bone-agent/issues"
   },
-  "homepage": "https://github.com/vincentm65/bone-agent-cli",
+  "homepage": "https://github.com/vincentm65/bone-agent",
   "engines": {
     "node": ">=14.0.0"
   },

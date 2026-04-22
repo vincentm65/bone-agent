@@ -383,7 +383,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
     # ===== Tool Result Compaction =====
 
-    def _find_tool_blocks(self):
+    def _find_tool_blocks(self, include_in_flight=False):
         """Find all tool-result blocks in message history.
 
         Handles both single-turn and multi-turn tool chains:
@@ -393,6 +393,12 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         In multi-turn chains, all tool_calls and tool_results are merged into
         a single block spanning from the first assistant(tool_calls) to the
         final assistant(answer).
+
+        Args:
+            include_in_flight: If True, also return blocks that lack a final
+                assistant answer (in-flight tool chains). The 'end' field points
+                to the index after the last message in the chain (or the breaking
+                message index if the chain was interrupted).
 
         Returns:
             list: List of block dicts with keys: user_idx, start, end, tool_calls, tool_results
@@ -441,14 +447,25 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                         # Non-tool, non-assistant message breaks the chain
                         break
 
-                if found_end and all_tool_calls:
-                    blocks.append({
-                        'user_idx': user_idx,
-                        'start': block_start,
-                        'end': j,
-                        'tool_calls': all_tool_calls,
-                        'tool_results': all_tool_results
-                    })
+                if include_in_flight:
+                    if all_tool_calls:
+                        blocks.append({
+                            'user_idx': user_idx,
+                            'start': block_start,
+                            'end': j,
+                            'tool_calls': all_tool_calls,
+                            'tool_results': all_tool_results,
+                            'in_flight': not found_end,
+                        })
+                else:
+                    if found_end and all_tool_calls:
+                        blocks.append({
+                            'user_idx': user_idx,
+                            'start': block_start,
+                            'end': j,
+                            'tool_calls': all_tool_calls,
+                            'tool_results': all_tool_results,
+                        })
 
                 # Continue scanning from after the final answer (or after the chain)
                 # Guard: always advance at least one position to prevent infinite loops
@@ -616,16 +633,131 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             first = ", ".join(parts[:-1])
             return f"{first}, and {parts[-1]}."
 
-    def compact_tool_results(self):
-        """Replace completed tool-result blocks with summaries.
+    def _estimate_message_tokens(self, msg) -> int:
+        """Lightweight per-message token estimate for boundary calculation.
 
-        Runs after each completed tool sequence to keep context lean
-        without using AI for summarization.
+        Uses character-based estimation (~4 chars/token) to avoid the overhead
+        of full tiktoken encoding during boundary walks. Good enough for
+        determining where to split the uncompacted tail.
 
-        This is called after the LLM produces a final answer with no more tool calls.
+        Args:
+            msg: Message dict
+
+        Returns:
+            Estimated token count for this message
         """
-        # Skip compaction if locked (tools are actively being executed)
-        if self._compaction_locked:
+        text = self._collect_message_text(msg)
+        return (len(text) + CHAR_BASED_OVERHEAD) // 4
+
+    def _find_in_flight_boundary(self):
+        """Find the index where in-flight tool blocks begin.
+
+        Delegates to _find_tool_blocks(include_in_flight=True) to find all
+        blocks, then returns the earliest start of any in-flight block.
+        These messages must never be included in the compactable region.
+
+        Returns:
+            int: Index of the first in-flight message, or len(messages) if none.
+        """
+        all_blocks = self._find_tool_blocks(include_in_flight=True)
+        in_flight = [b for b in all_blocks if b.get('in_flight')]
+        if in_flight:
+            return min(b['user_idx'] for b in in_flight)
+        return len(self.messages)
+
+    def _compute_split_boundary(self, blocks, in_flight_start,
+                                uncompacted_tail_tokens=None, min_tool_blocks=None):
+        """Compute the message index where the uncompacted tail begins.
+
+        Three constraints determine the boundary (take the most conservative /
+        earliest index):
+        1. Token budget: accumulate from the end until uncompacted_tail_tokens
+        2. Minimum tool blocks: preserve at least min_tool_blocks completed blocks
+        3. Tool-call integrity: never split inside a tool block
+        4. In-flight boundary: never include in-flight tool messages
+
+        Args:
+            blocks: List of tool block dicts from _find_tool_blocks()
+            in_flight_start: Index of first in-flight message (from _find_in_flight_boundary)
+            uncompacted_tail_tokens: Override for the token budget (None = use settings)
+            min_tool_blocks: Override for minimum tool blocks to preserve (None = use settings)
+
+        Returns:
+            int: Message index where the uncompacted tail starts
+        """
+        tc = context_settings.tool_compaction
+        token_budget = uncompacted_tail_tokens if uncompacted_tail_tokens is not None else tc.uncompacted_tail_tokens
+        min_blocks = min_tool_blocks if min_tool_blocks is not None else tc.min_tool_blocks
+        n = len(self.messages)
+
+        # The verbatim region ends at the first in-flight message (exclusive)
+        verbatim_end = min(in_flight_start, n)
+
+        # Constraint 1: Token budget — walk from verbatim_end backward.
+        # Note: range stops at 1 (not 0) so the system prompt is never counted
+        # toward the budget — it is always preserved uncompacted.
+        tokens_accumulated = 0
+        token_boundary = 0
+        for i in range(verbatim_end - 1, 0, -1):
+            tokens_accumulated += self._estimate_message_tokens(self.messages[i])
+            if tokens_accumulated >= token_budget:
+                token_boundary = i
+                break
+        else:
+            # All messages fit within budget
+            token_boundary = 1
+
+        # Constraint 2: Minimum tool blocks — ensure at least min_blocks completed
+        # blocks are within the uncompacted tail. Take the min_blocks most recent
+        # completed blocks and set the boundary so they all fall at or after it.
+        min_block_boundary = 1
+        if min_blocks > 0 and len(blocks) >= min_blocks:
+            # Sort by end index descending (most recent first), take top min_blocks
+            sorted_blocks = sorted(blocks, key=lambda b: b['end'], reverse=True)
+            recent_blocks = sorted_blocks[:min_blocks]
+            # The boundary must be at or before the earliest user_idx of these blocks
+            # so that all of them satisfy user_idx >= boundary (i.e. block is fully in the tail)
+            min_block_boundary = min(b['user_idx'] for b in recent_blocks)
+
+        # Constraint 3: Tool-call integrity — if token_boundary lands inside a
+        # tool block, extend backward to include the complete block
+        integrity_boundary = token_boundary
+        for block in blocks:
+            if block['user_idx'] < token_boundary <= block['end']:
+                # Split would cut through this block — extend to include it
+                integrity_boundary = min(integrity_boundary, block['user_idx'])
+
+        # Take the most conservative (earliest) boundary
+        # integrity_boundary <= token_boundary always (starts equal, only decreases)
+        boundary = integrity_boundary
+        if min_block_boundary < boundary:
+            boundary = min_block_boundary
+
+        return boundary
+
+    def compact_tool_results(self, skip_token_update=False,
+                              uncompacted_tail_tokens=None, min_tool_blocks=None):
+        """Replace completed tool-result blocks with summaries using token-budget tail.
+
+        Walks messages from the end, accumulating tokens until ~40k tokens are
+        reached. Everything before that boundary gets compacted (completed tool
+        blocks replaced with summary lines). Always preserves at least
+        min_tool_blocks completed blocks regardless of token budget.
+
+        Safe to call mid-loop (during tool execution) because it only compacts
+        completed tool blocks — in-flight blocks are never touched.
+
+        Args:
+            skip_token_update: If True, skip the internal _update_context_tokens()
+                call. Use when the caller will update tokens with mode-specific
+                tools immediately after.
+            uncompacted_tail_tokens: Override for the token budget (None = use settings).
+                Use for aggressive compaction with a smaller tail.
+            min_tool_blocks: Override for minimum tool blocks to preserve (None = use settings).
+                Use for aggressive compaction with fewer preserved blocks.
+        """
+        # Skip if disabled (e.g. sub-agents preserving findings)
+        if self._compaction_disabled:
             return
 
         if not context_settings.tool_compaction.enable_per_message_compaction:
@@ -635,38 +767,48 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         if len(self.messages) < 6:  # Minimum: user+assistant+tool+assistant+user+assistant
             return
 
-        # Find tool-result blocks
+        # Find completed tool-result blocks
         blocks = self._find_tool_blocks()
 
         if not blocks:
             return
 
-        # Keep recent N blocks intact
-        keep_verbatim = blocks[-context_settings.tool_compaction.keep_recent_tool_blocks:]
-        blocks_to_compact = blocks[:-context_settings.tool_compaction.keep_recent_tool_blocks]
+        # Find where in-flight tool blocks begin (if any)
+        in_flight_start = self._find_in_flight_boundary()
+
+        # Compute the split boundary using token budget + constraints
+        split_boundary = self._compute_split_boundary(
+            blocks, in_flight_start,
+            uncompacted_tail_tokens=uncompacted_tail_tokens,
+            min_tool_blocks=min_tool_blocks,
+        )
+
+        # Determine which blocks fall entirely before the split boundary
+        # (those are the ones to compact)
+        blocks_to_compact = [
+            b for b in blocks
+            if b['end'] < split_boundary
+        ]
 
         if not blocks_to_compact:
             return
 
-        # Track token counts before
-        tokens_before = self._count_tokens(self.messages)
-
-        # Replace old blocks with summaries
+        # Build the new message list
         new_messages = []
         processed_indices = set()
 
         for i, msg in enumerate(self.messages):
             if i in processed_indices:
-                continue  # Skip messages that were compacted
+                continue
 
-            # Check if this is start of a block to compact
-            block_start = next((b for b in blocks_to_compact if b['start'] == i), None)
+            # Check if this is the start of a block to compact
+            block = next((b for b in blocks_to_compact if b['start'] == i), None)
 
-            if block_start:
+            if block:
                 # Check if any tool in this block failed
                 skip_compaction = False
                 if not context_settings.tool_compaction.compact_failed_tools:
-                    for tool_result in block_start['tool_results']:
+                    for tool_result in block['tool_results']:
                         exit_code = extract_exit_code(tool_result)
                         if exit_code is not None and exit_code != 0:
                             skip_compaction = True
@@ -674,35 +816,36 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
                 if skip_compaction:
                     # Keep this block as-is
-                    for idx in range(block_start['user_idx'], block_start['end'] + 1):
+                    for idx in range(block['user_idx'], block['end'] + 1):
                         new_messages.append(self.messages[idx])
                         processed_indices.add(idx)
                     continue
 
-                # Generate summary
+                # Generate summary and replace block
                 summary = self._generate_tool_block_summary(
-                    block_start['tool_calls'],
-                    block_start['tool_results']
+                    block['tool_calls'],
+                    block['tool_results']
                 )
 
                 # Add user question with summary appended
-                user_msg = self.messages[block_start['user_idx']].copy()
+                user_msg = self.messages[block['user_idx']].copy()
                 user_msg['content'] = user_msg['content'] + f"\n\n[Context: {summary}]"
                 new_messages.append(user_msg)
 
                 # Add final assistant answer
-                new_messages.append(self.messages[block_start['end']])
+                new_messages.append(self.messages[block['end']])
 
-                # Mark all indices as processed (including user question)
-                processed_indices.add(block_start['user_idx'])
-                for idx in range(block_start['start'], block_start['end'] + 1):
+                # Mark all indices as processed
+                processed_indices.add(block['user_idx'])
+                for idx in range(block['start'], block['end'] + 1):
                     processed_indices.add(idx)
             else:
                 # Keep this message as-is
                 new_messages.append(msg)
 
         self.messages = new_messages
-        self._update_context_tokens()
+        if not skip_token_update:
+            self._update_context_tokens()
 
     # ===== AI-Based History Compaction =====
 
@@ -939,13 +1082,12 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         # If compaction is NOT locked, try layers 1 and 2
         if not self._compaction_locked:
             # Layer 1: Aggressive tool result compaction (non-LLM, fast)
-            # Temporarily reduce keep_recent_tool_blocks to 1
-            original_keep = context_settings.tool_compaction.keep_recent_tool_blocks
-            try:
-                context_settings.tool_compaction.keep_recent_tool_blocks = 1
-                self.compact_tool_results()
-            finally:
-                context_settings.tool_compaction.keep_recent_tool_blocks = original_keep
+            # Use very small token budget and min blocks for aggressive compaction
+            self.compact_tool_results(
+                skip_token_update=True,
+                uncompacted_tail_tokens=10_000,
+                min_tool_blocks=1,
+            )
 
             self._update_context_tokens()
             current_tokens = self.token_tracker.current_context_tokens
