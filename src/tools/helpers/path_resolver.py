@@ -107,24 +107,30 @@ class PathResolver:
             # Resolve to absolute path (handles .. and symlinks)
             path = path.resolve()
 
-            # Step 2b: Security boundary — path must be within repo_root or vault_path
+            # Step 2b: Security boundary — path must be within repo_root, vault_path,
+            # or the agent's own data directory (~/.bone/).
             if enforce_boundary:
                 try:
                     path.relative_to(self.repo_root)
                 except ValueError:
-                    if self.vault_path is not None:
-                        try:
-                            path.relative_to(self.vault_path)
-                        except ValueError:
+                    # Check ~/.bone/ — agent data dir is always accessible
+                    bone_root = Path.home() / ".bone"
+                    try:
+                        path.relative_to(bone_root)
+                    except ValueError:
+                        if self.vault_path is not None:
+                            try:
+                                path.relative_to(self.vault_path)
+                            except ValueError:
+                                elapsed = time.time() - start_time
+                                _track_validation_error("outside_allowed_roots")
+                                _path_resolution_times.append(elapsed)
+                                return None, f"Path is outside allowed directories: {path_str}"
+                        else:
                             elapsed = time.time() - start_time
-                            _track_validation_error("outside_allowed_roots")
+                            _track_validation_error("outside_repo")
                             _path_resolution_times.append(elapsed)
-                            return None, f"Path is outside allowed directories: {path_str}"
-                    else:
-                        elapsed = time.time() - start_time
-                        _track_validation_error("outside_repo")
-                        _path_resolution_times.append(elapsed)
-                        return None, f"Path is outside repository: {path_str}"
+                            return None, f"Path is outside repository: {path_str}"
 
             # Step 3: Check existence if required
             if must_exist:
