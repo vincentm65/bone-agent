@@ -507,6 +507,7 @@ def main():
                 thinking_indicator.start()
                 INPUT_BLOCKED['blocked'] = True
                 try:
+                    console.print("─" * console.width, style="rgb(30,30,30)")
                     console.print()  # Extra newline after user input to separate from LLM response
                     # Add user message
                     if TOOLS_ENABLED:

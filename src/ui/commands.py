@@ -1,6 +1,8 @@
 """Command routing and help display."""
 
+import os
 import re
+import subprocess
 from dataclasses import dataclass
 from typing import Optional
 from llm import config
@@ -2721,6 +2723,30 @@ _COMMAND_HANDLERS = {
 }
 
 
+def _handle_shell_command(console, command):
+    """Execute a shell command prefixed with : and display output."""
+    from utils.settings import tool_settings
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-c", command], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=tool_settings.command_timeout_sec,
+        )
+        output = ((result.stdout or "") + (result.stderr or "")).strip() or "(no output)"
+        lines = output.splitlines()
+        if len(lines) > 200:
+            output = "\n".join(lines[:100]) + f"\n\n... ({len(lines) - 200} lines omitted) ...\n\n" + "\n".join(lines[-100:])
+        console.print()
+        if result.returncode != 0:
+            console.print(f"[red]exit code: {result.returncode}[/red]")
+        console.print(output)
+        console.print()
+    except subprocess.TimeoutExpired:
+        console.print(f"[red]Command timed out after {tool_settings.command_timeout_sec}s[/red]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+    return CommandResult(status="handled")
+
+
 def process_command(chat_manager, user_input, console, debug_mode_container, cron_scheduler=None):
     """Process command and optionally return replacement content.
 
@@ -2740,6 +2766,14 @@ def process_command(chat_manager, user_input, console, debug_mode_container, cro
     parts = user_input.split(maxsplit=1)
     cmd = parts[0].lower()
     args = parts[1] if len(parts) > 1 else None
+
+    # Shell command prefix (:command)
+    if user_input.startswith(":"):
+        shell_cmd = user_input[1:].strip()
+        if shell_cmd:
+            result = _handle_shell_command(console, shell_cmd)
+            return (result.status, result.replacement_input)
+        return ("handled", None)
 
     # Look up handler in registry
     handler = _COMMAND_HANDLERS.get(cmd)

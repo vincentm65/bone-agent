@@ -70,6 +70,7 @@ def show_help_table(console):
     table.add_row("[bold #5F9EA0]/tools[/bold #5F9EA0] [list|enable|disable|enable-group|disable-group]", "Toggle tools or groups (e.g. file_ops, task_mgmt)")
     table.add_row("[bold #5F9EA0]/setup[/bold #5F9EA0]", "Re-run the first-run setup wizard")
     table.add_row("[bold #5F9EA0]/cron[/bold #5F9EA0] [list|add|remove|enable|disable|run]", "Manage scheduled cron jobs")
+    table.add_row("[bold #5F9EA0]:[/bold #5F9EA0]<command>", "Run a shell command (e.g. :git status)")
 
 
     console.print(Panel(table, title="[bold #5F9EA0]Commands[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
