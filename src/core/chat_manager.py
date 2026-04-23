@@ -1485,12 +1485,14 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         if self.markdown_logger:
             self.markdown_logger.log_message(message)
 
-        # Always log user messages to JSONL for dream memory processing
+        # Log user messages to JSONL for dream memory processing (only if memory enabled)
         if message.get("role") == "user" and message.get("content"):
-            self.user_message_logger.log_user_message(
-                message["content"],
-                project_dir=Path.cwd().resolve(),
-            )
+            from llm.config import MEMORY_SETTINGS
+            if MEMORY_SETTINGS.get("enabled", True):
+                self.user_message_logger.log_user_message(
+                    message["content"],
+                    project_dir=Path.cwd().resolve(),
+                )
 
     def sync_log(self):
         """Rewrite the entire conversation log to match current message state.

@@ -389,6 +389,12 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
                 {"value": "danger", "text": "DANGER"},
             ],
         ),
+        SettingOption(
+            key="memory_enabled", text="Memory",
+            value=config.MEMORY_SETTINGS.get("enabled", True),
+            input_type="boolean",
+            on_text="ON", off_text="OFF",
+        ),
     ]
 
     # Build status bar settings
@@ -488,6 +494,10 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
                 console.print("[bold red on default]  Dangerous git commands are still blocked.[/bold red on default]")
                 console.print("[bold yellow on default]  Use at your own risk![/bold yellow on default]")
                 console.print()
+        elif key == "memory_enabled":
+            config.update_memory_settings({"enabled": value})
+            state = "enabled" if value else "disabled"
+            change_lines.append(f"  Memory: {state}")
         elif key == "compact_trigger_tokens":
             context_settings.compact_trigger_tokens = int(value)
             change_lines.append(f"  Compaction Threshold: {value:,} tokens")
@@ -538,6 +548,17 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             config_manager.save(cfg_data)
         except Exception as e:
             console.print(f"[red]Failed to save status bar settings: {e}[/red]")
+
+    # Persist memory setting to config
+    if "memory_enabled" in changes:
+        try:
+            cfg_data = config_manager.load(force_reload=True)
+            if "MEMORY_SETTINGS" not in cfg_data:
+                cfg_data["MEMORY_SETTINGS"] = {}
+            cfg_data["MEMORY_SETTINGS"]["enabled"] = changes["memory_enabled"]
+            config_manager.save(cfg_data)
+        except Exception as e:
+            console.print(f"[red]Failed to save memory settings: {e}[/red]")
 
     # Display summary
     console.print(f"[green]Settings updated:[/green]")

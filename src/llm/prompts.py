@@ -155,8 +155,12 @@ def _build_memory_section() -> str | None:
     No writing instructions — memory files are read-only during conversations.
     All writes happen through the dream cron job.
 
-    Returns None if MemoryManager is not initialized.
+    Returns None if MemoryManager is not initialized or memory is disabled.
     """
+    from llm.config import MEMORY_SETTINGS
+    if not MEMORY_SETTINGS.get("enabled", True):
+        return None
+
     try:
         from core.memory import MemoryManager
         manager = MemoryManager.get_instance()

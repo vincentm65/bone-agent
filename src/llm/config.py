@@ -354,7 +354,7 @@ def reload_config():
     
     Note: This is a manual operation - call after config changes.
     """
-    global _CONFIG, _provider_registry_cache, _cached_provider, PROVIDER_REGISTRY, LLM_PROVIDER, STATUS_BAR_SETTINGS
+    global _CONFIG, _provider_registry_cache, _cached_provider, PROVIDER_REGISTRY, LLM_PROVIDER, STATUS_BAR_SETTINGS, MEMORY_SETTINGS
     _CONFIG = _load_config()
     _provider_registry_cache = None
     _cached_provider = None
@@ -363,6 +363,8 @@ def reload_config():
     LLM_PROVIDER = _get_provider()
     # Rebuild status bar settings
     STATUS_BAR_SETTINGS = _build_status_bar_settings()
+    # Rebuild memory settings
+    MEMORY_SETTINGS = _build_memory_settings()
 
 
 def _build_status_bar_settings():
@@ -377,8 +379,27 @@ def _build_status_bar_settings():
     }
 
 
+def _build_memory_settings():
+    """Build MEMORY_SETTINGS dict from current _CONFIG."""
+    ms = _CONFIG.get("MEMORY_SETTINGS", {})
+    return {
+        "enabled": ms.get("enabled", True),
+    }
+
+
+def update_memory_settings(settings_dict):
+    """Update MEMORY_SETTINGS at runtime.
+
+    Returns:
+        Updated MEMORY_SETTINGS dict
+    """
+    global MEMORY_SETTINGS
+    MEMORY_SETTINGS.update(settings_dict)
+    return MEMORY_SETTINGS
+
+
 def update_status_bar_settings(settings_dict):
-    """Update STATUS_BAR_SETTINGS at runtime and persist to config.
+    """Update STATUS_BAR_SETTINGS at runtime.
 
     Args:
         settings_dict: Dict of settings to update (e.g., {"show_cost": False})
@@ -426,6 +447,8 @@ __all__ = [
     "reload_config",
     "STATUS_BAR_SETTINGS",
     "update_status_bar_settings",
+    "MEMORY_SETTINGS",
+    "update_memory_settings",
 ]
 
 
@@ -444,6 +467,9 @@ WEB_SEARCH_REQUIRE_CONFIRMATION = False
 
 # Status bar configuration
 STATUS_BAR_SETTINGS = _build_status_bar_settings()
+
+# Memory configuration
+MEMORY_SETTINGS = _build_memory_settings()
 
 # Tool approval modes
 APPROVE_MODES = ("safe", "accept_edits", "danger")

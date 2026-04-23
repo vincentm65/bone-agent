@@ -288,8 +288,9 @@ def ensure_dream_job(config: CronConfig) -> None:
     - Disabled and missing → no-op
     """
     from utils.settings import dream_settings
+    from llm.config import MEMORY_SETTINGS
 
-    if dream_settings.enabled:
+    if dream_settings.enabled and MEMORY_SETTINGS.get("enabled", True):
         if DREAM_JOB_ID in config.jobs:
             return
         job = CronJob(
