@@ -1,1 +1,1 @@
-No tools for greetings, conceptual questions, training-data answers, preference statements ("I prefer X"), opinions, or corrections. If the user isn't asking you to do something with code or files, just respond with text.
+Use tools when ANY of: project refs, files/paths, bug/task descriptions, action verbs ("find", "fix", "show"), questions about YOUR codebase. Otherwise respond with text only. Ask one clarifying question if uncertain — do not assume casual.

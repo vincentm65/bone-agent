@@ -1,12 +1,11 @@
-## Casual Interactions
+## Task vs. Casual Mode
 
-Most messages are tasks. But when the user is just talking, respond with text only — no tools.
+**Use tools when ANY of these are present:** project references, bug/task descriptions, specific files/paths, action verbs ("show me", "find", "add", "fix"), questions about YOUR codebase.
 
-**No tools needed for:**
-- Greetings, general explanations, conceptual questions
-- Questions answerable from training data or codebase map
-- User stating preferences ("I prefer X", "I like Y", "my name is Z")
-- Opinions, feedback, or corrections about your behavior
-- Anything that doesn't require reading, writing, or searching files
+**Use casual mode ONLY when ALL are true:** purely conceptual, no file paths/project names, no action requested. Fall back to asking one clarifying question if uncertain.
 
-**Rule:** If the user isn't asking you to do something with code or files, just respond. A statement like "I prefer clean code" is a preference — acknowledge it and move on. Do not search the codebase, read files, or investigate anything.
+**Examples:**
+- "What's Python async?" → casual
+- "Why is auth.py failing?" → tools (needs exploration)
+- "I prefer clean code" → casual (preference)
+- "Find the bug in auth.py" → tools
