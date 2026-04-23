@@ -2,7 +2,6 @@
 
 import logging
 import re
-import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -10,8 +9,9 @@ from typing import Optional
 
 from .helpers.base import tool
 from .helpers.formatters import format_tool_result
-from .shell import _prepare_execution_environment, run_shell_command
+from .shell import _execute_direct_command, _prepare_execution_environment
 from .helpers.converters import coerce_bool, coerce_int
+from utils.settings import tool_settings
 
 logger = logging.getLogger(__name__)
 
@@ -166,66 +166,67 @@ def rg(
     if not isinstance(pattern, str) or not pattern.strip():
         return "exit_code=1\nrg requires a non-empty 'pattern' argument."
 
-    # Build rg command from arguments
-    cmd_parts = ["rg"]
+    # Build rg args as a list (bypass string roundtrip to avoid shlex issues with regex metacharacters)
+    args = []
 
     # Add --line-number for content mode
     if output_mode == "content":
-        cmd_parts.append("--line-number")
+        args.append("--line-number")
 
     # Add multiline flag
     multiline = coerce_bool(kwargs.get("multiline"), default=False)
     if multiline:
-        cmd_parts.append("-U")
-        cmd_parts.append("--multiline-dotall")
+        args.append("-U")
+        args.append("--multiline-dotall")
 
     # Add case insensitive flag
     case_insensitive = coerce_bool(kwargs.get("case_insensitive"), default=False)
     if case_insensitive:
-        cmd_parts.append("--ignore-case")
+        args.append("--ignore-case")
 
     # Add context lines flag
     context_lines = coerce_int(kwargs.get("context_lines"))[0] if kwargs.get("context_lines") else None
     if context_lines:
-        cmd_parts.append(f"--context={context_lines}")
+        args.append(f"--context={context_lines}")
 
     # Add glob pattern
     if glob:
-        cmd_parts.append(f"--glob={glob}")
+        args.append(f"--glob={glob}")
 
     # Add file type filter
     file_type = kwargs.get("type")
     if file_type:
-        cmd_parts.append(f"--type={file_type}")
+        args.append(f"--type={file_type}")
 
-    # Add files-with-matches flag for count mode
+    # Add output mode flags
     if output_mode == "files_with_matches":
-        cmd_parts.append("--files-with-matches")
+        args.append("--files-with-matches")
     elif output_mode == "count":
-        cmd_parts.append("--count")
+        args.append("--count")
 
-    # Add pattern - quote if it contains spaces
-    if " " in pattern:
-        cmd_parts.append(shlex.quote(pattern))
-    else:
-        cmd_parts.append(pattern)
+    # Pattern and search path — no quoting needed, subprocess list form bypasses shell
+    args.append(pattern)
 
-    # Add path (default to current directory)
     search_path = path or "."
-    cmd_parts.append(search_path)
-
-    # Build command string
-    command = " ".join(cmd_parts)
+    args.append(search_path)
 
     # Get max_matches from kwargs (default: 100, set to 0 for no limit)
     raw = coerce_int(kwargs.get("max_matches"))[0] if kwargs.get("max_matches") is not None else None
     max_matches = raw if raw is not None and raw >= 0 else 100
 
-    # Execute repo search
+    # Execute repo search directly (no string→shlex roundtrip)
     try:
-        repo_result = run_shell_command(
-            command, repo_root, rg_exe_path, console, debug_mode, gitignore_spec,
-            max_matches=max_matches
+        env = _prepare_execution_environment(repo_root, rg_exe_path)
+
+        result = _execute_direct_command(
+            [str(rg_exe_path)] + args,
+            repo_root, env, debug_mode, console,
+        )
+
+        command_display = "rg " + " ".join(args)
+        repo_result = format_tool_result(
+            result, command=command_display, is_rg=True,
+            debug_mode=debug_mode, max_matches=max_matches,
         )
     except Exception as e:
         return f"exit_code=1\nrg command failed: {str(e)}"
@@ -324,7 +325,7 @@ def _search_vault(vault_root, rg_exe_path, output_mode, debug_mode, console,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=tool_settings.command_timeout_sec,
             cwd=str(vault_path),
             env=env,
         )
