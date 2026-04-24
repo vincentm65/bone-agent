@@ -139,7 +139,7 @@ def _validate_directory_path(
         check_gitignore=False,  # Directory listing shows everything
         must_exist=True,
         must_be_dir=True,  # Must be a directory
-        enforce_boundary=vault_path is not None
+        enforce_boundary=True
     )
 
     if error:

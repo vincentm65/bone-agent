@@ -7,6 +7,7 @@ and read-only tools to execute generic delegated tasks.
 from pathlib import Path
 
 from core.chat_manager import ChatManager
+from exceptions import LLMError
 from llm.prompts import build_sub_agent_prompt
 from utils.settings import sub_agent_settings
 
@@ -104,13 +105,7 @@ def _load_codebase_map(chat_manager):
             "Use this as a reference when exploring the codebase.\n\n"
             f"## Codebase Map (auto-generated from agents.md)\n\n{map_content}"
         )
-        assistant_msg = (
-            "I've received the codebase map. I'll use this as a reference when "
-            "exploring the repository, but I'll always verify current state by "
-            "reading files and searching the codebase before making changes."
-        )
         chat_manager.messages.append({"role": "user", "content": user_msg})
-        chat_manager.messages.append({"role": "assistant", "content": assistant_msg})
 
 
 def _configure_isolation(chat_manager):
@@ -187,9 +182,6 @@ def run_sub_agent(
     if initial_context:
         temp_chat_manager.messages.append(
             {"role": "user", "content": initial_context}
-        )
-        temp_chat_manager.messages.append(
-            {"role": "assistant", "content": "I've received the context. I'll analyze it and use the available tools to gather additional information as needed."}
         )
 
     # Import here to avoid circular import with core.agentic
@@ -273,6 +265,17 @@ def run_sub_agent(
         )
     except HardLimitExceeded:
         hard_limit_exceeded = True
+    except LLMError as e:
+        return {
+            "result": "",
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            },
+            "model": temp_chat_manager.client.model,
+            "error": str(e)
+        }
     except Exception as e:
         import traceback
         error_details = f"{e}\n\nTraceback:\n{traceback.format_exc()}"

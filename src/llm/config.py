@@ -32,6 +32,7 @@ ENV_API_KEYS = {
     'MINIMAX_PLAN_API_KEY': os.environ.get('MINIMAX_PLAN_API_KEY'),
     'MINIMAX_API_KEY': os.environ.get('MINIMAX_API_KEY'),
     'BONE_PROXY_API_KEY': os.environ.get('BONE_PROXY_API_KEY'),
+    'CODEX_PLAN_API_KEY': os.environ.get('CODEX_PLAN_API_KEY'),
 }
 
 # Detect platform for llama.cpp paths
@@ -72,6 +73,24 @@ def _load_config():
 
 
 _CONFIG = _load_config()
+
+
+def _get_codex_token() -> str:
+    """Read access token from Codex CLI's cached auth (~/.codex/auth.json).
+
+    Returns the access_token if available, empty string otherwise.
+    Codex CLI stores OAuth tokens here after `codex login`.
+    """
+    try:
+        auth_path = Path.home() / ".codex" / "auth.json"
+        if not auth_path.exists():
+            return ""
+        import json
+        data = json.loads(auth_path.read_text(encoding="utf-8"))
+        return data.get("tokens", {}).get("access_token", "")
+    except Exception:
+        return ""
+
 
 # Cache for provider registry (built once at module load)
 _provider_registry_cache = None
@@ -134,8 +153,8 @@ def _get_provider_registry():
             },
             "default_temperature": 0.1,
             "default_top_p": 0.9,
-            "allow_top_p": True,
-            "allow_temperature": True,
+            "allow_top_p": False,
+            "allow_temperature": False,
             "cost_in": 0.0,
             "cost_out": 0.0
         },
@@ -310,6 +329,22 @@ def _get_provider_registry():
             "allow_top_p": True,
             "allow_temperature": True,
             **_model_cost("KIMI_MODEL"),
+        },
+        "codex_plan": {
+            "type": "api",
+            "api_key": _CONFIG.get("CODEX_PLAN_API_KEY", "") or _get_codex_token(),
+            "model": _CONFIG.get("CODEX_PLAN_MODEL", "gpt-5.4-mini"),
+            "api_base": _CONFIG.get("CODEX_PLAN_API_BASE", "https://chatgpt.com/backend-api/codex"),
+            "endpoint": "/responses",
+            "error_prefix": "Codex",
+            "config_keys": {
+                "CODEX_PLAN_API_KEY": "",
+                "CODEX_PLAN_MODEL": "",
+                "CODEX_PLAN_API_BASE": "https://chatgpt.com/backend-api/codex",
+            },
+            "allow_temperature": False,
+            "allow_top_p": False,
+            **_model_cost("CODEX_PLAN_MODEL"),
         },
         "bone": {
             "type": "api",

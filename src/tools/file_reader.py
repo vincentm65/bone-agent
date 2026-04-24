@@ -34,7 +34,7 @@ def _validate_read_path(
         check_gitignore=True,
         must_exist=True,
         must_be_file=True,
-        enforce_boundary=vault_path is not None,
+        enforce_boundary=True,
     )
 
 

@@ -184,7 +184,7 @@ def _resolve_repo_path(path_str, repo_root, gitignore_spec=None, vault_root=None
         check_gitignore=not skip_gitignore,
         must_exist=True,
         must_be_file=False,  # We'll check this separately
-        enforce_boundary=vault_path is not None,
+        enforce_boundary=True,
     )
 
     if error:

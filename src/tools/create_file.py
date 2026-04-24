@@ -33,7 +33,7 @@ def _validate_create_path(
         path_str,
         check_gitignore=True,
         must_exist=False,  # File doesn't need to exist yet
-        enforce_boundary=vault_path is not None,
+        enforce_boundary=True,
     )
 
 

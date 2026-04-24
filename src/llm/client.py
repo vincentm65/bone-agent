@@ -127,8 +127,13 @@ class LLMClient:
                     self.handler.parse_stream(response)
                 )
             else:
-                response_json = response.json()
-                return self.handler.parse_response(response_json)
+                try:
+                    response_json = response.json()
+                    return self.handler.parse_response(response_json)
+                except ValueError:
+                    if hasattr(self.handler, "parse_sse_response"):
+                        return self.handler.parse_sse_response(response.text)
+                    raise
 
         except requests.exceptions.RequestException as e:
             raise LLMConnectionError(

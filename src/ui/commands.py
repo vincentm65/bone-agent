@@ -2461,6 +2461,12 @@ def _handle_cd(chat_manager, console, debug_mode_container, args, cron_scheduler
     except Exception:
         pass
 
+    # Rebuild system prompt so project root stays current
+    try:
+        chat_manager.update_system_prompt()
+    except Exception:
+        pass
+
     return CommandResult(status="handled")
 
 

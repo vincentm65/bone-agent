@@ -15,6 +15,57 @@ from .file_helpers import _is_reserved_windows_name
 _path_resolution_times = []
 _path_validation_errors = {}
 
+# Session-scoped filesystem access flag
+# When True, boundary enforcement is skipped — agent can access any path.
+_full_filesystem_access = False
+
+# Boundary error prefixes — used by both resolve_and_validate() and is_boundary_error().
+_BOUNDARY_ERROR_PREFIXES = (
+    "Path is outside allowed directories:",
+    "Path is outside repository:",
+)
+
+
+def has_full_filesystem_access() -> bool:
+    """Check if full filesystem access has been granted this session."""
+    return _full_filesystem_access
+
+
+def set_full_filesystem_access(enabled: bool):
+    """Grant or revoke full filesystem access for this session."""
+    global _full_filesystem_access
+    _full_filesystem_access = enabled
+
+
+def _boundary_error_line(result: str) -> Optional[tuple[str, str]]:
+    """Return the boundary prefix and message line from a tool result."""
+    if not result:
+        return None
+
+    for line in result.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("error:"):
+            stripped = stripped[len("error:"):].strip()
+        for prefix in _BOUNDARY_ERROR_PREFIXES:
+            if stripped.startswith(prefix):
+                return prefix, stripped
+    return None
+
+
+def is_boundary_error(result: str) -> bool:
+    """Check if a tool result is a path boundary violation."""
+    return _boundary_error_line(result) is not None
+
+
+def extract_boundary_path(result: str) -> str:
+    """Extract the offending path from a boundary error message."""
+    boundary_line = _boundary_error_line(result)
+    if not boundary_line:
+        return ""
+
+    prefix, line = boundary_line
+    return line[len(prefix):].strip()
+
 
 class PathResolver:
     """Centralized path resolution and validation.
@@ -109,7 +160,7 @@ class PathResolver:
 
             # Step 2b: Security boundary — path must be within repo_root, vault_path,
             # or the agent's own data directory (~/.bone/).
-            if enforce_boundary:
+            if enforce_boundary and not _full_filesystem_access:
                 try:
                     path.relative_to(self.repo_root)
                 except ValueError:
@@ -125,12 +176,12 @@ class PathResolver:
                                 elapsed = time.time() - start_time
                                 _track_validation_error("outside_allowed_roots")
                                 _path_resolution_times.append(elapsed)
-                                return None, f"Path is outside allowed directories: {path_str}"
+                                return None, f"{_BOUNDARY_ERROR_PREFIXES[0]} {path_str}"
                         else:
                             elapsed = time.time() - start_time
                             _track_validation_error("outside_repo")
                             _path_resolution_times.append(elapsed)
-                            return None, f"Path is outside repository: {path_str}"
+                            return None, f"{_BOUNDARY_ERROR_PREFIXES[1]} {path_str}"
 
             # Step 3: Check existence if required
             if must_exist:

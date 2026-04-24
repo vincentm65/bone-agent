@@ -152,7 +152,8 @@ class ConfigManager:
             'minimax': 'MINIMAX_MODEL',
             'minimax_plan': 'MINIMAX_PLAN_MODEL',
             'anthropic': 'ANTHROPIC_MODEL',
-            'kimi': 'KIMI_MODEL'
+            'kimi': 'KIMI_MODEL',
+            'codex_plan': 'CODEX_PLAN_MODEL'
         }
 
         if provider_name not in provider_keys:
@@ -182,7 +183,8 @@ class ConfigManager:
             'minimax': 'MINIMAX_API_KEY',
             'minimax_plan': 'MINIMAX_PLAN_API_KEY',
             'anthropic': 'ANTHROPIC_API_KEY',
-            'kimi': 'KIMI_API_KEY'
+            'kimi': 'KIMI_API_KEY',
+            'codex_plan': 'CODEX_PLAN_API_KEY'
         }
 
         if provider_name not in provider_keys:

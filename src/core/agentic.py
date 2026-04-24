@@ -46,6 +46,7 @@ from core.tool_feedback import (
     display_tool_feedback,
 )
 from ui.sub_agent_panel import SubAgentPanel
+from tools.helpers.path_resolver import extract_boundary_path, is_boundary_error, set_full_filesystem_access
 
 
 def _handle_empty_response(empty_response_count, console):
@@ -262,7 +263,21 @@ class AgenticOrchestrator:
                     continue
                 else:
                     # Non-retryable error or final attempt exhausted
+                    detail_lines = []
+                    for key, value in getattr(e, "details", {}).items():
+                        value_str = str(value)
+                        if "\n" in value_str or key == "original_error":
+                            detail_lines.append(f"{key}: {value_str}")
+                    detailed_error = str(e)
+                    if detail_lines:
+                        detailed_error += "\n\n" + "\n\n".join(detail_lines)
+
+                    if self.is_sub_agent:
+                        raise LLMError(detailed_error, details=getattr(e, "details", {}))
+
                     self.console.print(f"[red]LLM Error: {e}[/red]")
+                    if detail_lines:
+                        self.console.print(f"[dim]{detail_lines[0]}[/dim]", markup=False)
                     return None
 
             # Successful response — parse and return
@@ -357,6 +372,8 @@ class AgenticOrchestrator:
         # This must happen BEFORE filtering so the LLM sees its original intent
         content = (response.get("content") or "").strip()
         assistant_msg = {"role": "assistant", "tool_calls": tool_calls}
+        if response.get("_responses_output"):
+            assistant_msg["_responses_output"] = response["_responses_output"]
         if content:
             assistant_msg["content"] = content
         self.chat_manager.messages.append(assistant_msg)
@@ -795,6 +812,35 @@ class AgenticOrchestrator:
             # Restore console output
             self._parallel_context['console'] = self.console
 
+    def _boundary_prompt(self, path_str):
+        """Prompt the user to grant filesystem access for a path outside boundaries.
+
+        Called after a tool returns a boundary error. If the user grants access,
+        the caller retries the tool with the boundary lifted.
+
+        Args:
+            path_str: The path that triggered the boundary violation.
+
+        Returns:
+            True if user granted access, False if denied.
+        """
+        console = self._get_console()
+        if console is None:
+            return False
+
+        from ui.tool_confirmation import ToolConfirmationPanel
+        panel = ToolConfirmationPanel(
+            '<style fg="yellow" bold="true">Grant filesystem access</style>',
+            reason=f'Agent requested access outside project boundary: {path_str}',
+            is_edit_tool=False
+        )
+        action, _ = panel.run()
+
+        if action == "accept":
+            console.print("[yellow]Full filesystem access granted[/yellow]\n")
+            return True
+        return False
+
     def _process_single_tool_call(self, tool_call, thinking_indicator):
         """Process a single tool call.
 
@@ -916,6 +962,20 @@ class AgenticOrchestrator:
                     if policy == TERMINAL_YIELD and thinking_indicator:
                         thinking_indicator.resume()
 
+                # Boundary escalation: if the tool result is a path boundary
+                # violation, prompt the user to grant session-wide access.
+                result_str = str(result)
+                if is_boundary_error(result_str):
+                    path_arg = arguments.get("path", arguments.get("path_str", ""))
+                    if not path_arg:
+                        path_arg = extract_boundary_path(result_str)
+                    granted = self._boundary_prompt(path_arg)
+                    if granted:
+                        set_full_filesystem_access(True)
+                        # Retry with the boundary now lifted
+                        result = tool.execute(arguments, context)
+                        result_str = str(result)
+
                 # Display result for registry tools
                 # Skip display for tools that take over the terminal (they handle their own display)
                 if policy != TERMINAL_YIELD:
@@ -948,7 +1008,7 @@ class AgenticOrchestrator:
                             # Then display feedback
                             display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
 
-                return False, str(result)
+                return False, result_str
             except Exception as e:
                 # If thinking_indicator was paused (TERMINAL_YIELD) and tool
                 # raised, resume it so the spinner reappears for the next iteration
@@ -981,5 +1041,3 @@ def agentic_answer(chat_manager, user_input, console, repo_root, rg_exe_path, de
         debug_mode=debug_mode,
     )
     orchestrator.run(user_input, thinking_indicator)
-
-

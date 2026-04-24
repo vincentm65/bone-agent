@@ -264,6 +264,7 @@ def _build_vault_section(variant: str = "main") -> str | None:
 def _build_context_section() -> str:
     """Build a dynamic section with current date, time, and location."""
     from datetime import datetime
+    import os
 
     now = datetime.now()
     date_str = now.strftime("%A, %B %d, %Y")
@@ -274,6 +275,7 @@ def _build_context_section() -> str:
         "## Current Context\n\n"
         f"**Date:** {date_str}\n"
         f"**Time:** {time_str} ({timezone})\n"
+        f"**Working directory:** {os.getcwd()}\n"
     )
 
 
