@@ -1094,9 +1094,15 @@ def _handle_usage(chat_manager, console, debug_mode_container, args, cron_schedu
     console.print(f"  Output tokens: {tracker.total_completion_tokens:,}")
     console.print(f"  Total tokens:  {tracker.total_tokens:,}")
 
-    # Display cache token breakdown (if any cache tokens were recorded)
-    has_cache = tracker.total_cache_read_tokens > 0 or tracker.total_cache_creation_tokens > 0
-    if has_cache:
+    # Display cache token breakdown when cache tokens were recorded.
+    # Codex can report an explicit 0 cached_tokens value, which is still useful
+    # confirmation that prompt-cache usage data is flowing through.
+    show_cache = (
+        tracker.total_cache_read_tokens > 0
+        or tracker.total_cache_creation_tokens > 0
+        or current_provider == "codex"
+    )
+    if show_cache:
         total_cached = tracker.total_cache_read_tokens + tracker.total_cache_creation_tokens
         cache_hit_pct = (
             tracker.total_cache_read_tokens

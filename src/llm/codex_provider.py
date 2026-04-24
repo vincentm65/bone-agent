@@ -6,6 +6,7 @@ backend and adapts that protocol back into vmCode's OpenAI-style internal shape.
 """
 
 import copy
+import hashlib
 import json
 from typing import Any, Dict, Iterator, Optional
 
@@ -96,6 +97,11 @@ class CodexResponsesHandler:
             if model_name:
                 payload["model"] = model_name
 
+        if "prompt_cache_key" not in payload:
+            model = payload.get("model") or "unknown-model"
+            instructions_hash = hashlib.sha256(instructions.encode("utf-8")).hexdigest()[:16]
+            payload["prompt_cache_key"] = f"bone-agent:{model}:{instructions_hash}"
+
         if tools:
             payload["tools"] = [self._convert_tool_to_responses(tool) for tool in tools]
 
@@ -179,7 +185,7 @@ class CodexResponsesHandler:
                         if event_type == "response.completed":
                             resp = data.get("response", {})
                             if "usage" in resp:
-                                usage_data = dict(resp["usage"])
+                                usage_data = self._normalize_usage(resp["usage"])
 
                         if event_type == "response.output_text.delta":
                             delta = data.get("delta", "")
@@ -210,6 +216,9 @@ class CodexResponsesHandler:
 
     def _normalize_response(self, response_json: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize Responses output into Chat Completions message shape."""
+        raw_usage = response_json.get("usage", {})
+        usage = self._normalize_usage(raw_usage)
+
         output_items = response_json.get("output", [])
         content_parts = []
         tool_calls = []
@@ -256,8 +265,39 @@ class CodexResponsesHandler:
                 "message": message,
                 "finish_reason": "tool_calls" if tool_calls else "stop",
             }],
-            "usage": response_json.get("usage", {}),
+            "usage": usage,
         }
+
+    def _normalize_usage(self, usage: Any) -> Dict[str, Any]:
+        """Normalize Codex Responses usage into vmCode's OpenAI-style usage shape."""
+        if not isinstance(usage, dict):
+            return {}
+
+        normalized = dict(usage)
+
+        input_tokens = normalized.get("input_tokens")
+        output_tokens = normalized.get("output_tokens")
+
+        if normalized.get("prompt_tokens") is None and input_tokens is not None:
+            normalized["prompt_tokens"] = input_tokens
+        if normalized.get("completion_tokens") is None and output_tokens is not None:
+            normalized["completion_tokens"] = output_tokens
+        if normalized.get("total_tokens") is None:
+            prompt_tokens = normalized.get("prompt_tokens")
+            completion_tokens = normalized.get("completion_tokens")
+            if prompt_tokens is not None and completion_tokens is not None:
+                normalized["total_tokens"] = prompt_tokens + completion_tokens
+
+        input_details = normalized.get("input_tokens_details")
+        if isinstance(input_details, dict) and input_details.get("cached_tokens") is not None:
+            cached_tokens = input_details["cached_tokens"]
+            if normalized.get("prompt_tokens_details") is None:
+                normalized["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+            elif isinstance(normalized["prompt_tokens_details"], dict):
+                normalized["prompt_tokens_details"].setdefault("cached_tokens", cached_tokens)
+            normalized.setdefault("cached_tokens", cached_tokens)
+
+        return normalized
 
     def _normalize_json_schema(self, schema: Any) -> Any:
         """Normalize JSON Schema for strict Responses function tools."""
