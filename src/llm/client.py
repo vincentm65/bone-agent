@@ -131,7 +131,7 @@ class LLMClient:
                     response_json = response.json()
                     return self.handler.parse_response(response_json)
                 except ValueError:
-                    if hasattr(self.handler, "parse_sse_response"):
+                    if getattr(self.handler, "supports_sse_response_fallback", False):
                         return self.handler.parse_sse_response(response.text)
                     raise
 
