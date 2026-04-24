@@ -36,11 +36,15 @@ class ConfigManager:
             with open(self.config_path, 'r', encoding='utf-8-sig') as f:
                 self._cached_data = yaml.safe_load(f) or {}
 
-            # Migrate: rename old provider IDs -> bone (provider ID rename)
+            # Migrate legacy provider IDs to current names.
             old_provider = self._cached_data.get('LAST_PROVIDER')
             if old_provider in ('vmcode_proxy', 'vmcode_free', 'vmcode'):
                 logger.info("Migrating provider name '%s' -> 'bone'", old_provider)
                 self._cached_data['LAST_PROVIDER'] = 'bone'
+                self.save(self._cached_data, create_backup=True)
+            elif old_provider == 'codex_plan':
+                logger.info("Migrating provider name '%s' -> 'codex'", old_provider)
+                self._cached_data['LAST_PROVIDER'] = 'codex'
                 self.save(self._cached_data, create_backup=True)
 
             return self._cached_data
@@ -114,6 +118,7 @@ class ConfigManager:
         if model is None:
             provider_model_map = {
                 'bone': 'BONE_PROXY_MODEL',
+                'codex': 'CODEX_PLAN_MODEL',
                 'openrouter': 'OPENROUTER_MODEL',
                 'glm': 'GLM_MODEL',
                 'glm_plan': 'GLM_PLAN_MODEL',
@@ -144,6 +149,7 @@ class ConfigManager:
         provider_keys = {
             'local': 'LOCAL_MODEL_PATH',
             'bone': 'BONE_PROXY_MODEL',
+            'codex': 'CODEX_PLAN_MODEL',
             'openrouter': 'OPENROUTER_MODEL',
             'glm': 'GLM_MODEL',
             'glm_plan': 'GLM_PLAN_MODEL',
@@ -152,8 +158,7 @@ class ConfigManager:
             'minimax': 'MINIMAX_MODEL',
             'minimax_plan': 'MINIMAX_PLAN_MODEL',
             'anthropic': 'ANTHROPIC_MODEL',
-            'kimi': 'KIMI_MODEL',
-            'codex_plan': 'CODEX_PLAN_MODEL'
+            'kimi': 'KIMI_MODEL'
         }
 
         if provider_name not in provider_keys:
@@ -176,6 +181,7 @@ class ConfigManager:
         provider_keys = {
             'openrouter': 'OPENROUTER_API_KEY',
             'bone': 'BONE_PROXY_API_KEY',
+            'codex': 'CODEX_PLAN_API_KEY',
             'glm': 'GLM_API_KEY',
             'glm_plan': 'GLM_PLAN_API_KEY',
             'openai': 'OPENAI_API_KEY',
@@ -183,8 +189,7 @@ class ConfigManager:
             'minimax': 'MINIMAX_API_KEY',
             'minimax_plan': 'MINIMAX_PLAN_API_KEY',
             'anthropic': 'ANTHROPIC_API_KEY',
-            'kimi': 'KIMI_API_KEY',
-            'codex_plan': 'CODEX_PLAN_API_KEY'
+            'kimi': 'KIMI_API_KEY'
         }
 
         if provider_name not in provider_keys:

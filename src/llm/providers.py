@@ -700,7 +700,7 @@ HANDLER_REGISTRY = {
     "kimi": OpenAIHandler,
     "anthropic": AnthropicHandler,
     "local": OpenAIHandler,
-    "codex_plan": ResponsesHandler,
+    "codex": ResponsesHandler,
 }
 
 

@@ -330,7 +330,7 @@ def _get_provider_registry():
             "allow_temperature": True,
             **_model_cost("KIMI_MODEL"),
         },
-        "codex_plan": {
+        "codex": {
             "type": "api",
             "api_key": _CONFIG.get("CODEX_PLAN_API_KEY", "") or _get_codex_token(),
             "model": _CONFIG.get("CODEX_PLAN_MODEL", "gpt-5.4-mini"),
@@ -456,6 +456,14 @@ def get_providers():
     return list(PROVIDER_REGISTRY.keys())
 
 
+def get_provider_display_name(provider: str) -> str:
+    """Return the user-facing provider name for a provider key."""
+    display_names = {
+        "codex": "Codex",
+    }
+    return display_names.get(provider, provider.replace("_", " ").title())
+
+
 # ============================================================================
 # PROVIDER REGISTRY - Centralized provider configuration
 # ============================================================================
@@ -469,6 +477,7 @@ __all__ = [
     "CONFIG_PATH",
     "PROVIDER_REGISTRY",
     "get_providers",
+    "get_provider_display_name",
     "get_model_cost",
     "LLM_PROVIDER",
     "TOOLS_ENABLED",

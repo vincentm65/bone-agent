@@ -5,7 +5,7 @@ import re
 import stat
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from .helpers.base import tool
 from .helpers.formatters import format_tool_result
@@ -83,7 +83,7 @@ def _annotate_file_sizes(formatted_output: str, base_path: Path, output_mode: st
 
 @tool(
     name="rg",
-    description="Search files using ripgrep. Use for ALL code searches (never shell commands). Supports regex, glob/type filtering, and output modes: content, files_with_matches, or count.",
+    description="Search files using ripgrep. Use for ALL code searches (never shell commands). Supports regex, glob/type filtering, and output modes: content, files_with_matches, or count. Use 'path' for one file/directory or 'paths' for multiple files/directories; do not pass space-separated paths in 'path'.",
     parameters={
         "type": "object",
         "properties": {
@@ -93,7 +93,12 @@ def _annotate_file_sizes(formatted_output: str, base_path: Path, output_mode: st
             },
             "path": {
                 "type": "string",
-                "description": "File or directory to search (default: current directory)"
+                "description": "Single file or directory to search (default: current directory). Do not pass multiple space-separated paths here; use 'paths' instead."
+            },
+            "paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Multiple files or directories to search. Use this instead of space-separated values in 'path'. If set, 'paths' overrides 'path'."
             },
             "glob": {
                 "type": "string",
@@ -138,6 +143,7 @@ def rg(
     debug_mode: bool = False,
     gitignore_spec = None,
     path: Optional[str] = None,
+    paths: Optional[Sequence[str]] = None,
     glob: Optional[str] = None,
     output_mode: str = "files_with_matches",
     vault_root: Optional[str] = None,
@@ -153,7 +159,8 @@ def rg(
         chat_manager: ChatManager instance (injected by context)
         debug_mode: Whether debug mode is enabled (injected by context)
         gitignore_spec: PathSpec for .gitignore filtering (injected by context)
-        path: File or directory to search in (default: current directory)
+        path: Single file or directory to search in (default: current directory)
+        paths: Multiple files or directories to search; overrides path when set
         glob: Glob pattern to filter files
         output_mode: Output mode (content/files_with_matches/count)
         vault_root: Obsidian vault root path (injected by context)
@@ -204,11 +211,21 @@ def rg(
     elif output_mode == "count":
         args.append("--count")
 
-    # Pattern and search path — no quoting needed, subprocess list form bypasses shell
+    # Pattern and search paths — no quoting needed, subprocess list form bypasses shell
     args.append(pattern)
 
-    search_path = path or "."
-    args.append(search_path)
+    if paths is not None:
+        if not isinstance(paths, Sequence) or isinstance(paths, (str, bytes)):
+            return "exit_code=1\nrg 'paths' must be an array of path strings. Use 'path' for one path."
+        if not paths:
+            return "exit_code=1\nrg 'paths' must be a non-empty array. Omit 'paths' to search the current directory."
+        search_paths = [p for p in paths if isinstance(p, str) and p.strip()]
+        if len(search_paths) != len(paths):
+            return "exit_code=1\nrg 'paths' must contain only non-empty strings."
+    else:
+        search_paths = [path or "."]
+
+    args.extend(search_paths)
 
     # Get max_matches from kwargs (default: 100, set to 0 for no limit)
     raw = coerce_int(kwargs.get("max_matches"))[0] if kwargs.get("max_matches") is not None else None

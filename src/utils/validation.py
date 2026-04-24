@@ -167,6 +167,16 @@ def check_command(command):
     if command.lower().startswith("powershell"):
         return False, "nested powershell invocation"
 
+    # Multi-line shell scripts/heredocs are valid command payloads.
+    # Do not tokenize the full script here: tokenization can reject valid shell
+    # syntax before the shell sees it. Safety/approval checks happen upstream.
+    if "\n" in command:
+        for line in command.splitlines():
+            line = line.strip()
+            if line and line.lower().startswith("powershell"):
+                return False, "nested powershell invocation"
+        return True, None
+
     # Basic validation - ensure command has content
     tokens = _tokenize_segment(command)
     if not tokens:

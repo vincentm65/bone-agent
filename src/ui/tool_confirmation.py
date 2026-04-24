@@ -1,6 +1,7 @@
 """Interactive tool confirmation panel with arrow key navigation."""
 
 import asyncio
+from html import escape
 from threading import Timer
 from typing import Optional, Tuple
 from prompt_toolkit import HTML
@@ -50,6 +51,13 @@ class ToolConfirmationPanel:
         # Use appropriate options based on tool type
         self._options = self.EDIT_OPTIONS if is_edit_tool else self.STANDARD_OPTIONS
 
+    def _append_field(self, lines: list[str], label: str, value: object) -> None:
+        """Append an escaped single-line or multi-line field to the panel."""
+        escaped_lines = escape(str(value)).splitlines() or [""]
+        lines.append(f"<b>{escape(label)}:</b> {escaped_lines[0]}")
+        for continuation in escaped_lines[1:]:
+            lines.append(f"    {continuation}")
+
     def _get_display_text(self) -> HTML:
         """Get the formatted text to display.
 
@@ -66,14 +74,14 @@ class ToolConfirmationPanel:
 
             lines.append("<b>Selection Summary</b>")
             lines.append("")
-            lines.append(f"<b>Tool:</b> {self.tool_command}")
-            lines.append(f'<style fg="gray">  Selected: {str(selected_text)}</style>')
+            self._append_field(lines, "Tool", self.tool_command)
+            lines.append(f'<style fg="gray">  Selected: {escape(str(selected_text))}</style>')
             lines.append("")
         else:
             # Tool information
-            lines.append(f"<b>Tool:</b> {self.tool_command}")
+            self._append_field(lines, "Tool", self.tool_command)
             if self.reason:
-                lines.append(f"<b>Reason:</b> {self.reason}")
+                self._append_field(lines, "Reason", self.reason)
             lines.append("")
 
             # Render options
@@ -87,7 +95,7 @@ class ToolConfirmationPanel:
                     # Unselected option - dark grey
                     lines.append(f'<style fg="gray">  {text}</style>')
 
-            return HTML("\n".join(lines))
+        return HTML("\n".join(lines))
 
     def _exit_with_summary(self, event, result: str) -> None:
         """Show summary screen and exit application after delay.

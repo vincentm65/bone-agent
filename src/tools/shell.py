@@ -231,13 +231,13 @@ def run_shell_command(command, repo_root, rg_exe_path, console, debug_mode, giti
 
 @tool(
     name="execute_command",
-    description="Execute shell commands for git, system tasks, file ops, network, and package management. Runs from repo root. Use for git, ps, systemctl, rm, mv, cp, mkdir, ping, curl, wget, ssh, pacman, pip, npm, apt. Disallowed: rg, cat, ls, grep, find, head, tail, sed, awk, sort, uniq, wc, echo, touch, get-content, type, get-childitem, dir, new-item, set-content, add-content, tee. Use native tools instead.",
+    description="Execute shell commands for git, system tasks, file ops, network, and package management. Runs from repo root. Multi-line shell commands are supported and preserved exactly, including heredocs. Use for git, ps, systemctl, rm, mv, cp, mkdir, ping, curl, wget, ssh, pacman, pip, npm, apt. Disallowed: rg, cat, ls, grep, find, head, tail, sed, awk, sort, uniq, wc, echo, touch, get-content, type, get-childitem, dir, new-item, set-content, add-content, tee. Use native tools instead.",
     parameters={
         "type": "object",
         "properties": {
             "command": {
                 "type": "string",
-                "description": "Command to execute"
+                "description": "Shell command to execute from the repo root. May be a single-line command or a multi-line shell script/heredoc; newlines are preserved exactly."
             },
             "reason": {
                 "type": "string",
@@ -262,7 +262,7 @@ def execute_command(
     """Execute a shell command.
 
     Args:
-        command: Command string to execute
+        command: Command string to execute. May contain newlines/heredocs; preserved exactly for shell execution.
         repo_root: Repository root directory (injected by context)
         rg_exe_path: Path to rg executable (injected by context)
         console: Rich console for output (injected by context)

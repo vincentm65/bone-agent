@@ -9,7 +9,7 @@ import requests
 from typing import Optional, IO
 
 from llm.client import LLMClient
-from llm.config import get_providers, get_provider_config, reload_config
+from llm.config import get_providers, get_provider_config, get_provider_display_name, reload_config
 from llm.prompts import build_system_prompt
 from pathlib import Path
 from llm.token_tracker import TokenTracker
@@ -1326,7 +1326,8 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         """
         providers = get_providers()
         if provider_name not in providers:
-            return f"Invalid provider. Use /provider to list. Available: {', '.join(providers)}"
+            available = ', '.join(get_provider_display_name(provider) for provider in providers)
+            return f"Invalid provider. Use /provider to list. Available: {available}"
 
         previous_provider = self.client.provider
 
@@ -1342,10 +1343,13 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                     # Failed to start server - revert
                     self.client.switch_provider(previous_provider)
                     self._init_messages(reset_costs=True)
-                    return f"Failed to start local server. Reverted to {previous_provider} provider."
+                    previous_label = get_provider_display_name(previous_provider)
+                    return f"Failed to start local server. Reverted to {previous_label} provider."
                 self.server_process = server
-                return f"Switched to {provider_name} provider (server ready)."
-            return f"Switched to {provider_name} provider."
+                provider_label = get_provider_display_name(provider_name)
+                return f"Switched to {provider_label} provider (server ready)."
+            provider_label = get_provider_display_name(provider_name)
+            return f"Switched to {provider_label} provider."
         return "Provider switch failed."
 
     def reload_config(self):

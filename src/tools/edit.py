@@ -455,6 +455,7 @@ def edit_file(
     gitignore_spec = None,
     context_lines: int = 3,
     vault_root: str = None,
+    reason: str = None,
 ) -> str | Text:
     """Apply search/replace edit to a file.
 
@@ -468,6 +469,7 @@ def edit_file(
         gitignore_spec: PathSpec for .gitignore filtering (injected by context)
         context_lines: Number of context lines in diff
         vault_root: Obsidian vault root path (injected by context)
+        reason: Brief explanation shown during confirmation
 
     Returns:
         Edit result with diff
@@ -484,6 +486,8 @@ def edit_file(
         "replace": replace,
         "context_lines": context_lines,
     }
+    if reason:
+        arguments["reason"] = reason
 
     # Preview edit (confirmation workflow handled by orchestrator)
     try:

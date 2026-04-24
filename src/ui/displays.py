@@ -22,7 +22,7 @@ def show_provider_table(current_provider: str, console):
         else:
             status = "✅" if cfg.get("api_key") else "❌ (set API key)"
         active = " [green](active)[/green]" if provider == current_provider else ""
-        table.add_row(provider.capitalize(), status, f"{model[:40]}{active}")
+        table.add_row(config.get_provider_display_name(provider), status, f"{model[:40]}{active}")
 
     console.print(table)
 

@@ -665,11 +665,12 @@ def _open_provider_editor(chat_manager, console, provider):
             min_val=0.0, step=0.01,
         ))
 
-    category = SettingCategory(title=f"{provider.capitalize()} Settings", settings=settings)
+    provider_label = config.get_provider_display_name(provider)
+    category = SettingCategory(title=f"{provider_label} Settings", settings=settings)
 
     selector = SettingSelector(
         categories=[category],
-        title=f"Configure {provider.capitalize()}",
+        title=f"Configure {provider_label}",
     )
 
     changes = selector.run()
@@ -742,7 +743,8 @@ def _handle_provider(chat_manager, console, debug_mode_container, args, cron_sch
         # Validate provider name
         if provider not in config.get_providers():
             console.print(f"[red]Error: Unknown provider '{provider}'[/red]")
-            console.print(f"[dim]Available providers: {', '.join(config.get_providers())}[/dim]")
+            available = ', '.join(config.get_provider_display_name(prov) for prov in config.get_providers())
+            console.print(f"[dim]Available providers: {available}[/dim]")
             return CommandResult(status="handled")
 
         # Switch directly to the named provider
@@ -756,7 +758,7 @@ def _handle_provider(chat_manager, console, debug_mode_container, args, cron_sch
 
         cfg = config.get_provider_config(provider)
         model = cfg.get('model') or cfg.get('api_model') or ''
-        label = f"{provider.capitalize()}"
+        label = config.get_provider_display_name(provider)
         if model:
             label += f" ({model})"
         console.print(f"[green]Switched to {label}[/green]")
@@ -772,7 +774,7 @@ def _handle_provider(chat_manager, console, debug_mode_container, args, cron_sch
         for prov in config.get_providers():
             cfg = config.get_provider_config(prov)
             model = cfg.get('model') or cfg.get('api_model') or ''
-            entry = {"value": prov, "text": prov.capitalize()}
+            entry = {"value": prov, "text": config.get_provider_display_name(prov)}
             if model:
                 entry["description"] = model[:40]
             provider_options.append(entry)
