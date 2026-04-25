@@ -51,7 +51,7 @@ def _load_module_from_path(module_name: str, file_path: Path) -> Optional[object
 
         module = importlib.util.module_from_spec(spec)
 
-        # For user tools (not in src/utils/tools/), set package to None
+        # For external tool modules (not in src/tools/), set package to None
         # to force absolute imports instead of relative imports
         from tools import __file__ as tools_init_file
         tools_dir = Path(tools_init_file).parent
@@ -113,7 +113,7 @@ def discover_tools(directories: List[str]) -> int:
             # Create unique module name
             module_name = f"tools_{py_file.stem}_{hash(str(py_file)) & 0xFFFFFFFF}"
 
-            # Skip modules already loaded (e.g. cron re-calling load_all_tools)
+            # Skip modules already loaded (e.g. cron re-calling discover_tools)
             if module_name in sys.modules:
                 logger.debug(f"Module already loaded, skipping: {module_name}")
                 continue
@@ -131,92 +131,6 @@ def discover_tools(directories: List[str]) -> int:
     )
 
     return new_tools
-
-
-def load_builtin_tools() -> int:
-    """Load built-in tools from src/utils/tools/.
-
-    Returns:
-        Number of tools loaded
-
-    Note:
-        Built-in tools are already imported in __init__.py, which triggers
-        @tool decorator registration. This function returns the count of
-        currently registered built-in tools.
-    """
-    # Built-in tools are already imported in utils/tools/__init__.py
-    # which triggers @tool decorator registration.
-    # Just return the count of tools currently in registry.
-    return ToolRegistry.tool_count()
-
-
-def load_plugin_tools() -> int:
-    """Load plugin tools from tool_plugins/ directory.
-
-    Plugin modules are imported, which triggers @tool(tier="plugin") decorator
-    registration into the PluginManifest (NOT ToolRegistry). This keeps plugin
-    schemas out of the LLM context window until activated via search_plugins.
-
-    Returns:
-        Number of plugin modules loaded
-
-    Note:
-        - tool_plugins/ directory at repository root
-        - Plugin tools registered in PluginManifest, not ToolRegistry
-    """
-    from .plugin_manifest import plugin_manifest
-
-    # Get repository root (assumes we're in src/tools/helpers/)
-    current_dir = Path(__file__).parent
-    repo_root = current_dir.parent.parent.parent
-
-    # Define plugin tool directories
-    plugin_directories = [
-        str(repo_root / "tool_plugins"),
-    ]
-
-    # Discover tools in plugin directories
-    modules_loaded = discover_tools(plugin_directories)
-
-    logger.info(
-        f"Plugin manifest: {plugin_manifest.plugin_count()} plugins available "
-        f"(categories: {plugin_manifest.get_categories()})"
-    )
-
-    return modules_loaded
-
-
-def load_all_tools() -> int:
-    """Load all tools (built-in and plugin tools).
-
-    Returns:
-        Total number of tools loaded
-
-    Discovery order:
-        1. Built-in tools (src/tools/*.py)
-        2. Plugin tools (tool_plugins/*.py)
-
-    Note:
-        Plugin tools loaded later can override built-in tools.
-    """
-    logger.info("Starting tool loading...")
-
-    # Load built-in tools first
-    builtin_count = load_builtin_tools()
-
-    # Then load plugin tools (can override built-ins)
-    plugin_count = load_plugin_tools()
-
-    total_count = builtin_count + plugin_count
-    total_registered = ToolRegistry.tool_count()
-
-    logger.info(
-        f"Tool loading complete: {builtin_count} built-in + "
-        f"{plugin_count} plugin modules = {total_count} modules, "
-        f"{total_registered} tools registered"
-    )
-
-    return total_count
 
 
 def list_registered_tools() -> List[str]:

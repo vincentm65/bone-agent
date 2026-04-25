@@ -245,7 +245,7 @@ def run_sub_agent(
         token_msg = {"role": "system", "content": hint}
         return original_chat_completion([token_msg, *messages], **kwargs)
 
-    def _get_llm_response_with_hard_limit(allowed_tools=None):
+    def _get_llm_response_with_hard_limit(allowed_tools=None, allow_active_plugins=False):
         """Wrapper to check context and billed token limits and update panel state."""
         tt = temp_chat_manager.token_tracker
 
@@ -279,7 +279,10 @@ def run_sub_agent(
             panel_updater.token_info = f"{conv_length:,} curr | {total_billed:,} total"
             panel_updater.append("")  # Refresh panel title
 
-        return original_get_llm_response(allowed_tools=allowed_tools)
+        return original_get_llm_response(
+            allowed_tools=allowed_tools,
+            allow_active_plugins=allow_active_plugins,
+        )
 
     # Apply both patches once, before the orchestrator loop starts
     orchestrator._get_llm_response = _get_llm_response_with_hard_limit
@@ -293,7 +296,8 @@ def run_sub_agent(
         orchestrator.run(
             task_query,
             thinking_indicator=None,
-            allowed_tools=sub_agent_settings.allowed_tools
+            allowed_tools=sub_agent_settings.allowed_tools,
+            allow_active_plugins=sub_agent_settings.allow_active_plugins,
         )
     except HardLimitExceeded:
         hard_limit_exceeded = True

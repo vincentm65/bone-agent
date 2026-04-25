@@ -2380,7 +2380,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
                 input_type="boolean",
                 on_text="ON",
                 off_text="OFF",
-                description=f"Modes: {modes}",
             ))
         categories.append(SettingCategory(title="Other", settings=other_options))
 
@@ -2598,8 +2597,8 @@ def _handle_skills(chat_manager, console, debug_mode_container, args, cron_sched
     """Handle /skills command — manage reusable prompt snippets."""
     from core.skills import (
         SkillError,
+        activate_skill,
         get_skills_dir,
-        inject_skill,
         read_skill,
         remove_skill,
         validate_skill_name,
@@ -2643,8 +2642,8 @@ def _handle_skills(chat_manager, console, debug_mode_container, args, cron_sched
                 console.print(f"[red]Usage: /skills {subcmd} <name>[/red]")
                 return CommandResult(status="handled")
             name = validate_skill_name(parts[1])
-            tokens = inject_skill(chat_manager, name, read_skill(name))
-            console.print(f"[green]Loaded skill '{name}' into this chat.[/green] [dim](~{tokens:,} tokens)[/dim]")
+            tokens = activate_skill(chat_manager, name, read_skill(name))
+            console.print(f"[green]Activated skill '{name}' for this chat.[/green] [dim](~{tokens:,} tokens)[/dim]")
             return CommandResult(status="handled")
 
         if subcmd in ("remove", "rm", "delete"):

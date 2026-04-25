@@ -5,7 +5,7 @@ execution, and supporting utilities. It is not intended to be imported
 directly by end users - import from tools/ instead for backward compatibility.
 
 For creating custom tools, use:
-    from tools import tool  # or from tools.base import tool
+    from tools import tool  # or from tools.helpers.base import tool
 """
 
 # Core infrastructure
@@ -48,9 +48,6 @@ from .converters import (
 # Tool loading and discovery
 from .loader import (
     discover_tools,
-    load_builtin_tools,
-    load_plugin_tools,
-    load_all_tools,
     list_registered_tools,
 )
 
@@ -91,9 +88,6 @@ __all__ = [
     'coerce_bool',
     # Tool loading and discovery
     'discover_tools',
-    'load_builtin_tools',
-    'load_plugin_tools',
-    'load_all_tools',
     'list_registered_tools',
     # Plugin manifest
     'PluginManifest',

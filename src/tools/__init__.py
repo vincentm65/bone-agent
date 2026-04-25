@@ -5,6 +5,8 @@ capabilities for the bone-agent AI assistant.
 """
 
 import logging
+import sys
+from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
@@ -55,9 +57,8 @@ from . import sub_agent
 
 from . import task_list
 from . import select_option
-from . import skills
 
-# search_plugins — core meta-tool for plugin discovery
+# search_plugins — core meta-tool for capability discovery and loading
 from . import search_plugins
 
 # Obsidian tools — conditional registration (register() pattern, NOT @tool at import)
@@ -100,8 +101,7 @@ __all__ = [
 ]
 
 # =============================================================================
-# Backward compatibility: Re-export helpers at package level
-# This allows imports like: from tools.base import tool
+# Re-export helpers at package level
 # =============================================================================
 from .helpers import (
     ToolDefinition,
@@ -127,87 +127,20 @@ except Exception as e:
 # Plugin modules with @tool(tier="plugin") register into the manifest
 # and are only activated in ToolRegistry on-demand via search_plugins.
 try:
-    from .helpers.loader import load_plugin_tools
-    load_plugin_tools()
+    from .helpers.loader import discover_tools
+    from .helpers.plugin_manifest import plugin_manifest
+
+    repo_root = Path(__file__).resolve().parents[2]
+    src_dir = str(repo_root / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+
+    discover_tools([str(repo_root / "tool_plugins")])
+
+    _logger.info(
+        "Plugin manifest: %s plugins available (categories: %s)",
+        plugin_manifest.plugin_count(),
+        plugin_manifest.get_categories(),
+    )
 except Exception as e:
     _logger.debug("Failed to load plugin tools: %s", e)
-
-# Make base module available for backward compatibility
-import sys
-from types import ModuleType
-
-# Create a synthetic 'base' module that re-exports from helpers
-_base_module = ModuleType('tools.base')
-_base_module.__dict__.update({
-    'ToolDefinition': ToolDefinition,
-    'ToolRegistry': ToolRegistry,
-    'tool': tool,
-    'build_context': build_context,
-    'get_tool_schemas': get_tool_schemas,
-    'TOOLS': TOOLS,
-})
-sys.modules['tools.base'] = _base_module
-
-# Create synthetic modules for other helpers
-_formatters_module = ModuleType('tools.formatters')
-_formatters_module.__dict__.update({
-    'format_tool_result': format_tool_result,
-    'format_file_result': format_file_result,
-    '_build_diff': _build_diff,
-    '_detect_newline': _detect_newline,
-})
-sys.modules['tools.formatters'] = _formatters_module
-
-_file_helpers_module = ModuleType('tools.file_helpers')
-from .helpers.file_helpers import (
-    _is_reserved_windows_name,
-    GitignoreFilter,
-)
-_file_helpers_module.__dict__.update({
-    '_is_reserved_windows_name': _is_reserved_windows_name,
-    'GitignoreFilter': GitignoreFilter,
-})
-sys.modules['tools.file_helpers'] = _file_helpers_module
-
-# Path resolver module
-_path_resolver_module = ModuleType('tools.path_resolver')
-from .helpers.path_resolver import PathResolver
-_path_resolver_module.__dict__.update({
-    'PathResolver': PathResolver,
-})
-sys.modules['tools.path_resolver'] = _path_resolver_module
-
-_converters_module = ModuleType('tools.converters')
-from .helpers.converters import coerce_int, coerce_bool
-_converters_module.__dict__.update({
-    'coerce_int': coerce_int,
-    'coerce_bool': coerce_bool,
-})
-sys.modules['tools.converters'] = _converters_module
-
-_loader_module = ModuleType('tools.loader')
-from .helpers.loader import (
-    discover_tools,
-    load_builtin_tools,
-    load_plugin_tools,
-    load_all_tools,
-    list_registered_tools,
-)
-_loader_module.__dict__.update({
-    'discover_tools': discover_tools,
-    'load_builtin_tools': load_builtin_tools,
-    'load_plugin_tools': load_plugin_tools,
-    'load_all_tools': load_all_tools,
-    'list_registered_tools': list_registered_tools,
-})
-sys.modules['tools.loader'] = _loader_module
-
-_parallel_executor_module = ModuleType('tools.parallel_executor')
-from .helpers.parallel_executor import ToolCall, ToolResult, ParallelToolExecutor
-_parallel_executor_module.__dict__.update({
-    'ToolCall': ToolCall,
-    'ToolResult': ToolResult,
-    'ParallelToolExecutor': ParallelToolExecutor,
-})
-sys.modules['tools.parallel_executor'] = _parallel_executor_module
-

@@ -1,4 +1,4 @@
-"""User skill storage and conversation injection helpers."""
+"""User skill storage and active session skill helpers."""
 
 from __future__ import annotations
 
@@ -245,13 +245,10 @@ def search_skill_matches(query: str | None = None, max_results: int = 20) -> lis
     )
 
 
-def inject_skill(chat_manager, name: str, content: str, reload: bool = False) -> int:
-    """Inject a skill into the current conversation history.
-
-    Content should be pre-stripped of any heading (e.g. via read_skill).
-    """
+def activate_skill(chat_manager, name: str, content: str | None = None, reload: bool = False) -> int:
+    """Activate a skill in session state and refresh the system prompt."""
     valid_name = validate_skill_name(name)
-    body = content.strip()
+    body = (content if content is not None else read_skill(valid_name)).strip()
     if not body:
         raise SkillError("Skill prompt cannot be empty.")
 
@@ -260,38 +257,40 @@ def inject_skill(chat_manager, name: str, content: str, reload: bool = False) ->
         loaded_skills = set()
         setattr(chat_manager, "loaded_skills", loaded_skills)
     if valid_name in loaded_skills and not reload:
-        raise SkillError(f"Skill '{valid_name}' is already loaded in this chat.")
+        raise SkillError(f"Skill '{valid_name}' is already active in this chat.")
 
-    user_msg = {"role": "user", "content": f"/skills load {valid_name}"}
-    assistant_msg = {
-        "role": "assistant",
-        "content": (
-            f"Loaded skill `{valid_name}`. I will apply these instructions for "
-            "the current conversation unless you override them.\n\n"
-            f"## Skill: {valid_name}\n\n{body}"
-        ),
-    }
-    chat_manager.messages.append(user_msg)
-    chat_manager.messages.append(assistant_msg)
-    chat_manager.log_message(user_msg)
-    chat_manager.log_message(assistant_msg)
     loaded_skills.add(valid_name)
-    chat_manager._update_context_tokens()
-    return chat_manager.token_tracker.estimate_tokens(
-        f"{user_msg['content']}\n\n{assistant_msg['content']}"
-    )
+    if hasattr(chat_manager, "update_system_prompt"):
+        chat_manager.update_system_prompt()
+    else:
+        chat_manager._update_context_tokens()
+
+    return chat_manager.token_tracker.estimate_tokens(render_active_skills_section([valid_name]))
 
 
-def render_skill_for_tool(name: str, content: str) -> str:
-    """Return skill content suitable for a tool result."""
-    valid_name = validate_skill_name(name)
-    body = _strip_heading(valid_name, content)
-    if not body:
-        raise SkillError("Skill prompt cannot be empty.")
-    return (
-        f"Loaded skill `{valid_name}`. Apply these instructions before "
-        f"continuing the user's task.\n\n## Skill: {valid_name}\n\n{body}"
-    )
+def get_active_skill_contents(skill_names: list[str] | set[str] | tuple[str, ...]) -> list[tuple[str, str]]:
+    """Return validated active skill name/body pairs sorted by skill name."""
+    active_skills = []
+    for raw_name in sorted({validate_skill_name(name) for name in skill_names}):
+        body = read_skill(raw_name)
+        if body:
+            active_skills.append((raw_name, body))
+    return active_skills
+
+
+def render_active_skills_section(skill_names: list[str] | set[str] | tuple[str, ...]) -> str:
+    """Render active skills for inclusion in the system prompt."""
+    try:
+        active_skills = get_active_skill_contents(skill_names)
+    except SkillError:
+        active_skills = []
+    if not active_skills:
+        return ""
+
+    sections = ["## Active skills", "Apply these active skill instructions in addition to the base prompt."]
+    for name, body in active_skills:
+        sections.append(f"### {name}\n{body}")
+    return "\n\n".join(sections)
 
 
 def _preview(content: str, max_chars: int = 90) -> str:

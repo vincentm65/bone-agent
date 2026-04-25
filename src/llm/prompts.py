@@ -428,7 +428,7 @@ def _sub_agent_sections(variant: str) -> list[tuple[str, callable]]:
     return base + middle
 
 
-def build_system_prompt(variant: str | None = None) -> str:
+def build_system_prompt(variant: str | None = None, active_skills_section: str = "") -> str:
     """Build system prompt for main agent.
 
     Loads section content from prompts/<variant>/. Order is defined by
@@ -437,6 +437,7 @@ def build_system_prompt(variant: str | None = None) -> str:
     Args:
         variant: Variant name (e.g. 'main', 'micro').
             If None, reads from settings.
+        active_skills_section: Optional rendered active-skills block to append.
 
     Returns:
         Complete system prompt string
@@ -448,7 +449,10 @@ def build_system_prompt(variant: str | None = None) -> str:
             f"Prompt variant '{variant}' not found: "
             f"{_PROMPTS_DIR / variant} does not exist"
         )
-    return _build_prompt(_main_sections(variant))
+    result = _build_prompt(_main_sections(variant))
+    if active_skills_section.strip():
+        result += "\n\n" + active_skills_section.strip()
+    return result
 
 
 def build_sub_agent_prompt(sub_agent_type: str = "research", soft_limit_tokens: int | None = None, hard_limit_tokens: int | None = None) -> str:

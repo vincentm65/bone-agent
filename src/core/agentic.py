@@ -169,21 +169,42 @@ class AgenticOrchestrator:
         # Check if we're in a parallel context with suppressed console
         return self._parallel_context.get('console', self.console)
 
-    def run(self, user_input, thinking_indicator=None, allowed_tools=None):
+    def _get_effective_tools(self, allowed_tools=None, allow_active_plugins=False):
+        """Return tool schemas allowed for the current run."""
+        from tools.helpers.base import ToolRegistry
+
+        tools = TOOLS()
+        if allowed_tools is None:
+            return tools
+
+        effective_names = set(allowed_tools)
+        if allow_active_plugins:
+            effective_names.update(ToolRegistry.active_plugin_names())
+
+        if not effective_names:
+            return []
+
+        return [tool for tool in tools if tool["function"]["name"] in effective_names]
+
+    def run(self, user_input, thinking_indicator=None, allowed_tools=None, allow_active_plugins=False):
         """Main orchestration loop.
 
         Args:
             user_input: User's input message
             thinking_indicator: Optional ThinkingIndicator instance
             allowed_tools: Optional list of allowed tool names (for research)
+            allow_active_plugins: Whether to include active plugin tools in restricted runs
         """
+        self._current_allowed_tools = allowed_tools
+        self._current_allow_active_plugins = allow_active_plugins
+
         # Append user message
         self.chat_manager.messages.append({"role": "user", "content": user_input})
 
         # Log user message
         self.chat_manager.log_message({"role": "user", "content": user_input})
 
-        from tools.base import ToolRegistry
+        from tools.helpers.base import ToolRegistry
 
         while True:
             # Decrement plugin TTLs after previous iteration's tool execution.
@@ -193,7 +214,10 @@ class AgenticOrchestrator:
                 self.console.print(f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]")
 
             # Get response from LLM
-            response = self._get_llm_response(allowed_tools=allowed_tools)
+            response = self._get_llm_response(
+                allowed_tools=allowed_tools,
+                allow_active_plugins=allow_active_plugins,
+            )
             if response is None:
                 return
 
@@ -207,11 +231,16 @@ class AgenticOrchestrator:
                 if self._handle_final_response(response, thinking_indicator):
                     return
             else:
-                should_exit = self._handle_tool_calls(response, thinking_indicator, allowed_tools)
+                should_exit = self._handle_tool_calls(
+                    response,
+                    thinking_indicator,
+                    allowed_tools,
+                    allow_active_plugins=allow_active_plugins,
+                )
                 if should_exit:
                     return
 
-    def _get_llm_response(self, allowed_tools=None):
+    def _get_llm_response(self, allowed_tools=None, allow_active_plugins=False):
         """Get next LLM response with tool definitions.
 
         Includes automatic retry with live countdown for timeout/connection errors.
@@ -219,6 +248,7 @@ class AgenticOrchestrator:
 
         Args:
             allowed_tools: Optional list of allowed tool names (overrides mode-based filtering)
+            allow_active_plugins: Whether to include active plugin tools in restricted runs
 
         Returns:
             Response dict from LLM, or None if error occurred
@@ -227,19 +257,17 @@ class AgenticOrchestrator:
         self.chat_manager.ensure_context_fits(console=self.console)
 
         # Use allowed_tools if provided, otherwise use mode-based filtering
-        if allowed_tools is not None:
-            # Validate that allowed_tools is not empty
-            if not allowed_tools:
-                self.console.print("[red]Error: allowed_tools is empty[/red]")
-                return None
-            # TOOLS is a function, call it to get the list
-            tools = [tool for tool in TOOLS() if tool["function"]["name"] in allowed_tools]
-            # Log filtered tools for debugging
-            if self.debug_mode:
-                tool_names = [t["function"]["name"] for t in tools]
-                self.console.print(f"[dim]Available tools: {tool_names}[/dim]")
-        else:
-            tools = TOOLS()
+        if allowed_tools is not None and not allowed_tools and not allow_active_plugins:
+            self.console.print("[red]Error: allowed_tools is empty[/red]")
+            return None
+
+        tools = self._get_effective_tools(
+            allowed_tools=allowed_tools,
+            allow_active_plugins=allow_active_plugins,
+        )
+        if allowed_tools is not None and self.debug_mode:
+            tool_names = [t["function"]["name"] for t in tools]
+            self.console.print(f"[dim]Available tools: {tool_names}[/dim]")
 
         # Retry loop for timeout/connection errors
         last_error = None
@@ -336,8 +364,11 @@ class AgenticOrchestrator:
             # NEW: Compact tool results after final answer (per-message compaction)
             self.chat_manager.compact_tool_results(skip_token_update=True)
 
-            # Update context tokens with current mode's tools
-            tools_for_mode = TOOLS()
+            # Update context tokens with current run's effective tools
+            tools_for_mode = self._get_effective_tools(
+                allowed_tools=getattr(self, "_current_allowed_tools", None),
+                allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
+            )
             self.chat_manager._update_context_tokens(tools_for_mode)
 
             self.console.print()
@@ -349,13 +380,14 @@ class AgenticOrchestrator:
         )
         return not should_continue
 
-    def _handle_tool_calls(self, response, thinking_indicator, allowed_tools=None):
+    def _handle_tool_calls(self, response, thinking_indicator, allowed_tools=None, allow_active_plugins=False):
         """Process tool calls and display accompanying content.
 
         Args:
             response: Full message dict from LLM (includes content and tool_calls)
             thinking_indicator: Optional ThinkingIndicator instance
             allowed_tools: Optional list of allowed tool names
+            allow_active_plugins: Whether to allow active plugin tools in restricted runs
 
         Returns:
             True if should exit the orchestration loop
@@ -381,7 +413,7 @@ class AgenticOrchestrator:
         # This silently removes unknown tools or tools not in the allowed whitelist
         # to prevent error messages from reaching the user while allowing the agent
         # to continue with alternative tools.
-        from tools.base import ToolRegistry
+        from tools.helpers.base import ToolRegistry
 
         filtered_calls = []
         filtered_tool_ids = []  # Track filtered tool IDs to provide feedback
@@ -398,10 +430,14 @@ class AgenticOrchestrator:
                 filtered_tool_ids.append(tool_call.get("id"))
                 continue
 
-            # Check if tool is in allowed_tools whitelist (if provided)
-            # Plugin-tier tools bypass the whitelist — they are already vetted
-            # by the manifest and activated on-demand via search_plugins.
-            if allowed_tools and function_name not in allowed_tools and not ToolRegistry.is_plugin_active(function_name):
+            # Check if tool is in the effective allowlist for this run.
+            effective_allowed_tools = None
+            if allowed_tools is not None:
+                effective_allowed_tools = set(allowed_tools)
+                if allow_active_plugins:
+                    effective_allowed_tools.update(ToolRegistry.active_plugin_names())
+
+            if effective_allowed_tools is not None and function_name not in effective_allowed_tools:
                 # Silent fail - skip this tool
                 if self.debug_mode:
                     self.console.print(f"[dim]Silently filtered non-allowed tool: {function_name}[/dim]")
@@ -556,8 +592,11 @@ class AgenticOrchestrator:
         # Compact completed tool blocks once after all tools complete
         self.chat_manager.compact_tool_results(skip_token_update=True)
 
-        # Update context tokens with current mode's tools
-        tools_for_mode = TOOLS()
+        # Update context tokens with current run's effective tools
+        tools_for_mode = self._get_effective_tools(
+            allowed_tools=getattr(self, "_current_allowed_tools", None),
+            allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
+        )
         self.chat_manager._update_context_tokens(tools_for_mode)
 
         # Pre-send guard: ensure context fits before next LLM call
@@ -577,7 +616,7 @@ class AgenticOrchestrator:
         """
         if not tool_calls:
             return False
-        from tools.parallel_executor import ParallelToolExecutor, ToolCall
+        from tools.helpers.parallel_executor import ParallelToolExecutor, ToolCall
 
         # Suppress console output in handlers during parallel execution
         # We'll display results ourselves in order below
@@ -797,8 +836,11 @@ class AgenticOrchestrator:
             # after all parallel results are appended (safe — only compacts completed blocks)
             self.chat_manager.compact_tool_results(skip_token_update=True)
 
-            # Update context tokens with current mode's tools
-            tools_for_mode = TOOLS()
+            # Update context tokens with current run's effective tools
+            tools_for_mode = self._get_effective_tools(
+                allowed_tools=getattr(self, "_current_allowed_tools", None),
+                allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
+            )
             self.chat_manager._update_context_tokens(tools_for_mode)
 
             # Pre-send guard: ensure context fits before next LLM call
@@ -869,7 +911,7 @@ class AgenticOrchestrator:
             panel_to_use = SubAgentPanel(query, self.console)
 
         # Execute via tool registry
-        from tools.base import ToolRegistry, build_context
+        from tools.helpers.base import ToolRegistry, build_context
 
         tool = ToolRegistry.get(function_name)
         if tool:

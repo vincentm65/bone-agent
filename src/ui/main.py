@@ -35,7 +35,6 @@ from core.agentic import agentic_answer
 from utils.settings import MonokaiDarkBGStyle, left_align_headings
 from utils.paths import REPO_ROOT, RG_EXE_PATH
 from exceptions import BoneAgentError
-from tools.loader import load_all_tools
 
 # Console setup
 console = Console(theme=Theme({
@@ -382,9 +381,6 @@ def main():
     """Main interactive chat loop."""
 
     # Load all tools (built-in and user tools)
-    # This populates the ToolRegistry with all decorated tools
-    load_all_tools()
-
     # Check for config.yaml — run setup wizard on first run
     from ui.setup_wizard import is_first_run, run_wizard as _run_setup_wizard
 

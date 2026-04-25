@@ -344,14 +344,10 @@ def run_single_job(job: CronJob, console=None, interactive=False) -> None:
         from core.chat_manager import ChatManager
         from core.agentic import AgenticOrchestrator
         from utils.paths import RG_EXE_PATH
-        from tools.loader import load_all_tools
         from llm.config import TOOLS_ENABLED
 
         if not TOOLS_ENABLED:
             raise RuntimeError("Cron requires tools to be enabled")
-
-        # Ensure tools are loaded
-        load_all_tools()
 
         # Fresh ChatManager for this job
         chat_manager = ChatManager()

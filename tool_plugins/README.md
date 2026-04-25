@@ -68,13 +68,16 @@ return f"exit_code=1\nError: Something went wrong"
 
 ## Plugin Lifecycle
 
-Plugin-tier tools are loaded on-demand rather than at startup:
+Plugin-tier modules are discovered at startup, but their tool schemas stay out of
+active tool context until explicitly activated:
 
-1. The LLM calls `search_plugins` with a query to discover available plugins
-2. Matching plugins are activated via `ToolRegistry.activate_plugin()`
-3. Activated plugins appear in the tool list for subsequent LLM calls
-4. Each activation has a TTL — plugins are evicted after a period of inactivity
-5. Calling an active plugin resets its TTL (via `touch_plugin`)
+1. Bone loads plugin modules from `tool_plugins/` at startup
+2. `@tool(tier="plugin")` registers those tools in the manifest, not `ToolRegistry`
+3. The LLM calls `search_plugins` with a query to discover available capabilities
+4. Matching plugins are activated via `ToolRegistry.activate_plugin()`
+5. Activated plugins appear in the tool list for subsequent LLM calls
+6. Each activation has a TTL — plugins are evicted after a period of inactivity
+7. Calling an active plugin resets its TTL (via `touch_plugin`)
 
 ## See Also
 

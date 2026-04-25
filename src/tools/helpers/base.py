@@ -100,10 +100,6 @@ TOOL_GROUPS = {
         "label": "Task Management",
         "tools": ["create_task_list", "complete_task", "show_task_list"],
     },
-    "skills": {
-        "label": "Skills",
-        "tools": ["load_skill"],
-    },
 }
 
 

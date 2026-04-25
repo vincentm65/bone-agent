@@ -8,6 +8,7 @@ from rich.syntax import Syntax
 
 from utils.settings import MAX_COMMAND_OUTPUT_LINES, MonokaiDarkBGStyle
 from utils.result_parsers import extract_exit_code, extract_all_metadata, extract_multiple_metadata
+from tools.search_plugins import HEADER_MATCHES, HEADER_ALL
 from tools.task_list import _format_task_list, _strip_rich_markup
 
 
@@ -303,110 +304,121 @@ def handle_list_directory_feedback(tool_result, console, panel_updater):
 def handle_search_plugins_feedback(tool_result, console, panel_updater):
     """Handle feedback for search_plugins tool.
 
-    Display a tree of found plugins with query and category info,
-    similar to list_directory feedback style.
+    Display compact capability results in the same style as other tool output.
     """
     lines = tool_result.split('\n')
+    prefix = "╰─ " if not panel_updater else ""
 
-    # Extract query from "Found N plugin(s) matching 'query':" line
     query = ""
-    query_match = re.search(r"matching '([^']+)':", tool_result)
-    if query_match:
-        query = query_match.group(1)
+    capabilities = []
+    in_capability_section = False
 
-    # Parse plugin entries: - **name** [category] (status): description
-    #                         Tags: tag1, tag2
-    plugins = []
     i = 0
     while i < len(lines):
-        plugin_match = re.match(r'^- \*\*(.+?)\*\*(?:\s+\[(.+?)\])?\s+\((.+?)\):\s+(.+)$', lines[i])
-        if plugin_match:
-            name = plugin_match.group(1)
-            category = plugin_match.group(2) or ""
-            status = plugin_match.group(3)
-            description = plugin_match.group(4)
+        raw_line = lines[i]
+        line = raw_line.strip()
 
-            # Check next line for tags
-            tags = ""
-            if i + 1 < len(lines) and lines[i + 1].strip().startswith("Tags:"):
-                tags = lines[i + 1].strip().replace("Tags: ", "")
+        if line.startswith(HEADER_MATCHES):
+            query = line.replace(HEADER_MATCHES, "", 1)
+            in_capability_section = True
+            i += 1
+            continue
+
+        if line == HEADER_ALL:
+            query = line
+            in_capability_section = True
+            i += 1
+            continue
+
+        if not in_capability_section:
+            i += 1
+            continue
+
+        if line.startswith("Results: ") or line.startswith("Total: ") or not line:
+            i += 1
+            continue
+
+        if line.startswith("Activated plugins:") or line.startswith("Loaded skills:") or line.startswith("Load issues:"):
+            break
+
+        item_match = re.match(r'^- (.+)$', line)
+        if item_match:
+            item = {
+                "name": item_match.group(1),
+                "type": "",
+                "status": "",
+                "summary": "",
+                "tags": "",
+            }
+            i += 1
+            while i < len(lines):
+                raw_detail_line = lines[i]
+                stripped = raw_detail_line.strip()
+                if not stripped:
+                    i += 1
+                    continue
+                if re.match(r'^- (.+)$', stripped):
+                    break
+                if stripped.startswith("Activated plugins:") or stripped.startswith("Loaded skills:") or stripped.startswith("Load issues:"):
+                    break
+                if stripped.startswith("type: "):
+                    item["type"] = stripped.replace("type: ", "", 1)
+                elif stripped.startswith("status: "):
+                    item["status"] = stripped.replace("status: ", "", 1)
+                elif stripped.startswith("summary: "):
+                    item["summary"] = stripped.replace("summary: ", "", 1)
+                elif stripped.startswith("tags: "):
+                    item["tags"] = stripped.replace("tags: ", "", 1)
                 i += 1
+            capabilities.append(item)
+            continue
 
-            plugins.append({
-                "name": name,
-                "category": category,
-                "status": status,
-                "description": description,
-                "tags": tags,
-            })
         i += 1
 
-    if not plugins:
-        # No plugins found — just show the message
-        prefix = "╰─ " if not panel_updater else ""
-        # Extract the informational message (skip exit_code line)
+    if not capabilities:
         msg_lines = [l for l in lines if l.strip() and not l.startswith("exit_code=")]
-        output = prefix + "\n".join(msg_lines) if msg_lines else f"{prefix}No plugins found"
+        output = prefix + "\n".join(msg_lines) if msg_lines else f"{prefix}No capability matches"
         _print_or_append(output, console, panel_updater)
         if not panel_updater:
             console.print()
         return
 
-    # Build tree display
     max_display = 10
-    display_plugins = plugins[:max_display]
-    remaining = max(0, len(plugins) - max_display)
+    display_capabilities = capabilities[:max_display]
+    remaining = max(0, len(capabilities) - max_display)
 
-    # Count activated vs already active
-    activated_count = sum(1 for p in plugins if p["status"] == "activated")
-    already_active_count = sum(1 for p in plugins if p["status"] == "already active")
-
+    header = f"{query} ({len(capabilities)} match{'es' if len(capabilities) != 1 else ''})" if query else "capabilities"
     tree_lines = []
-    for i, plugin in enumerate(display_plugins):
-        is_last = (i == len(display_plugins) - 1) and (remaining == 0)
+
+    for idx, capability in enumerate(display_capabilities):
+        is_last = (idx == len(display_capabilities) - 1) and (remaining == 0)
         connector = "└─" if is_last else "├─"
 
-        # Build the plugin line: name [category] (status)
-        cat_part = f" [{plugin['category']}]" if plugin['category'] else ""
-        status_part = plugin['status']
-
-        if status_part == "activated":
-            status_display = f"[green]{status_part}[/green]"
+        if capability["type"] == "plugin":
+            status = capability["status"]
+            if status == "activated":
+                meta = "[dim](plugin, [/dim][green]activated[/green][dim])[/dim]"
+            elif status:
+                meta = f"[dim](plugin, {status})[/dim]"
+            else:
+                meta = "[dim](plugin)[/dim]"
         else:
-            status_display = f"[dim]{status_part}[/dim]"
+            meta = "[dim](skill)[/dim]"
 
-        line = f"   {connector} **{plugin['name']}**{cat_part} ({status_display}): {plugin['description']}"
+        details = []
+        if capability["summary"]:
+            details.append(capability["summary"])
+        if capability["tags"]:
+            details.append(f"tags: {capability['tags']}")
+        details_suffix = f" [dim]— {' | '.join(details)}[/dim]" if details else ""
+
+        line = f"   {connector} {capability['name']} {meta}{details_suffix}"
         tree_lines.append(line)
 
-        # Tags on sub-line
-        if plugin["tags"]:
-            tag_connector = "│  " if not is_last else "   "
-            tree_lines.append(f"{tag_connector}   Tags: [dim]{plugin['tags']}[/dim]")
-
-    # Add overflow indicator
     if remaining > 0:
         tree_lines.append(f"   └─ ... and {remaining} more")
 
-    # Build header
-    if query:
-        header = f"plugins matching '{query}' ({len(plugins)} found)"
-    else:
-        header = f"plugins ({len(plugins)} found)"
-
-    prefix = "╰─ " if not panel_updater else ""
-    output = f"{prefix}{header}\n"
-    output += "\n".join(tree_lines)
-
-    # Activation summary
-    if activated_count > 0 or already_active_count > 0:
-        summary_parts = []
-        if activated_count > 0:
-            summary_parts.append(f"{activated_count} activated")
-        if already_active_count > 0:
-            summary_parts.append(f"{already_active_count} already active")
-        summary = ", ".join(summary_parts)
-        output += f"\n{prefix}[dim]{summary}. Schemas available next turn. Auto-evict after 10 turns of non-use.[/dim]"
-
+    output = f"{prefix}{header}\n" + "\n".join(tree_lines)
     _print_or_append(output, console, panel_updater)
 
     if not panel_updater:

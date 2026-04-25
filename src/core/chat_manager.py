@@ -11,6 +11,7 @@ from typing import Optional, IO
 from llm.client import LLMClient
 from llm.config import get_providers, get_provider_config, get_provider_display_name, reload_config
 from llm.prompts import build_system_prompt
+from core.skills import render_active_skills_section
 from pathlib import Path
 from llm.token_tracker import TokenTracker
 from utils.settings import server_settings, context_settings
@@ -45,8 +46,8 @@ class ChatManager:
         self.task_list = []
         self.task_list_title = None
 
-        # In-session loaded skill tracking. The actual skill instructions live
-        # in message history; this only prevents duplicate explicit injections.
+        # In-session active skill tracking. These skills are rendered into the
+        # system prompt for the current chat.
         self.loaded_skills = set()
 
         # .gitignore filtering state
@@ -98,7 +99,7 @@ class ChatManager:
         if self.markdown_logger:
             self.markdown_logger.start_session()
 
-        # Loaded skills are scoped to the current message history.
+        # Active skills are scoped to the current message history/session.
         self.loaded_skills = set()
 
         # Start with system prompt only
@@ -140,7 +141,8 @@ class ChatManager:
         if variant is None:
             from utils.settings import prompt_settings
             variant = prompt_settings.variant
-        return build_system_prompt(variant)
+        active_skills_section = render_active_skills_section(self.loaded_skills)
+        return build_system_prompt(variant, active_skills_section=active_skills_section)
 
     def update_system_prompt(self, variant: str | None = None):
         """Rebuild system prompt in-place (e.g. after hotswap or session reset).

@@ -87,6 +87,7 @@ class SubAgentSettings:
     enable_compaction: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("enable_compaction", True))
     compact_trigger_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("compact_trigger_tokens", 50_000))
     allowed_tools: list = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("allowed_tools", ["rg", "read_file", "list_directory", "web_search"]))
+    allow_active_plugins: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("allow_active_plugins", False))
     dump_context_on_hard_limit: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("dump_context_on_hard_limit", True))
 
 

@@ -1,4 +1,4 @@
-"""Plugin manifest for on-demand tool discovery.
+"""Capability manifest for on-demand plugin and skill discovery.
 
 Plugin-tier tools are registered here instead of ToolRegistry at import time.
 This keeps plugin schemas out of the LLM context window until explicitly
@@ -7,9 +7,13 @@ activated via the search_plugins core tool.
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
-from core.skills import SearchCandidate, SearchMatch, search_candidates, search_skill_matches
+from core.skills import (
+    SearchCandidate,
+    iter_skill_summaries,
+    search_candidates,
+)
 
 from .base import ToolDefinition
 
@@ -30,11 +34,12 @@ class CapabilityMatch:
 
 
 class PluginManifest:
-    """Index of plugin-tier tools available for on-demand activation.
+    """Index of plugin-tier tools and stored skills for discovery surfaces.
 
-    Tools are registered here when modules with @tool(tier="plugin") are
-    imported. The search_plugins core tool queries this index to find and
-    activate matching plugins.
+    Plugin tools are registered here when modules with @tool(tier="plugin")
+    are imported. Stored skills are discovered from disk on demand. The
+    search_plugins core tool queries this manifest to find and activate or
+    load capabilities.
     """
 
     def __init__(self):
@@ -74,47 +79,34 @@ class PluginManifest:
         """
         return list(self._plugins.values())
 
-    def search(self, query: str, category: str = None, max_results: int = 5) -> List[ToolDefinition]:
-        """Search the manifest for plugins matching a query."""
-        return [match.item for match in self.search_plugin_matches(query, category=category, max_results=max_results)]
+    def _iter_capabilities(self, category: str = None) -> Iterable[CapabilityMatch]:
+        """Yield available plugin and skill capabilities for discovery surfaces."""
+        include_plugins = category in (None, "plugin")
+        include_skills = category in (None, "skill")
 
-    def search_plugin_matches(
-        self,
-        query: str,
-        category: str = None,
-        max_results: int = 5,
-    ) -> List[SearchMatch[ToolDefinition]]:
-        """Return scored plugin matches using the shared discovery helper."""
-        candidates: list[SearchCandidate[ToolDefinition]] = []
-
-        for tool_def in self._plugins.values():
-            if category and tool_def.category != category:
-                continue
-            text = " ".join(
-                part
-                for part in [
-                    tool_def.name,
-                    tool_def.description,
-                    tool_def.category or "",
-                    " ".join(tool_def.tags or []),
-                ]
-                if part
-            )
-            candidates.append(
-                SearchCandidate(
-                    item=tool_def,
-                    text=text,
-                    compact_text="",
-                    exact_text=tool_def.name,
+        if include_plugins:
+            for tool_def in self._plugins.values():
+                if category not in (None, "plugin") and tool_def.category != category:
+                    continue
+                yield CapabilityMatch(
+                    kind="plugin",
+                    name=tool_def.name,
+                    description=tool_def.description,
+                    category=tool_def.category,
+                    tags=list(tool_def.tags or []),
+                    tool_def=tool_def,
                 )
-            )
 
-        return search_candidates(
-            query,
-            candidates,
-            max_results=max_results,
-            item_key=lambda tool_def: tool_def.name,
-        )
+        if include_skills:
+            for summary in iter_skill_summaries():
+                yield CapabilityMatch(
+                    kind="skill",
+                    name=summary.name,
+                    description=summary.preview,
+                    category="skill",
+                    tags=["skill"],
+                    preview=summary.preview,
+                )
 
     def search_capabilities(
         self,
@@ -123,40 +115,6 @@ class PluginManifest:
         max_results: int = 5,
     ) -> List[CapabilityMatch]:
         """Search plugins and skills through one shared discovery path."""
-        capabilities: list[CapabilityMatch] = []
-        include_plugins = category in (None, "plugin")
-        include_skills = category in (None, "skill")
-
-        if include_plugins:
-            for tool_def in self._plugins.values():
-                if category == "plugin":
-                    pass
-                elif category and tool_def.category != category:
-                    continue
-                capabilities.append(
-                    CapabilityMatch(
-                        kind="plugin",
-                        name=tool_def.name,
-                        description=tool_def.description,
-                        category=tool_def.category,
-                        tags=list(tool_def.tags or []),
-                        tool_def=tool_def,
-                    )
-                )
-
-        if include_skills:
-            capabilities.extend(
-                CapabilityMatch(
-                    kind="skill",
-                    name=match.item.name,
-                    description=match.item.preview,
-                    category="skill",
-                    tags=["skill"],
-                    preview=match.item.preview,
-                )
-                for match in search_skill_matches(query, max_results=1000)
-            )
-
         combined_candidates = [
             SearchCandidate(
                 item=capability,
@@ -173,7 +131,7 @@ class PluginManifest:
                 compact_text="",
                 exact_text=capability.name,
             )
-            for capability in capabilities
+            for capability in self._iter_capabilities(category=category)
         ]
         combined_matches = search_candidates(
             query,
@@ -182,6 +140,10 @@ class PluginManifest:
             item_key=lambda capability: f"{capability.kind}:{capability.name}",
         )
         return [match.item for match in combined_matches]
+
+    def list_all_capabilities(self, category: str = None) -> List[CapabilityMatch]:
+        """Return all available capabilities without fuzzy scoring."""
+        return list(self._iter_capabilities(category=category))
 
     def get_categories(self) -> List[str]:
         """Get all unique categories in the manifest.
