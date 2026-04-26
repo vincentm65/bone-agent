@@ -18,6 +18,7 @@ from utils.settings import server_settings, context_settings
 from utils.logger import MarkdownConversationLogger
 from utils.user_message_logger import UserMessageLogger
 from utils.result_parsers import extract_exit_code, extract_metadata_from_result
+from utils.multimodal import content_text_for_logs
 
 # Token counting constants
 MESSAGE_OVERHEAD_TOKENS = 4  # Approximate tokens for JSON structure: braces, quotes, colons, commas
@@ -265,7 +266,7 @@ class ChatManager:
         # Content
         content = msg.get('content', '')
         if content:
-            parts.append(str(content))
+            parts.append(content_text_for_logs(content))
 
         # Tool calls (assistant messages)
         if msg.get('tool_calls'):
@@ -371,7 +372,7 @@ class ChatManager:
         user_queries = []
         for m in messages:
             if m.get('role') == 'user':
-                content = m.get('content', '')
+                content = content_text_for_logs(m.get('content', ''))
                 if content and not content.startswith("The codebase map"):
                     user_queries.append(content)
 
@@ -386,7 +387,7 @@ class ChatManager:
                     tool_calls.append(f"- {name}: {args[:100]}")
             elif m.get('role') == 'tool':
                 # Extract tool result metadata
-                content = m.get('content', '')
+                content = content_text_for_logs(m.get('content', ''))
                 if 'exit_code=' in content:
                     lines = content.split('\n')[:5]  # First 5 lines for context
                     tool_calls.append(f"Result: {'; '.join(lines[:2])}")
@@ -859,7 +860,14 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
                 # Add user question with summary appended
                 user_msg = self.messages[block['user_idx']].copy()
-                user_msg['content'] = user_msg['content'] + f"\n\n[Context: {summary}]"
+                content = user_msg.get('content', '')
+                context_text = f"\n\n[Context: {summary}]"
+                if isinstance(content, str):
+                    user_msg['content'] = content + context_text
+                elif isinstance(content, list):
+                    user_msg['content'] = content + [{"type": "text", "text": context_text}]
+                else:
+                    user_msg['content'] = f"{content}\n\n[Context: {summary}]"
                 new_messages.append(user_msg)
 
                 # Add final assistant answer
@@ -904,7 +912,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             role = self.messages[i].get('role')
             # Look for user message that's not the codebase map
             if role == 'user' and not self.messages[i].get('tool_calls'):
-                content = self.messages[i].get('content', '')
+                content = content_text_for_logs(self.messages[i].get('content', ''))
                 if content and not content.startswith("The codebase map"):
                     last_user_idx = i
                     break
@@ -1503,7 +1511,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             from llm.config import MEMORY_SETTINGS
             if MEMORY_SETTINGS.get("enabled", True):
                 self.user_message_logger.log_user_message(
-                    message["content"],
+                    content_text_for_logs(message["content"]),
                     project_dir=Path.cwd().resolve(),
                 )
 

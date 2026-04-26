@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterator, Optional
 import requests
 
 from exceptions import LLMResponseError
+from utils.multimodal import openai_blocks_to_codex
 
 
 class CodexResponsesHandler:
@@ -58,7 +59,7 @@ class CodexResponsesHandler:
                 if content:
                     codex_input.append({
                         "role": "assistant",
-                        "content": [{"type": "input_text", "text": content}]
+                        "content": openai_blocks_to_codex(content, assistant=True)
                     })
                 for tool_call in m.get("tool_calls", []):
                     function = tool_call.get("function", {})
@@ -78,10 +79,9 @@ class CodexResponsesHandler:
                 })
                 continue
 
-            content_type = "output_text" if role == "assistant" else "input_text"
             codex_input.append({
                 "role": role,
-                "content": [{"type": content_type, "text": content}]
+                "content": openai_blocks_to_codex(content, assistant=(role == "assistant"))
             })
 
         payload = {

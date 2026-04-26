@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import datetime
+from utils.multimodal import content_text_for_logs
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -95,7 +96,7 @@ class MarkdownConversationLogger:
         Returns:
             Formatted markdown string
         """
-        content = message.get("content", "")
+        content = content_text_for_logs(message.get("content", ""))
 
         # Truncate very long outputs
         if len(content) > self.MAX_CONTENT_LENGTH:
@@ -123,7 +124,7 @@ class MarkdownConversationLogger:
             Formatted markdown string
         """
         role = message.get("role", "unknown")
-        content = message.get("content", "")
+        content = content_text_for_logs(message.get("content", ""))
 
         if role == "user":
             emoji = "👤"

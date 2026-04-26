@@ -18,6 +18,7 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.theme import Theme
 from rich.text import Text
 from prompt_toolkit import PromptSession
@@ -34,6 +35,8 @@ from ui.prompt_utils import get_bottom_toolbar_text, setup_common_bindings, TOOL
 from core.agentic import agentic_answer
 from utils.settings import MonokaiDarkBGStyle, left_align_headings
 from utils.paths import RG_EXE_PATH
+from utils.image_clipboard import read_clipboard_image
+from utils.multimodal import ImageAttachment, build_message_content
 from exceptions import BoneAgentError
 
 # Console setup
@@ -442,6 +445,7 @@ def main():
 
     # Setup prompt_toolkit with Tab key binding
     bindings = setup_common_bindings(chat_manager)
+    pending_attachments = []
 
     def get_prompt(chat_manager):
         """Return colored prompt."""
@@ -460,7 +464,34 @@ def main():
         buffer = event.app.current_buffer
         if buffer is not None:
             buffer.text = ""
+        pending_attachments.clear()
         event.app.invalidate()
+
+    @bindings.add('c-v')
+    def paste_image_or_text(event):
+        """Paste a clipboard image as an attachment, otherwise fall back to text paste."""
+        if INPUT_BLOCKED.get('blocked', False):
+            return
+
+        result = read_clipboard_image()
+        if result.image:
+            attachment = ImageAttachment(
+                index=len(pending_attachments) + 1,
+                data=result.image.data,
+                mime_type=result.image.mime_type,
+            )
+            pending_attachments.append(attachment)
+            event.app.current_buffer.insert_text(attachment.placeholder)
+            console.print(f"[dim]Attached {attachment.placeholder} ({attachment.mime_type}).[/dim]")
+            event.app.invalidate()
+            return
+
+        if result.reason in {"missing_tool", "clipboard_error", "too_large", "unsupported_platform"} and result.message:
+            console.print(f"[yellow]{result.message}[/yellow]")
+            event.app.invalidate()
+            return
+
+        event.app.current_buffer.paste_clipboard_data(event.app.clipboard.get_data())
 
     session = PromptSession(key_bindings=bindings, style=TOOLBAR_STYLE)
 
@@ -479,9 +510,11 @@ def main():
                     lambda: get_prompt(chat_manager),
                     **prompt_kwargs,
                 )
+                prompt_attachments = list(pending_attachments)
+                pending_attachments.clear()
                 user_input = raw_input.strip()
 
-                if not user_input:
+                if not user_input and not prompt_attachments:
                     # Clear the empty input line to avoid multiple prompts stacking
                     import sys
                     sys.stdout.write("\033[F\033[K")  # Move up and clear line
@@ -493,10 +526,13 @@ def main():
                 if cmd_result == "exit":
                     break
                 elif cmd_result == "handled":
+                    if prompt_attachments:
+                        console.print("[dim]Note: Pasted attachments discarded by slash command.[/dim]")
                     continue
 
                 # Use modified input if provided (from /edit command)
                 final_input = modified_input if modified_input else user_input
+                final_content = build_message_content(final_input, prompt_attachments)
 
                 chat_manager.maybe_auto_compact(console)
 
@@ -510,7 +546,7 @@ def main():
                         try:
                             agentic_answer(
                                 chat_manager,
-                                final_input,
+                                final_content,
                                 console,
                                 Path.cwd().resolve(),
                                 RG_EXE_PATH,
@@ -528,7 +564,8 @@ def main():
                             if hasattr(e, 'details') and e.details:
                                 console.print(f"[dim]Details: {e.details}[/dim]", markup=False)
                     else:
-                        chat_manager.messages.append({"role": "user", "content": final_input})
+                        chat_manager.messages.append({"role": "user", "content": final_content})
+                        chat_manager.log_message({"role": "user", "content": final_content})
 
                         try:
                             stream = chat_manager.client.chat_completion(

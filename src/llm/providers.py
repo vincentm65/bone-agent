@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any, Iterator
 import requests
 
 from exceptions import LLMResponseError
+from utils.multimodal import openai_blocks_to_anthropic
 from .codex_provider import CodexResponsesHandler
 
 
@@ -378,9 +379,7 @@ class AnthropicHandler:
                         "text": content
                     })
                 elif isinstance(content, list):
-                    # Already an array (Anthropic format), use as-is
-                    anthropic_messages.append(msg)
-                    continue
+                    content_blocks.extend(openai_blocks_to_anthropic(content))
 
                 # Add tool_use blocks if present (for assistant messages with tool calls)
                 if tool_calls:

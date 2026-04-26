@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -186,11 +186,11 @@ class AgenticOrchestrator:
 
         return [tool for tool in tools if tool["function"]["name"] in effective_names]
 
-    def run(self, user_input, thinking_indicator=None, allowed_tools=None, allow_active_plugins=False):
+    def run(self, user_input: str | list[dict[str, Any]], thinking_indicator=None, allowed_tools=None, allow_active_plugins=False):
         """Main orchestration loop.
 
         Args:
-            user_input: User's input message
+            user_input: User's input message content
             thinking_indicator: Optional ThinkingIndicator instance
             allowed_tools: Optional list of allowed tool names (for research)
             allow_active_plugins: Whether to include active plugin tools in restricted runs
@@ -1067,7 +1067,7 @@ class AgenticOrchestrator:
 
         return False, f"Error: Unknown tool '{function_name}'."
 
-def agentic_answer(chat_manager, user_input, console, repo_root, rg_exe_path, debug_mode, thinking_indicator=None):
+def agentic_answer(chat_manager, user_input: str | list[dict[str, Any]], console, repo_root, rg_exe_path, debug_mode, thinking_indicator=None):
     """Main agent loop using OpenAI-style function calling.
 
     This is a convenience wrapper that creates an AgenticOrchestrator
@@ -1075,7 +1075,7 @@ def agentic_answer(chat_manager, user_input, console, repo_root, rg_exe_path, de
 
     Args:
         chat_manager: ChatManager instance
-        user_input: User's input message
+        user_input: User's input message content
         console: Rich console for output
         repo_root: Path to repository root
         rg_exe_path: Path to rg.exe
