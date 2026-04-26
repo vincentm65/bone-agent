@@ -52,17 +52,7 @@ def supports_images(provider: str, registry: dict[str, Any]) -> bool:
     if isinstance(override, bool):
         return override
 
-    provider_name = provider.lower()
-    model_name = _normalise_model_name(registry)
-    combined = f"{provider_name}/{model_name}"
-
-    if any(hint in combined for hint in _TEXT_ONLY_MODEL_HINTS):
-        return False
-
-    if provider_name in {"anthropic", "gemini", "codex", "bone"}:
-        return True
-
-    return any(hint in combined for hint in _IMAGE_MODEL_HINTS)
+    return True
 
 
 def check_message_capabilities(provider: str, registry: dict[str, Any], messages: list[dict[str, Any]]) -> CapabilityCheck:

@@ -613,9 +613,9 @@ def main():
                             console.print()  # Extra spacing
                         except BoneAgentError as e:
                             # Handle all bone-agent custom exceptions gracefully
-                            console.print(f"[red]Error: {e}[/red]", markup=False)
+                            console.print(f"Error: {e}", style="red", markup=False)
                             if hasattr(e, 'details') and e.details:
-                                console.print(f"[dim]Details: {e.details}[/dim]", markup=False)
+                                console.print(f"Details: {e.details}", style="dim", markup=False)
                     else:
                         chat_manager.messages.append({"role": "user", "content": final_content})
                         chat_manager.log_message({"role": "user", "content": final_content})
@@ -685,9 +685,9 @@ def main():
 
                         except BoneAgentError as e:
                             # Handle all bone-agent custom exceptions gracefully
-                            console.print(f"[red]Error: {e}[/red]", markup=False)
+                            console.print(f"Error: {e}", style="red", markup=False)
                             if hasattr(e, 'details') and e.details:
-                                console.print(f"[dim]Details: {e.details}[/dim]", markup=False)
+                                console.print(f"Details: {e.details}", style="dim", markup=False)
                         except Exception as e:
                             console.print(f"[red]Error during generation: {e}[/red]", markup=False)
                 finally:
