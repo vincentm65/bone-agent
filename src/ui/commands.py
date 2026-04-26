@@ -1239,9 +1239,10 @@ def _handle_review(chat_manager, console, debug_mode_container, args, cron_sched
     console.print(f"[dim]Reviewing {file_count} changed file(s)...[/dim]")
     console.print()
 
-    # Compute paths from shared module
-    from utils.paths import REPO_ROOT, RG_EXE_PATH as _RG_EXE_PATH
-    repo_root = REPO_ROOT
+    # Compute paths from the active working directory
+    from pathlib import Path
+    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
+    repo_root = Path.cwd().resolve()
     rg_exe_path = str(_RG_EXE_PATH)
 
     # Create a live panel for the review sub-agent
@@ -3063,6 +3064,7 @@ _COMMAND_HANDLERS = {
     "/cron": _handle_cron,
     "/prompt": _handle_prompt,
     "/skills": _handle_skills,
+    "/skill": _handle_skills,
 }
 
 

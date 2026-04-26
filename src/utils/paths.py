@@ -1,6 +1,6 @@
 """Shared path constants for bone-agent.
 
-Centralizes APP_ROOT, REPO_ROOT, and tool paths (e.g. ripgrep)
+Centralizes APP_ROOT and tool paths (e.g. ripgrep)
 so they can be imported from both core and ui modules without
 creating circular dependencies.
 """
@@ -23,7 +23,6 @@ def _resolve_app_root() -> Path:
 
 
 APP_ROOT = _resolve_app_root()
-REPO_ROOT = Path.cwd().resolve()
 
 # Platform-agnostic ripgrep path: 'rg' on Unix/Linux, 'rg.exe' on Windows
 _RG_EXE_NAME = "rg.exe" if os.name == "nt" else "rg"

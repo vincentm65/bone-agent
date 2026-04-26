@@ -851,7 +851,7 @@ class AgenticOrchestrator:
             # Restore console output
             self._parallel_context['console'] = self.console
 
-    def _boundary_prompt(self, path_str):
+    def _boundary_prompt(self, path_str, thinking_indicator=None):
         """Prompt the user to grant filesystem access for a path outside boundaries.
 
         Called after a tool returns a boundary error. If the user grants access,
@@ -859,6 +859,7 @@ class AgenticOrchestrator:
 
         Args:
             path_str: The path that triggered the boundary violation.
+            thinking_indicator: Optional ThinkingIndicator instance to pause during approval.
 
         Returns:
             True if user granted access, False if denied.
@@ -876,7 +877,13 @@ class AgenticOrchestrator:
             reason=f'Agent requested access outside project boundary: {path_str}',
             is_edit_tool=False
         )
-        action, _ = panel.run()
+        if thinking_indicator:
+            thinking_indicator.stop()
+        try:
+            action, _ = panel.run()
+        finally:
+            if thinking_indicator:
+                thinking_indicator.start()
 
         if action == "accept":
             console.print("[yellow]Full filesystem access granted[/yellow]\n")
@@ -1011,7 +1018,7 @@ class AgenticOrchestrator:
                     path_arg = arguments.get("path", arguments.get("path_str", ""))
                     if not path_arg:
                         path_arg = extract_boundary_path(result_str)
-                    granted = self._boundary_prompt(path_arg)
+                    granted = self._boundary_prompt(path_arg, thinking_indicator)
                     if granted:
                         set_full_filesystem_access(True)
                         # Retry with the boundary now lifted

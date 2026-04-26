@@ -1,6 +1,6 @@
 {
   "name": "bone-agent",
-  "version": "1.3.3",
+  "version": "1.4.1",
   "description": "A terminal-based AI coding assistant powered by OpenAI-style function calling",
   "main": "src/ui/main.py",
   "bin": {

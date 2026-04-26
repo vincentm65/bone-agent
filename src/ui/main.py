@@ -33,7 +33,7 @@ from ui.banner import display_startup_banner
 from ui.prompt_utils import get_bottom_toolbar_text, setup_common_bindings, TOOLBAR_STYLE
 from core.agentic import agentic_answer
 from utils.settings import MonokaiDarkBGStyle, left_align_headings
-from utils.paths import REPO_ROOT, RG_EXE_PATH
+from utils.paths import RG_EXE_PATH
 from exceptions import BoneAgentError
 
 # Console setup
@@ -512,7 +512,7 @@ def main():
                                 chat_manager,
                                 final_input,
                                 console,
-                                REPO_ROOT,
+                                Path.cwd().resolve(),
                                 RG_EXE_PATH,
                                 DEBUG_MODE_CONTAINER['debug'],
                                 thinking_indicator=thinking_indicator,
