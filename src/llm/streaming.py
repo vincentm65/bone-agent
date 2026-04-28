@@ -47,6 +47,7 @@ class StreamingResponse:
 
         # Accumulated state
         self._text_parts: List[str] = []
+        self._reasoning_parts: List[str] = []  # reasoning/thinking tokens (DeepSeek, etc.)
         self._tool_calls: Dict[int, Dict[str, Any]] = {}  # index -> partial tool call
         self._usage: Optional[Dict[str, Any]] = None
 
@@ -88,9 +89,14 @@ class StreamingResponse:
         """
         # Handle text content
         content = delta.get("content")
-        if content is not None:
+        if content:
             self._print(content)
             self._text_parts.append(content)
+
+        # Handle reasoning/thinking content (DeepSeek, etc.)
+        reasoning = delta.get("reasoning_content")
+        if reasoning is not None:
+            self._reasoning_parts.append(reasoning)
 
         # Handle tool call fragments
         tool_calls = delta.get("tool_calls")
@@ -122,6 +128,11 @@ class StreamingResponse:
     def _build_message(self) -> Dict[str, Any]:
         """Build the final message dict from assembled parts."""
         message: Dict[str, Any] = {"role": "assistant"}
+
+        # Include reasoning_content if present (required by DeepSeek thinking models)
+        reasoning = "".join(self._reasoning_parts).strip()
+        if reasoning:
+            message["reasoning_content"] = reasoning
 
         # Collect assembled tool calls in index order
         assembled_tool_calls = []

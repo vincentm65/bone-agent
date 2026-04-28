@@ -76,6 +76,11 @@ class ChatManager:
         # Set by agentic.py before executing tools, cleared after all results appended
         self._compaction_locked = False
 
+        # Cooldown gate: tracks post-compaction token count to prevent
+        # back-to-back compactions that churn the message prefix and
+        # defeat ephemeral prompt caching.
+        self._tokens_at_last_compaction = 0
+
         self._init_messages(reset_totals=True)
 
     def set_compaction_lock(self, locked):
@@ -798,6 +803,27 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         if len(self.messages) < 6:  # Minimum: user+assistant+tool+assistant+user+assistant
             return
 
+        # Cooldown gate: skip routine compaction unless context has grown enough
+        # since last compaction. This prevents back-to-back compactions that
+        # churn the message prefix and defeat ephemeral prompt caching.
+        # Always allow compaction when override parameters are set (aggressive
+        # compaction from ensure_context_fits).
+        is_aggressive = uncompacted_tail_tokens is not None or min_tool_blocks is not None
+        if not is_aggressive:
+            tc = context_settings.tool_compaction
+            self._update_context_tokens()
+            current = self.token_tracker.current_context_tokens
+
+            # Warmup gate: never compact below the warmup threshold.
+            if current < tc.compaction_warmup_tokens:
+                return
+
+            # Growth gate: skip if context hasn't grown enough since last compaction.
+            if self._tokens_at_last_compaction > 0:
+                growth = current - self._tokens_at_last_compaction
+                if growth < tc.compaction_growth_threshold:
+                    return
+
         # Find completed tool-result blocks
         blocks = self._find_tool_blocks()
 
@@ -884,6 +910,12 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         self.messages = new_messages
         if not skip_token_update:
             self._update_context_tokens()
+
+        # Update cooldown gate with post-compaction token count.
+        # Force a token update regardless of skip_token_update so the
+        # gate always has an accurate baseline.
+        self._update_context_tokens()
+        self._tokens_at_last_compaction = self.token_tracker.current_context_tokens
 
     # ===== AI-Based History Compaction =====
 

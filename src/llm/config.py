@@ -33,6 +33,7 @@ ENV_API_KEYS = {
     'MINIMAX_API_KEY': os.environ.get('MINIMAX_API_KEY'),
     'BONE_PROXY_API_KEY': os.environ.get('BONE_PROXY_API_KEY'),
     'CODEX_PLAN_API_KEY': os.environ.get('CODEX_PLAN_API_KEY'),
+    'DEEPSEEK_API_KEY': os.environ.get('DEEPSEEK_API_KEY'),
 }
 
 # Detect platform for llama.cpp paths
@@ -329,6 +330,24 @@ def _get_provider_registry():
             "allow_top_p": True,
             "allow_temperature": True,
             **_model_cost("KIMI_MODEL"),
+        },
+        "deepseek": {
+            "type": "api",
+            "api_key": _CONFIG.get("DEEPSEEK_API_KEY", ""),
+            "model": _CONFIG.get("DEEPSEEK_MODEL", ""),
+            "api_base": _CONFIG.get("DEEPSEEK_API_BASE", "https://api.deepseek.com"),
+            "endpoint": "/chat/completions",
+            "error_prefix": "DeepSeek",
+            "config_keys": {
+                "DEEPSEEK_API_KEY": "",
+                "DEEPSEEK_MODEL": "",
+                "DEEPSEEK_API_BASE": "https://api.deepseek.com",
+            },
+            "default_temperature": 0.1,
+            "default_top_p": 0.9,
+            "allow_top_p": True,
+            "allow_temperature": True,
+            **_model_cost("DEEPSEEK_MODEL"),
         },
         "codex": {
             "type": "api",

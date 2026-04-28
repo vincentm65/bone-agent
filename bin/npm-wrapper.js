@@ -43,13 +43,20 @@ if (!fs.existsSync(path.join(packageDir, 'package.json'))) {
 const pythonScript = path.join(packageDir, 'src', 'ui', 'main.py');
 
 function findPython() {
-  const possibleCommands = ['python3', 'python', 'python3.9', 'python3.10', 'python3.11', 'python3.12'];
+  const possibleCommands = ['python3.12', 'python3.11', 'python3.10', 'python3', 'python'];
   
   for (const cmd of possibleCommands) {
     try {
-      const result = spawnSync(cmd, ['--version'], { stdio: 'ignore' });
-      if (result.status === 0) {
-        return cmd;
+      const versionResult = spawnSync(cmd, ['--version'], { stdio: ['pipe', 'pipe', 'ignore'] });
+      if (versionResult.status === 0) {
+        const versionMatch = versionResult.stdout.toString().match(/Python (\d+)\.(\d+)/);
+        if (versionMatch) {
+          const major = parseInt(versionMatch[1], 10);
+          const minor = parseInt(versionMatch[2], 10);
+          if (major >= 3 && minor >= 10) {
+            return cmd;
+          }
+        }
       }
     } catch (e) {
       // Continue to next command
@@ -110,7 +117,7 @@ function showSetupMessage() {
   console.log('bone-agent - Terminal-based AI coding assistant');
   console.log('='.repeat(60));
   console.log('\nFirst-time setup needed!\n');
-  console.log('1. Python is required (3.9 or later)');
+  console.log('1. Python is required (3.10 or later)');
   console.log('2. Python dependencies need to be installed\n');
   console.log('To complete setup, run:');
   console.log('  npm run install\n');
@@ -175,7 +182,7 @@ async function main() {
   const pythonCmd = findPython();
   
   if (!pythonCmd) {
-    console.error('\n❌ Error: Python 3.9+ is not installed or not in PATH');
+    console.error('\n❌ Error: Python 3.10+ is not installed or not in PATH');
     console.error('Please install Python from https://python.org\n');
     process.exit(1);
   }

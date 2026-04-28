@@ -291,7 +291,7 @@ class AgenticOrchestrator:
                     detail_lines = []
                     for key, value in getattr(e, "details", {}).items():
                         value_str = str(value)
-                        if "\n" in value_str or key == "original_error":
+                        if "\n" in value_str and key != "original_error":
                             detail_lines.append(f"{key}: {value_str}")
                     detailed_error = str(e)
                     if detail_lines:
@@ -398,13 +398,17 @@ class AgenticOrchestrator:
             return False  # Should not happen if called correctly
 
         # Append assistant message with ALL tool calls (include content if present)
-        # This must happen BEFORE filtering so the LLM sees its original intent
+        # This must happen BEFORE filtering so the LLM sees its original intent.
+        # Keep provider-specific fields too; DeepSeek reasoning models require
+        # reasoning_content to be passed back on later requests.
         content = (response.get("content") or "").strip()
-        assistant_msg = {"role": "assistant", "tool_calls": tool_calls}
-        if response.get("_responses_output"):
-            assistant_msg["_responses_output"] = response["_responses_output"]
+        assistant_msg = dict(response)
+        assistant_msg["role"] = "assistant"
+        assistant_msg["tool_calls"] = tool_calls
         if content:
             assistant_msg["content"] = content
+        elif "content" in assistant_msg:
+            assistant_msg.pop("content")
         self.chat_manager.messages.append(assistant_msg)
         # Log assistant tool call message
         self.chat_manager.log_message(assistant_msg)

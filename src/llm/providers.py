@@ -415,6 +415,7 @@ HANDLER_REGISTRY = {
     "minimax": AnthropicHandler,
     "minimax_plan": AnthropicHandler,
     "kimi": OpenAIHandler,
+    "deepseek": OpenAIHandler,
     "anthropic": AnthropicHandler,
     "local": OpenAIHandler,
     "codex": CodexResponsesHandler,

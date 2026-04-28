@@ -20,9 +20,12 @@ class BoneAgentError(Exception):
     def __str__(self):
         base_msg = super().__str__()
         if self.details:
-            # Skip multi-line values from the compact string representation
+            # Skip multi-line values and internal detail keys from the compact string representation
             # (they're included separately in detailed error formatting)
-            single_line_details = {k: v for k, v in self.details.items() if "\n" not in str(v)}
+            single_line_details = {
+                k: v for k, v in self.details.items()
+                if "\n" not in str(v) and k not in ("original_error",)
+            }
             if single_line_details:
                 details_str = ", ".join(f"{k}={v}" for k, v in single_line_details.items())
                 return f"{base_msg} ({details_str})"

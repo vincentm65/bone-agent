@@ -362,6 +362,8 @@ def run_sub_agent(
         "completion_tokens": delta_completion,
         "total_tokens": delta_total,
         "context_tokens": tt.current_context_tokens,
+        "cache_read_input_tokens": tt.total_cache_read_tokens,
+        "cache_creation_input_tokens": tt.total_cache_creation_tokens,
     }
     if delta_cost > 0:
         usage["cost"] = delta_cost

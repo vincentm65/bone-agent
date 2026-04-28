@@ -76,6 +76,8 @@ class ToolCompactionSettings:
     uncompacted_tail_tokens: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("uncompacted_tail_tokens", 40_000))
     min_tool_blocks: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("min_tool_blocks", 5))
     compact_failed_tools: bool = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("compact_failed_tools", True))
+    compaction_growth_threshold: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("compaction_growth_threshold", 50_000))
+    compaction_warmup_tokens: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("compaction_warmup_tokens", 30_000))
 
 
 @dataclass

@@ -528,16 +528,22 @@ class SettingSelector:
             setting = self._get_current_setting()
             if setting and setting.input_type in ("text", "number", "float"):
                 data = event.data
-                if len(data) == 1 and ord(data) >= 32:
-                    if setting.input_type == "number":
-                        if data.isdigit() or (data == '-' and not self.input_buffer):
-                            self.input_buffer += data
-                    elif setting.input_type == "float":
-                        if data.isdigit() or (data == '.' and '.' not in self.input_buffer) or (data == '-' and not self.input_buffer):
-                            self.input_buffer += data
-                    else:
+                if not data or not any(ord(c) >= 32 for c in data):
+                    return
+                if setting.input_type == "number":
+                    valid = data.isdigit() or (data == '-' and not self.input_buffer)
+                    if valid:
                         self.input_buffer += data
-                    invalidate()
+                elif setting.input_type == "float":
+                    valid = (data.isdigit()
+                             or (data == '.' and '.' not in self.input_buffer)
+                             or (data == '-' and not self.input_buffer))
+                    if valid:
+                        self.input_buffer += data
+                else:
+                    # text: accept entire paste (multi-char) or single char
+                    self.input_buffer += data
+                invalidate()
 
         @bindings.add(Keys.Backspace)
         def handle_backspace(event):

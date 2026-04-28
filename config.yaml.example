@@ -38,6 +38,11 @@ KIMI_API_KEY: "your-kimi-key-here"
 KIMI_MODEL: moonshot-v1-8k
 KIMI_API_BASE: "https://api.moonshot.cn/v1"
 
+# DeepSeek
+DEEPSEEK_API_KEY: "your-deepseek-key-here"
+DEEPSEEK_MODEL: deepseek-chat
+DEEPSEEK_API_BASE: "https://api.deepseek.com/v1"
+
 # MiniMax (Anthropic-compatible API)
 MINIMAX_API_KEY: "your-minimax-key-here"
 MINIMAX_MODEL: "MiniMax-M2"
@@ -100,6 +105,12 @@ CONTEXT_SETTINGS:
     uncompacted_tail_tokens: 40000
     min_tool_blocks: 5
     compact_failed_tools: true
+    # Skip routine compaction unless context has grown by this many tokens
+    # since last compaction. Prevents cache-churning back-to-back compactions.
+    compaction_growth_threshold: 50000
+    # Minimum context tokens before any routine compaction is allowed.
+    # Ensures caching has value before we start rewriting message history.
+    compaction_warmup_tokens: 30000
 
 # -- Sub-Agent Settings -------------------------------------------------------
 
