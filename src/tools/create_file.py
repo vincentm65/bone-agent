@@ -44,7 +44,8 @@ def _validate_create_path(
         "type": "object",
         "properties": {
             "path_str": {"type": "string", "description": "Path to create"},
-            "content": {"type": "string", "description": "Initial content (omit for empty file)"}
+            "content": {"type": "string", "description": "Initial content (omit for empty file)"},
+            "reason": {"type": "string", "description": "Required when creating outside the project boundary: explain why broader filesystem access is necessary"}
         },
         "required": ["path_str"]
     },
@@ -55,6 +56,7 @@ def create_file(
     content: Optional[str] = None,
     gitignore_spec = None,
     vault_root: str = None,
+    reason: str = None,
 ) -> str:
     """Create a new file with optional initial content.
 

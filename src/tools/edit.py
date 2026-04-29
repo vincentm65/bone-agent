@@ -437,7 +437,7 @@ def run_edit_file(arguments, repo_root, console, gitignore_spec=None, vault_root
             },
             "reason": {
                 "type": "string",
-                "description": "Brief explanation (shown during confirmation)"
+                "description": "Brief explanation shown during confirmation; required when editing outside the project boundary to explain why broader filesystem access is necessary"
             }
         },
         "required": ["path", "search", "replace"]

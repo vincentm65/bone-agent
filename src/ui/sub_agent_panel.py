@@ -40,6 +40,7 @@ class SubAgentPanel:
         self._spinner_thread = None
         self._stop_spinner = threading.Event()
         self._saved_termios = None
+        self._suspended = False
 
     # ------------------------------------------------------------------
     # Panel rendering
@@ -144,26 +145,57 @@ class SubAgentPanel:
         Returns:
             self for use in with statement
         """
+        self._start_live()
+        return self
+
+    def __exit__(self, *args):
+        """End Live display context."""
+        self._stop_live(*args)
+
+    def _start_live(self):
+        """Start the Rich Live display and spinner if not already active."""
+        if self._live:
+            return
+
+        self._stop_spinner.clear()
         self._saved_termios = self._set_raw_mode()
         panel = self._render_panel()
         self._live = Live(panel, console=self.console, refresh_per_second=10)
         self._live.__enter__()
 
-        # Start background spinner thread
         self._spinner_thread = threading.Thread(target=self._spin, daemon=True)
         self._spinner_thread.start()
 
-        return self
-
-    def __exit__(self, *args):
-        """End Live display context."""
+    def _stop_live(self, *args, transient=False):
+        """Stop the Rich Live display and restore terminal mode."""
         self._stop_spinner.set()
         if self._spinner_thread:
             self._spinner_thread.join(timeout=0.5)
+            self._spinner_thread = None
         if self._live:
-            self._live.__exit__(*args)
+            live = self._live
+            self._live = None
+            if transient:
+                live.transient = True
+            live.__exit__(*args)
         self._restore_terminal_mode(self._saved_termios)
         self._saved_termios = None
+
+    def suspend(self):
+        """Temporarily release terminal ownership for an interactive prompt."""
+        if not self._live:
+            return False
+        self._stop_live(None, None, None, transient=True)
+        self._suspended = True
+        return True
+
+    def resume(self):
+        """Resume the live panel after a temporary suspension."""
+        if not self._suspended:
+            return
+        self._suspended = False
+        if self._show_spinner:
+            self._start_live()
 
     # ------------------------------------------------------------------
     # Public API
@@ -186,7 +218,8 @@ class SubAgentPanel:
         # Keep only last 5 tool calls
         if len(self.tool_calls) > 5:
             self.tool_calls.pop(0)
-        self._live.update(self._render_panel())
+        if self._live:
+            self._live.update(self._render_panel())
 
     def append(self, text):
         """Append text to panel and refresh display (kept for compatibility).
@@ -194,8 +227,9 @@ class SubAgentPanel:
         Args:
             text: Text to append (may contain Rich markup)
         """
-        # Just update panel to refresh title counter
-        self._live.update(self._render_panel())
+        # Update panel to refresh title counter (no-op if context manager not entered)
+        if self._live:
+            self._live.update(self._render_panel())
 
     def set_complete(self, usage=None):
         """Mark panel as complete with optional token info.
@@ -204,6 +238,9 @@ class SubAgentPanel:
             usage: Optional dict with 'prompt', 'completion', 'total' token counts
         """
         self._show_spinner = False  # Stop spinner
+
+        if not self._live:
+            return
 
         # Build title with token usage: conversation length first, total billed second
         if usage and usage.get('total_tokens'):
@@ -225,6 +262,8 @@ class SubAgentPanel:
             message: Error message to display
         """
         self._show_spinner = False  # Stop spinner
+        if not self._live:
+            return
         self._live.update(Panel(
             message,
             title="[red]✗ Sub-Agent Error[/red]",

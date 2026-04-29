@@ -296,7 +296,7 @@ def ensure_dream_job(config: CronConfig) -> None:
         job = CronJob(
             id=DREAM_JOB_ID,
             schedule=DREAM_JOB_SCHEDULE,
-            command="Run the dream memory consolidation process. Read yesterday's user messages from ~/.bone/conversations/, analyze them for preferences and patterns, and consolidate into memory files. Then clean up JSONL files older than 7 days.",
+            command="Run the dream memory consolidation process. Read yesterday's user messages from ~/.bone/conversations/, analyze them for user preferences, constraints, and explicit 'remember this' requests — do NOT record activity history or what the user was working on. Consolidate into memory files. Then clean up JSONL files older than 7 days.",
             enabled=True,
             description="Dream memory consolidation — scans user messages and updates memories",
         )

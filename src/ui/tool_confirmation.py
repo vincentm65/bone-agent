@@ -9,6 +9,7 @@ from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout, HSplit, Window
+from prompt_toolkit.layout.dimension import Dimension as D
 from prompt_toolkit.layout.controls import FormattedTextControl
 
 
@@ -172,7 +173,7 @@ class ToolConfirmationPanel:
         content_control = FormattedTextControl(get_content)
 
         root_container = HSplit([
-            Window(content=content_control, height=None),
+            Window(content=content_control, height=None, width=D(min=1), wrap_lines=True),
         ])
 
         return Layout(root_container)

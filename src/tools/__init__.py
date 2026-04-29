@@ -127,15 +127,14 @@ except Exception as e:
 # Plugin modules with @tool(tier="plugin") register into the manifest
 # and are only activated in ToolRegistry on-demand via search_plugins.
 try:
-    from .helpers.loader import discover_tools
+    from .helpers.loader import discover_tools, ensure_user_tool_plugins_dir
     from .helpers.plugin_manifest import plugin_manifest
 
-    repo_root = Path(__file__).resolve().parents[2]
-    src_dir = str(repo_root / "src")
+    src_dir = str(Path(__file__).resolve().parents[1])
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
 
-    discover_tools([str(repo_root / "tool_plugins")])
+    discover_tools([str(ensure_user_tool_plugins_dir())])
 
     _logger.info(
         "Plugin manifest: %s plugins available (categories: %s)",

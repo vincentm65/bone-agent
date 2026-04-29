@@ -1502,24 +1502,29 @@ def _handle_ask(chat_manager, console, debug_mode_container, args, cron_schedule
     else:
         context_desc = "fresh"
 
-    panel = SubAgentPanel(f"Asking with {context_desc} context", console)
+    panel = SubAgentPanel(query, console)
 
     try:
-        sub_result = run_sub_agent(
-            task_query=query,
-            repo_root=Path.cwd().resolve(),
-            rg_exe_path=str(_RG_EXE_PATH),
-            console=console,
-            panel_updater=panel,
-            sub_agent_type="ask",
-            initial_context=context_str,
-        )
-    except Exception as e:
-        console.print(f"[red]Sub-agent failed: {e}[/red]")
-        return CommandResult(status="handled")
+        with panel:
+            sub_result = run_sub_agent(
+                task_query=query,
+                repo_root=Path.cwd().resolve(),
+                rg_exe_path=str(_RG_EXE_PATH),
+                console=console,
+                panel_updater=panel,
+                sub_agent_type="ask",
+                initial_context=context_str,
+            )
 
-    if sub_result.get("error"):
-        console.print(f"[red]Sub-agent error: {sub_result['error']}[/red]")
+            if sub_result.get("error"):
+                panel.set_error(sub_result["error"])
+                console.print(f"[red]Sub-agent error: {sub_result['error']}[/red]")
+                return CommandResult(status="handled")
+
+            panel.set_complete(sub_result.get("usage", {}))
+    except Exception as e:
+        panel.set_error(str(e))
+        console.print(f"[red]Sub-agent failed: {e}[/red]")
         return CommandResult(status="handled")
 
     # Track sub-agent usage in main chat_manager

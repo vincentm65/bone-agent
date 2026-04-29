@@ -35,7 +35,8 @@ def web_search(
     query: str,
     console,
     num_results: Optional[int] = None,
-    fetch_content: bool = True
+    fetch_content: bool = True,
+    panel_updater = None
 ) -> str:
     """Search the web using DuckDuckGo with optional full content extraction.
 
@@ -44,6 +45,7 @@ def web_search(
         console: Rich console for output (injected by context)
         num_results: Number of results to return (default: 5, max: 10)
         fetch_content: Whether to fetch full page content (default: true)
+        panel_updater: Optional SubAgentPanel for routing output to sub-agent panel
 
     Returns:
         Formatted search results with content
@@ -54,7 +56,7 @@ def web_search(
     arguments["fetch_content"] = fetch_content
 
     try:
-        return run_web_search(arguments, console)
+        return run_web_search(arguments, console, panel_updater=panel_updater)
     except LLMConnectionError as e:
         return f"exit_code=1\nWeb search failed: {e}"
     except Exception as e:

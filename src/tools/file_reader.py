@@ -228,7 +228,8 @@ def _read_file_content(
         "properties": {
             "path_str": {"type": "string", "description": "Path to read"},
             "max_lines": {"type": "integer", "description": "Max lines to read (omit for full file)"},
-            "start_line": {"type": "integer", "description": "1-based start line (default: 1)"}
+            "start_line": {"type": "integer", "description": "1-based start line (default: 1)"},
+            "reason": {"type": "string", "description": "Required when reading outside the project boundary: explain why broader filesystem access is necessary"}
         },
         "required": ["path_str"]
     },
@@ -240,6 +241,7 @@ def read_file(
     start_line: Optional[int] = None,
     gitignore_spec = None,
     vault_root: str = None,
+    reason: str = None,
 ) -> str:
     """Read a file's contents.
 

@@ -19,14 +19,50 @@ _FETCH_DELAY = 1.0
 # User agent for page fetching
 _USER_AGENT = "Mozilla/5.0 (compatible; bone-agent/1.0; +https://github.com/vincentm65/bone-agent-cli)"
 
-def _fetch_page_content(url, console=None):
+
+def _strip_invalid_xml_chars(text):
+    """Remove characters lxml cannot place in XML/HTML text nodes."""
+    return "".join(
+        char for char in text
+        if (
+            char in "\t\n\r"
+            or 0x20 <= ord(char) <= 0xD7FF
+            or 0xE000 <= ord(char) <= 0xFFFD
+            or 0x10000 <= ord(char) <= 0x10FFFF
+        )
+    )
+
+
+def _emit_status(text, console, panel_updater=None, style="dim"):
+    """Emit status for top-level searches; suppress live sub-agent status.
+
+    Sub-agent calls receive fetch failures through returned tool metadata/errors, so
+    live status should not leak into the main chat.
+
+    Args:
+        text: Status message (plain text, no Rich markup needed)
+        console: Rich console for output (may be None)
+        panel_updater: Optional SubAgentPanel indicating sub-agent routing
+        style: Rich style name for console output (default: "dim")
+    """
+    if panel_updater:
+        # Sub-agent calls receive page-fetch failures through tool result metadata.
+        # Avoid polluting the main chat with informational fetch status.
+        return
+    if console:
+        console.print(f"  [{style}]{text}[/{style}]")
+
+
+def _fetch_page_content(url):
     """Fetch a URL and extract main article content as markdown.
 
     Args:
         url: URL to fetch
 
     Returns:
-        str: Extracted markdown content, or empty string on failure
+        tuple: (content, error_reason) where content is the extracted markdown
+               (empty string on failure) and error_reason is a short failure
+               code like "403", "timeout", "connection error", or None on success.
     """
     try:
         response = requests.get(
@@ -40,18 +76,15 @@ def _fetch_page_content(url, console=None):
         # Skip non-HTML content (PDFs, images, JSON APIs, etc.)
         content_type = response.headers.get("content-type", "")
         if "text/html" not in content_type and "text/plain" not in content_type:
-            if console:
-                console.print(f"  [dim]Skipped {url} (non-HTML: {content_type})[/dim]")
-            return ""
+            return "", "non-HTML"
 
         # Check for empty response before parsing
-        if not response.text or not response.text.strip():
-            if console:
-                console.print(f"  [dim]Empty response from {url}[/dim]")
-            return ""
+        page_text = _strip_invalid_xml_chars(response.text)
+        if not page_text or not page_text.strip():
+            return "", "empty"
 
         # Use readability to extract the main article content
-        doc = Document(response.text)
+        doc = Document(page_text)
         summary_html = doc.summary()
 
         # Convert cleaned HTML to markdown (per-call instance for thread safety)
@@ -68,19 +101,24 @@ def _fetch_page_content(url, console=None):
                 cutoff = _MAX_CONTENT_LENGTH
             content = content[:cutoff] + "\n\n[... content truncated]"
 
-        return content
+        return content, None
 
-    except requests.RequestException as e:
-        if console:
-            console.print(f"  [dim]Failed to fetch {url}: {e}[/dim]")
-        return ""
-    except Exception as e:
-        if console:
-            console.print(f"  [dim]Failed to parse {url}: {e}[/dim]")
-        return ""
+    except requests.HTTPError as e:
+        status = e.response.status_code
+        return "", str(status)
+    except requests.Timeout:
+        return "", "timeout"
+    except requests.ConnectionError:
+        return "", "connection error"
+    except requests.RequestException:
+        return "", "request error"
+    except (ValueError, TypeError, UnicodeError):
+        return "", "parse error"
+    except Exception:
+        return "", "parse error"
 
 
-def run_web_search(arguments, console):
+def run_web_search(arguments, console, panel_updater=None):
     """Execute web search using DuckDuckGo and return formatted results.
 
     Args:
@@ -90,6 +128,7 @@ def run_web_search(arguments, console):
             "fetch_content": true  # optional, fetch full page content (default: true)
         }
         console: Rich console for output
+        panel_updater: Optional SubAgentPanel for routing output to sub-agent panel
 
     Returns:
         str: Formatted search results with metadata for model consumption
@@ -124,6 +163,7 @@ def run_web_search(arguments, console):
         fetch_count = min(_DEFAULT_FETCH_COUNT, len(results)) if fetch_content else 0
         pages_fetched = 0
         pages_failed = 0
+        failure_reasons = []  # Collect short failure codes for metadata
 
         # Format results for model
         output_lines = []
@@ -138,13 +178,18 @@ def run_web_search(arguments, console):
 
             # Fetch full content for top results
             if fetch_content and idx <= fetch_count:
-                content = _fetch_page_content(url, console)
+                content, error_reason = _fetch_page_content(url)
                 if content:
                     output_lines.append(f"\n--- Content ---\n{content}")
                     pages_fetched += 1
                 else:
                     output_lines.append(f"\n[Failed to fetch page content]")
                     pages_failed += 1
+                    if error_reason:
+                        failure_reasons.append(error_reason)
+                        # Emit live status only for top-level searches; sub-agents
+                        # receive this through the returned metadata below.
+                        _emit_status(f"Failed: {error_reason}", console, panel_updater)
 
                 # Rate limiting: delay between fetches
                 if idx < fetch_count:
@@ -160,13 +205,15 @@ def run_web_search(arguments, console):
             meta += f", pages_fetched={pages_fetched}"
             if pages_failed:
                 meta += f", pages_failed={pages_failed}"
+            if failure_reasons:
+                meta += f", failures={','.join(failure_reasons)}"
         return f"{meta}\n{result_content}\n\n"
 
     except LLMConnectionError:
         # Re-raise our custom exceptions
         raise
     except Exception as e:
-        console.print(f"Web search failed: {e}", style="red")
+        _emit_status(f"Web search failed: {e}", console, panel_updater, style="red")
         raise LLMConnectionError(
             f"Failed to perform web search",
             details={"query": query, "original_error": str(e)}

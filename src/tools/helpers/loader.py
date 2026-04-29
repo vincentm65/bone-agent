@@ -7,6 +7,7 @@ registration.
 
 import importlib.util
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -14,6 +15,21 @@ from typing import List, Optional
 from .base import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def get_user_tool_plugins_dir() -> Path:
+    """Return the configured user plugin directory."""
+    override = os.environ.get("BONE_TOOL_PLUGINS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".bone" / "tool_plugins"
+
+
+def ensure_user_tool_plugins_dir() -> Path:
+    """Create and return the user plugin directory."""
+    path = get_user_tool_plugins_dir()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _is_python_file(path: Path) -> bool:

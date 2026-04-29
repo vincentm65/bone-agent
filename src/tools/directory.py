@@ -158,7 +158,8 @@ def _validate_directory_path(
             "recursive": {"type": "boolean", "description": "List recursively (default: false)"},
             "show_files": {"type": "boolean", "description": "Include files (default: true)"},
             "show_dirs": {"type": "boolean", "description": "Include directories (default: true)"},
-            "pattern": {"type": "string", "description": "Glob filter (e.g., \"*.py\")"}
+            "pattern": {"type": "string", "description": "Glob filter (e.g., \"*.py\")"},
+            "reason": {"type": "string", "description": "Required when listing outside the project boundary: explain why broader filesystem access is necessary"}
         },
         "required": ["path_str"]
     },
@@ -171,7 +172,8 @@ def list_directory(
     show_dirs: bool = True,
     pattern: Optional[str] = None,
     gitignore_spec = None,
-    vault_root: str = None
+    vault_root: str = None,
+    reason: str = None
 ) -> str:
     """List directory contents.
 

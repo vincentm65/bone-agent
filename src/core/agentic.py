@@ -198,47 +198,56 @@ class AgenticOrchestrator:
         self._current_allowed_tools = allowed_tools
         self._current_allow_active_plugins = allow_active_plugins
 
+        user_message = {"role": "user", "content": user_input}
+
         # Append user message
-        self.chat_manager.messages.append({"role": "user", "content": user_input})
+        self.chat_manager.messages.append(user_message)
 
         # Log user message
-        self.chat_manager.log_message({"role": "user", "content": user_input})
+        self.chat_manager.log_message(user_message)
 
         from tools.helpers.base import ToolRegistry
 
-        while True:
-            # Decrement plugin TTLs after previous iteration's tool execution.
-            # Evicted plugins are excluded from the next LLM call's context window.
-            evicted = ToolRegistry.decrement_plugin_ttls()
-            if evicted and self.debug_mode:
-                self.console.print(f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]")
+        try:
+            while True:
+                # Decrement plugin TTLs after previous iteration's tool execution.
+                # Evicted plugins are excluded from the next LLM call's context window.
+                evicted = ToolRegistry.decrement_plugin_ttls()
+                if evicted and self.debug_mode:
+                    self.console.print(f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]")
 
-            # Get response from LLM
-            response = self._get_llm_response(
-                allowed_tools=allowed_tools,
-                allow_active_plugins=allow_active_plugins,
-            )
-            if response is None:
-                return
-
-            # Auto-compact if over token threshold (applies to both main agent and subagent)
-            self.chat_manager.maybe_auto_compact()
-
-            # Check for tool calls
-            tool_calls = response.get("tool_calls")
-
-            if not tool_calls:
-                if self._handle_final_response(response, thinking_indicator):
-                    return
-            else:
-                should_exit = self._handle_tool_calls(
-                    response,
-                    thinking_indicator,
-                    allowed_tools,
+                # Get response from LLM
+                response = self._get_llm_response(
+                    allowed_tools=allowed_tools,
                     allow_active_plugins=allow_active_plugins,
                 )
-                if should_exit:
+                if response is None:
                     return
+
+                # Auto-compact if over token threshold (applies to both main agent and subagent)
+                self.chat_manager.maybe_auto_compact()
+
+                # Check for tool calls
+                tool_calls = response.get("tool_calls")
+
+                if not tool_calls:
+                    if self._handle_final_response(response, thinking_indicator):
+                        return
+                else:
+                    should_exit = self._handle_tool_calls(
+                        response,
+                        thinking_indicator,
+                        allowed_tools,
+                        allow_active_plugins=allow_active_plugins,
+                    )
+                    if should_exit:
+                        return
+        except KeyboardInterrupt:
+            msgs = self.chat_manager.messages
+            if msgs and msgs[-1] is user_message:
+                msgs.pop()
+                self.chat_manager.sync_log()
+            raise
 
     def _get_llm_response(self, allowed_tools=None, allow_active_plugins=False):
         """Get next LLM response with tool definitions.
@@ -855,7 +864,7 @@ class AgenticOrchestrator:
             # Restore console output
             self._parallel_context['console'] = self.console
 
-    def _boundary_prompt(self, path_str, thinking_indicator=None):
+    def _boundary_prompt(self, path_str, access_reason, thinking_indicator=None):
         """Prompt the user to grant filesystem access for a path outside boundaries.
 
         Called after a tool returns a boundary error. If the user grants access,
@@ -863,24 +872,34 @@ class AgenticOrchestrator:
 
         Args:
             path_str: The path that triggered the boundary violation.
+            access_reason: Agent-provided reason for requesting broader access.
             thinking_indicator: Optional ThinkingIndicator instance to pause during approval.
 
         Returns:
             True if user granted access, False if denied.
         """
-        if self.is_sub_agent:
-            return False
-
         console = self._get_console()
         if console is None:
             return False
 
+        access_reason = (access_reason or "").strip()
+        if not access_reason:
+            return False
+
+        prompt_reason = (
+            f"Agent requested access outside project boundary: {path_str}\n\n"
+            f"Requested purpose: {access_reason}"
+        )
+
         from ui.tool_confirmation import ToolConfirmationPanel
         panel = ToolConfirmationPanel(
             'Grant filesystem access',
-            reason=f'Agent requested access outside project boundary: {path_str}',
+            reason=prompt_reason,
             is_edit_tool=False
         )
+        suspended_panel = False
+        if self.is_sub_agent and self.panel_updater and hasattr(self.panel_updater, "suspend"):
+            suspended_panel = self.panel_updater.suspend()
         if thinking_indicator:
             thinking_indicator.stop()
         try:
@@ -888,6 +907,8 @@ class AgenticOrchestrator:
         finally:
             if thinking_indicator:
                 thinking_indicator.start()
+            if suspended_panel and hasattr(self.panel_updater, "resume"):
+                self.panel_updater.resume()
 
         if action == "accept":
             console.print("[yellow]Full filesystem access granted[/yellow]\n")
@@ -1022,7 +1043,14 @@ class AgenticOrchestrator:
                     path_arg = arguments.get("path", arguments.get("path_str", ""))
                     if not path_arg:
                         path_arg = extract_boundary_path(result_str)
-                    granted = self._boundary_prompt(path_arg, thinking_indicator)
+                    access_reason = arguments.get("reason", "")
+                    if not access_reason.strip():
+                        return False, (
+                            "exit_code=1\n"
+                            "Full filesystem access requires a non-empty reason. "
+                            "Retry this tool call with a reason explaining why access outside the project boundary is necessary."
+                        )
+                    granted = self._boundary_prompt(path_arg, access_reason, thinking_indicator)
                     if granted:
                         set_full_filesystem_access(True)
                         # Retry with the boundary now lifted

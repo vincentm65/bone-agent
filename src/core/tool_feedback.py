@@ -620,7 +620,7 @@ def _parse_web_search_metadata(first_line):
         first_line: The first line of web_search tool result containing metadata.
 
     Returns:
-        str: Human-readable summary like "Found 5 results, 3 pages fetched"
+        str: Human-readable summary like "Found 5 results, 3 pages fetched, 1 failed (403)"
     """
     match = re.search(r'results_found=(\d+)', first_line)
     if not match:
@@ -642,7 +642,12 @@ def _parse_web_search_metadata(first_line):
     if failed:
         f = int(failed.group(1))
         if f > 0:
-            parts.append(f"{f} failed")
+            failures = re.search(r'failures=([^\s]+)', first_line)
+            if failures:
+                reasons = failures.group(1)
+                parts.append(f"{f} failed ({reasons})")
+            else:
+                parts.append(f"{f} failed")
 
     return ", ".join(parts)
 
