@@ -66,6 +66,14 @@ SERVER_SETTINGS:
   health_check_timeout_sec: 120
   health_check_interval_sec: 1.0
 
+# Optional per-model overrides. Keys are model paths/filenames; omitted values
+# fall back to SERVER_SETTINGS above. New models start with an empty object.
+LOCAL_MODEL_SETTINGS:
+  "/path/to/your/model.gguf":
+    ctx_size: 32768
+    ngl_layers: 99
+    threads: 8
+
 # -- Tool Settings ------------------------------------------------------------
 
 TOOL_SETTINGS:

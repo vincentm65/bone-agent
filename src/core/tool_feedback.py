@@ -156,6 +156,22 @@ def build_tool_label(function_name, arguments):
         command = arguments.get('command', '')
         # Truncate long commands for display
         return f"execute_command: {command[:80]}" if command else "execute_command"
+    elif function_name == "dispatch_swarm_task":
+        plan_index = arguments.get('plan_index')
+        if plan_index is not None:
+            return f"dispatch_swarm_task: plan {plan_index}"
+        return "dispatch_swarm_task"
+    elif function_name == "handle_approval":
+        task_id = arguments.get('task_id', '?')
+        call_id = arguments.get('call_id', '?')
+        approved = arguments.get('approved', False)
+        action = "approve" if approved else "deny"
+        return f"handle_approval: {action} {task_id}/{call_id}"
+    elif function_name == "mark_swarm_complete":
+        return "mark_swarm_complete"
+    elif function_name == "kill_swarm_worker":
+        worker_id = arguments.get('worker_id', '?')
+        return f"kill_swarm_worker: {worker_id}"
     else:
         return function_name
 
@@ -470,6 +486,82 @@ def handle_execute_command_feedback(tool_result, console, panel_updater):
 
 
 # ---------------------------------------------------------------------------
+# Swarm tool summary helper
+# ---------------------------------------------------------------------------
+
+def _format_swarm_tool_summary(command, tool_result):
+    """Format a console summary for a swarm admin tool result.
+
+    Args:
+        command: The tool command string (e.g. "dispatch_swarm_task", "handle_approval").
+        tool_result: The tool result string from the tool.
+
+    Returns:
+        tuple: (formatted_message, is_failure) where is_failure indicates
+               whether the result had a non-zero exit code.
+    """
+    lines = tool_result.split('\n')
+    exit_code = extract_exit_code(tool_result)
+
+    if command.startswith("dispatch_swarm_task") and exit_code == 0:
+        # Structured dispatch result: extract fields
+        task_id = ""
+        status = ""
+        agent = ""
+        write_scope = []
+        queue_pos = None
+        section = None
+        for line in lines:
+            stripped = line.strip()
+            if line.startswith("Task:"):
+                task_id = line.split(":", 1)[1].strip()
+                section = None
+            elif line.startswith("Status:"):
+                status = line.split(":", 1)[1].strip()
+                section = None
+            elif line.startswith("Agent:"):
+                agent = line.split(":", 1)[1].strip()
+                section = None
+            elif stripped.startswith("Queue position:"):
+                try:
+                    queue_pos = int(stripped.split(":", 1)[1].strip())
+                except (ValueError, IndexError):
+                    queue_pos = None
+                section = None
+            elif stripped == "Write scope:":
+                section = "write_scope"
+            elif stripped == "Prompt sent:":
+                section = "prompt"
+            elif section == "write_scope":
+                if stripped.startswith("- "):
+                    write_scope.append(stripped[2:])
+            elif section == "prompt":
+                continue
+
+        scope_text = ", ".join(write_scope) if write_scope else "none"
+        status_text = f" ({status})" if status else ""
+        q_text = f"; queue position: {queue_pos}" if queue_pos is not None else ""
+        return f"Dispatched {task_id} → {agent}{status_text}; Write scope: {scope_text}{q_text}", False
+
+    # Generic: first non-exit_code line as summary
+    first_content = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("exit_code="):
+            first_content = stripped
+            break
+
+    if not first_content:
+        return "", exit_code != 0
+
+    # Remove trailing period for consistency (only single trailing period)
+    if first_content.endswith('.') and len(first_content) > 1:
+        first_content = first_content[:-1]
+
+    return first_content, exit_code != 0
+
+
+# ---------------------------------------------------------------------------
 # Main display dispatcher
 # ---------------------------------------------------------------------------
 
@@ -503,6 +595,9 @@ def display_tool_feedback(command, tool_result, console, indent=False, panel_upd
             tool_name = "web_search"
         elif command.startswith("execute_command"):
             tool_name = "execute_command"
+ 
+        elif command.startswith("dispatch_swarm_task"):
+            tool_name = "dispatch_swarm_task"
         else:
             tool_name = command.split()[0]
         
@@ -608,6 +703,19 @@ def display_tool_feedback(command, tool_result, console, indent=False, panel_upd
                 prefix = "╰─ " if not panel_updater else ""
                 message = f"{prefix}[dim]{summary}[/dim]"
                 _print_or_append(message, console, panel_updater)
+        if not panel_updater:
+            console.print()
+        return
+
+    # For swarm admin tools: display a concise console summary.
+    if command.startswith(("dispatch_swarm_task", "handle_approval", "mark_swarm_complete", "kill_swarm_worker")):
+        summary, is_failure = _format_swarm_tool_summary(command, tool_result)
+        prefix = "╰─ " if not panel_updater else ""
+        if is_failure:
+            message = f"{prefix}[dim red]{summary}[/dim red]"
+        else:
+            message = f"{prefix}[dim]{summary}[/dim]"
+        _print_or_append(message, console, panel_updater, markup=True)
         if not panel_updater:
             console.print()
         return
@@ -789,6 +897,13 @@ def build_panel_tool_message(tool_name, tool_result, command):
             return f"[grey]{tool_name}[/grey]\n[dim]╰─ {rendered.strip()}[/dim]"
         first_two = "\n".join(tool_result.splitlines()[:2]).strip()
         return f"[grey]{tool_name}[/grey]\n[dim]╰─ {first_two or tool_result.strip()}[/dim]"
+
+    if tool_name in ("dispatch_swarm_task", "handle_approval", "mark_swarm_complete", "kill_swarm_worker"):
+        label = command if command else tool_name
+        summary, is_failure = _format_swarm_tool_summary(command or tool_name, tool_result)
+        if is_failure:
+            return f"[grey]{label}[/grey]\n[dim red]╰─ {summary or 'Failed'}[/dim red]"
+        return f"[grey]{label}[/grey]\n[dim]╰─ {summary or 'Completed'}[/dim]"
 
     return f"[grey]{tool_name}[/grey]"
 

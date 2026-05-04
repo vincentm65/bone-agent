@@ -204,7 +204,11 @@ class ParallelToolExecutor:
                     vault_root=context.get('vault_root')
                 )
 
-                tool_result = tool.execute(tool_call.arguments, tool_context)
+                create_file_handler = context.get('create_file_handler')
+                if tool_call.function_name == "create_file" and create_file_handler:
+                    tool_result = create_file_handler(tool_call.arguments, tool_context)
+                else:
+                    tool_result = tool.execute(tool_call.arguments, tool_context)
                 return ToolResult(
                     tool_id=tool_call.tool_id,
                     call_index=tool_call.call_index,

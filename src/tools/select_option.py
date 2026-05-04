@@ -30,13 +30,16 @@ class SelectionPanel:
     # Cursor indicator
     _CURSOR = "> "
 
-    def __init__(self, questions: List[Dict[str, Any]]):
+    def __init__(self, questions: List[Dict[str, Any]], chat_manager=None):
         """Initialize the selection panel.
 
         Args:
-            questions: List of question dicts with 'question', 'options' (each with 'value', 'text', optional 'description')
+            questions: List of question dicts with 'question', 'options'
+                       (each with 'value', 'text', optional 'description').
+            chat_manager: Optional ChatManager for admin interrupt polling.
         """
         self.questions = questions
+        self._chat_manager = chat_manager
         self._showing_summary = False
 
         # Initialize for multi-question mode (handles both single and multiple questions)
@@ -470,10 +473,16 @@ class SelectionPanel:
             style=TOOLBAR_STYLE,
         )
 
-        # Use prompt_toolkit's synchronous runner — avoids creating/destroying
-        # an event loop with asyncio.run(), which corrupts the parent
-        # PromptSession's event loop state and causes 100% CPU hangs.
-        result = application.run()
+        if self._chat_manager is not None:
+            # Use interruptible runner that polls for pending swarm approvals
+            # via Application.run(inputhook=...).  No asyncio.run() — the
+            # inputhook callback runs inside prompt_toolkit's own event loop,
+            # avoiding the event-loop corruption that causes 100% CPU hangs.
+            from ui.prompt_interrupts import _run_application_interruptible
+
+            result = _run_application_interruptible(application, self._chat_manager)
+        else:
+            result = application.run()
 
         return result
 
@@ -574,9 +583,16 @@ def select_option(
         for q in questions:
             q["options"] = list(q["options"]) + [CUSTOM_INPUT_OPTION]
 
+        # Extract chat_manager from context for admin interrupt polling
+        chat_manager = (context or {}).get("chat_manager")
+
         # Create and run the selection panel
-        panel = SelectionPanel(questions)
+        panel = SelectionPanel(questions, chat_manager=chat_manager)
         result = panel.run()
+
+        # Handle admin interrupt (pending swarm approval arrived)
+        if result == 130:
+            return "exit_code=130\nInterrupted by pending swarm approval"
 
         # Handle user cancellation
         if result is None:

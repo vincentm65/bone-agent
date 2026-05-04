@@ -147,6 +147,7 @@ def _get_provider_registry():
                     Path(__file__).resolve().parents[2] /
                     f"llama.cpp/{_LLAMA_BUILD_DIR}/bin/{_LLAMA_SERVER_NAME}"
                 ),
+                "LOCAL_MODEL_SETTINGS": {},
             },
             "extra": {
                 "host": "127.0.0.1",

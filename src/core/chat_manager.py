@@ -7,15 +7,18 @@ import subprocess
 import time
 import uuid
 import requests
-from typing import Optional, IO
+import threading
+import queue
+from typing import Optional, IO, Any
 
 from llm.client import LLMClient
 from llm.config import get_providers, get_provider_config, get_provider_display_name, reload_config
-from llm.prompts import build_system_prompt
+from llm.prompts import build_system_prompt, build_swarm_admin_prompt
 from core.skills import render_active_skills_section
+from core.swarm_auto_turn import drain_inbox_to_prompts as _drain_inbox_to_prompts
 from pathlib import Path
 from llm.token_tracker import TokenTracker
-from utils.settings import server_settings, context_settings
+from utils.settings import context_settings, get_local_model_server_settings
 from utils.logger import MarkdownConversationLogger
 from utils.user_message_logger import UserMessageLogger
 from utils.result_parsers import extract_exit_code, extract_metadata_from_result
@@ -61,6 +64,22 @@ class ChatManager:
 
         # Custom compaction threshold (overrides global context_settings if set)
         self._compact_trigger_tokens = compact_trigger_tokens
+
+        # Swarm pool state (lazy-initialized, only present when in swarm admin mode)
+        self.swarm_server: Any = None
+        self.swarm_admin_mode: bool = False
+        self.swarm_complete: bool = False
+        self.swarm_complete_summary: str = ""
+        self.swarm_status_page: int = 0  # 0=Workers, 1=Plan
+        # Maps swarm task_ids to task_list plan indices (populated by dispatch_swarm_task)
+        self._swarm_task_plan_map: dict[str, int] = {}
+        # Background poller drains server inbox items into this queue as
+        # formatted auto-turn prompt strings.  The agentic orchestrator
+        # checks this queue between LLM iterations so swarm events are
+        # processed mid-turn instead of only at the prompt boundary.
+        self._swarm_inject_queue: queue.Queue[str] = queue.Queue()
+        self._swarm_inbox_poller_thread: threading.Thread | None = None
+        self._swarm_inbox_poller_stop: threading.Event = threading.Event()
 
         # Disable all compaction when True (used by sub-agents to preserve findings)
         self._compaction_disabled = False
@@ -115,10 +134,12 @@ class ChatManager:
         self.messages = [{"role": "system", "content": self._build_system_prompt()}]
 
         # Add agents.md as initial user/assistant exchange (only if it exists in cwd)
-        user_msg, assistant_msg = self._load_agents_md()
-        if user_msg and assistant_msg:
-            self.messages.append({"role": "user", "content": user_msg})
-            self.messages.append({"role": "assistant", "content": assistant_msg})
+        # Skip for swarm admin mode — admin orchestrates workers, doesn't need codebase map
+        if not getattr(self, 'swarm_admin_mode', False):
+            user_msg, assistant_msg = self._load_agents_md()
+            if user_msg and assistant_msg:
+                self.messages.append({"role": "user", "content": user_msg})
+                self.messages.append({"role": "assistant", "content": assistant_msg})
 
         # Log initial messages
         if self.markdown_logger:
@@ -151,6 +172,8 @@ class ChatManager:
             from utils.settings import prompt_settings
             variant = prompt_settings.variant
         active_skills_section = render_active_skills_section(self.loaded_skills)
+        if self.swarm_admin_mode:
+            return build_swarm_admin_prompt(variant, active_skills_section=active_skills_section)
         return build_system_prompt(variant, active_skills_section=active_skills_section)
 
     def update_system_prompt(self, variant: str | None = None):
@@ -1464,24 +1487,44 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         model_path = local_config.get("model", "")
         host = local_config["extra"]["host"]
         port = local_config["extra"]["port"]
+        model_server_settings = get_local_model_server_settings(model_path)
 
         args = [
             server_path,
             "-m", model_path,
-            "-ngl", str(server_settings.ngl_layers),
-            "--threads", str(server_settings.threads),
-            "--batch-size", str(server_settings.batch_size),
-            "--ubatch-size", str(server_settings.ubatch_size),
-            "--flash-attn" if server_settings.flash_attn else "--no-flash-attn",
+            "-ngl", str(model_server_settings.ngl_layers),
+            "--threads", str(model_server_settings.threads),
+            "--batch-size", str(model_server_settings.batch_size),
+            "--ubatch-size", str(model_server_settings.ubatch_size),
+            "--flash-attn", "on" if model_server_settings.flash_attn else "off",
             "--split-mode", "none",
-            "--ctx-size", str(server_settings.ctx_size),
-            "--n-predict", str(server_settings.n_predict),
-            "--rope-scale", str(server_settings.rope_scale),
+            "--ctx-size", str(model_server_settings.ctx_size),
+            "--n-predict", str(model_server_settings.n_predict),
+            "--rope-scale", str(model_server_settings.rope_scale),
             "--host", host,
             "--port", str(port),
             "--jinja",
-            "--reasoning", "off",
         ]
+
+        if model_server_settings.reasoning_budget is not None:
+            args.extend(["--reasoning-budget", str(model_server_settings.reasoning_budget)])
+
+        if model_server_settings.no_mmap:
+            args.append("--no-mmap")
+        if model_server_settings.mlock:
+            args.append("--mlock")
+        if model_server_settings.cache_type_k:
+            args.extend(["-ctk", model_server_settings.cache_type_k])
+        if model_server_settings.cache_type_v:
+            args.extend(["-ctv", model_server_settings.cache_type_v])
+        if model_server_settings.fit:
+            args.extend(["--fit", "on"])
+        if model_server_settings.fit_ctx > 0:
+            args.extend(["--fit-ctx", str(model_server_settings.fit_ctx)])
+        if model_server_settings.fit_target > 0:
+            args.extend(["--fit-target", str(model_server_settings.fit_target)])
+        if model_server_settings.n_parallel > 0:
+            args.extend(["--parallel", str(model_server_settings.n_parallel)])
 
         # Restrict to RTX 5070 Ti only (GPU 0)
         env = os.environ.copy()
@@ -1499,7 +1542,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         )
 
         health_url = f"http://{host}:{port}/health"
-        for i in range(server_settings.health_check_timeout_sec):
+        for i in range(model_server_settings.health_check_timeout_sec):
             try:
                 r = requests.get(health_url, timeout=2)
                 if r.status_code == 200:
@@ -1508,7 +1551,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                         return process
             except Exception:
                 pass
-            time.sleep(server_settings.health_check_interval_sec)
+            time.sleep(model_server_settings.health_check_interval_sec)
 
         # Server failed health check - clean up resources
         if process:
@@ -1558,13 +1601,133 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             self.markdown_logger.log_message(message)
 
         # Log user messages to JSONL for dream memory processing (only if memory enabled)
-        if message.get("role") == "user" and message.get("content"):
+        if message.get("role") == "user" and message.get("content") and self.user_message_logger:
             from llm.config import MEMORY_SETTINGS
             if MEMORY_SETTINGS.get("enabled", True):
                 self.user_message_logger.log_user_message(
                     content_text_for_logs(message["content"]),
                     project_dir=Path.cwd().resolve(),
                 )
+
+    def notify(self, text: str) -> None:
+        """Append a background notification as a visible message in chat history.
+
+        Used for swarm events so the model can see worker communication
+        without having to expand tool call results.
+
+        Args:
+            text: Notification text to append.
+        """
+        self.messages.append({
+            "role": "user",
+            "content": f"[Swarm] {text}",
+        })
+
+    def request_ui_invalidation(self) -> None:
+        """Request a toolbar refresh via the swarm server's app reference.
+
+        Safe to call from any thread. No-ops if no server is active.
+        """
+        server = getattr(self, 'swarm_server', None)
+        if server and getattr(server, '_app', None):
+            try:
+                server._app.invalidate()
+            except Exception:
+                pass
+
+    def start_swarm_inbox_poller(self, poll_interval: float = 0.1) -> None:
+        """Start a background daemon thread that drains the swarm server
+        inbox and queues formatted auto-turn prompts for the agentic loop.
+
+        The poller never touches ``self.messages`` or the LLM client — it
+        only drains ``server._inbox`` and pushes strings into
+        ``self._swarm_inject_queue``.  The agentic orchestrator is
+        responsible for picking up those strings and injecting them as
+        user messages between LLM iterations.
+
+        Safe to call multiple times — resets stop signal and spawns a
+        new thread if the previous one has already exited.
+
+        Args:
+            poll_interval: Seconds between inbox polls (default 100ms).
+        """
+        # If a thread is alive, it's already running — don't spawn a duplicate.
+        if self._swarm_inbox_poller_thread is not None and self._swarm_inbox_poller_thread.is_alive():
+            return
+
+        # Reset the stop event so the new poll loop runs until explicitly stopped.
+        self._swarm_inbox_poller_stop.clear()
+
+        def _poll_loop() -> None:
+            import time as _time
+            while not self._swarm_inbox_poller_stop.is_set():
+                try:
+                    server = self.swarm_server
+                    if server is not None:
+                        # Fast path: drain_prompts returns quickly if empty
+                        prompts = _drain_inbox_to_prompts(server)
+                        for prompt in prompts:
+                            self._swarm_inject_queue.put(prompt)
+                except Exception:
+                    pass
+                # Respect stop signal even during sleep — use a short sleep
+                # so we don't block the shutdown signal.
+                self._swarm_inbox_poller_stop.wait(timeout=poll_interval)
+
+        self._swarm_inbox_poller_thread = threading.Thread(
+            target=_poll_loop, daemon=True, name="swarm-inbox-poller"
+        )
+        self._swarm_inbox_poller_thread.start()
+
+    def stop_swarm_inbox_poller(self) -> None:
+        """Stop the background inbox poller thread.
+
+        Sets the stop event so the poller exits promptly, joins the thread
+        with a short timeout (never blocks shutdown), and clears any stale
+        prompts in the inject queue.
+
+        Safe to call multiple times — no-ops after the thread has already exited.
+        """
+        self._swarm_inbox_poller_stop.set()
+
+        thread = self._swarm_inbox_poller_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2)
+        self._swarm_inbox_poller_thread = None
+
+        # Flush stale swarm prompts so a future swarm doesn't process old events.
+        while not self._swarm_inject_queue.empty():
+            try:
+                self._swarm_inject_queue.get_nowait()
+            except Exception:
+                break
+
+    def has_pending_swarm_work(self) -> bool:
+        """Check whether any swarm work is waiting — either in the server
+        inbox or already drained into the inject queue by the poller.
+
+        Use this instead of ``server.has_pending()`` in inputhooks and
+        fallback checks so items that the poller already moved into the
+        inject queue still trigger the auto-turn path.
+        """
+        server = self.swarm_server
+        if server is not None and server.has_pending():
+            return True
+        return not self._swarm_inject_queue.empty()
+
+    def drain_inject_queue(self) -> list[str]:
+        """Drain all formatted auto-turn prompts from the inject queue.
+
+        Returns:
+            List of prompt strings (may be empty).
+        """
+        prompts = []
+        while not self._swarm_inject_queue.empty():
+            try:
+                prompts.append(self._swarm_inject_queue.get_nowait())
+            except Exception:
+                break
+        return prompts
 
     def sync_log(self):
         """Rewrite the entire conversation log to match current message state.

@@ -112,7 +112,7 @@ class AgenticOrchestrator:
     with tool calling, providing a cleaner, more maintainable structure.
     """
 
-    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, force_parallel_execution=False, cron_job_id=None, cron_allowlist=None, cron_interactive=False):
+    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, force_parallel_execution=False, cron_job_id=None, cron_allowlist=None, cron_interactive=False, edit_approval_handler=None, create_file_handler=None, command_approval_handler=None, command_approval_awaiter=None, command_send_approval_fn=None, approval_timeout=300):
         """Initialize the orchestrator.
 
         Args:
@@ -128,6 +128,12 @@ class AgenticOrchestrator:
             cron_job_id: Optional cron job ID for command allow list gating
             cron_allowlist: Optional CronAllowlist instance for cron command gating
             cron_interactive: If True, cron job is running in interactive test mode
+            edit_approval_handler: Optional override for edit approval (default: handle_edit_approval)
+            create_file_handler: Optional override for create_file execution.
+            command_approval_handler: Optional override for command approval (default: handle_command_approval)
+            command_approval_awaiter: Optional ApprovalAwaiter for worker command approvals
+            command_send_approval_fn: Optional callable to send approval_request to server
+            approval_timeout: Timeout for command approval in seconds
         """
         self.chat_manager = chat_manager
         self.repo_root = repo_root
@@ -141,6 +147,12 @@ class AgenticOrchestrator:
         self.cron_job_id = cron_job_id
         self.cron_allowlist = cron_allowlist
         self.cron_interactive = cron_interactive
+        self.edit_approval_handler = edit_approval_handler
+        self.create_file_handler = create_file_handler
+        self.command_approval_handler = command_approval_handler
+        self.command_approval_awaiter = command_approval_awaiter
+        self.command_send_approval_fn = command_send_approval_fn
+        self.approval_timeout = approval_timeout
         self.tool_calls_count = 0
         self.empty_response_count = 0
         self.gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
@@ -175,7 +187,22 @@ class AgenticOrchestrator:
 
         tools = TOOLS()
         if allowed_tools is None:
-            return tools
+            if getattr(self.chat_manager, "swarm_admin_mode", False):
+                admin_blocked_tools = {"execute_command"}
+                return [
+                    tool for tool in tools
+                    if tool.get("function", {}).get("name") not in admin_blocked_tools
+                ]
+            blocked = {
+                "dispatch_swarm_task",
+                "handle_approval",
+                "kill_swarm_worker",
+                "mark_swarm_complete",
+            }
+            return [
+                tool for tool in tools
+                if tool.get("function", {}).get("name") not in blocked
+            ]
 
         effective_names = set(allowed_tools)
         if allow_active_plugins:
@@ -215,6 +242,31 @@ class AgenticOrchestrator:
                 evicted = ToolRegistry.decrement_plugin_ttls()
                 if evicted and self.debug_mode:
                     self.console.print(f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]")
+
+                # ── Mid-turn swarm inbox injection ──────────────────────
+                # Drain any auto-turn prompts that the background poller
+                # queued since the last iteration (e.g. worker approvals
+                # or completions that arrived during the LLM HTTP call or
+                # tool execution).  Inject them as synthetic user messages
+                # so the admin agent handles swarm events without waiting
+                # for the current turn to end.
+                inject_queue = getattr(self.chat_manager, '_swarm_inject_queue', None)
+                if inject_queue is not None:
+                    pending_prompts = []
+                    while not inject_queue.empty():
+                        try:
+                            pending_prompts.append(inject_queue.get_nowait())
+                        except Exception:
+                            break
+                    if pending_prompts:
+                        inject_content = "\n\n---\n\n".join(pending_prompts)
+                        inject_msg = {"role": "user", "content": inject_content}
+                        self.chat_manager.messages.append(inject_msg)
+                        self.chat_manager.log_message(inject_msg)
+                        if self.debug_mode:
+                            self.console.print(
+                                f"[dim]Injected {len(pending_prompts)} swarm event(s) mid-turn[/dim]"
+                            )
 
                 # Get response from LLM
                 response = self._get_llm_response(
@@ -457,6 +509,14 @@ class AgenticOrchestrator:
                 filtered_tool_ids.append(tool_call.get("id"))
                 continue
 
+            _admin_swarm_tools = {"dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "mark_swarm_complete"}
+            if function_name in _admin_swarm_tools and not getattr(self.chat_manager, "swarm_admin_mode", False):
+                # Swarm tools are only available to the admin agent.
+                if self.debug_mode:
+                    self.console.print(f"[dim]Silently filtered non-admin swarm tool: {function_name}[/dim]")
+                filtered_tool_ids.append(tool_call.get("id"))
+                continue
+
             filtered_calls.append(tool_call)
 
         # Replace with filtered list
@@ -646,6 +706,7 @@ class AgenticOrchestrator:
                 'gitignore_spec': self.gitignore_spec,
                 'panel_updater': self.panel_updater,
                 'vault_root': vault_root_str(),
+                'create_file_handler': self.create_file_handler,
             }
 
             # Convert to ToolCall objects
@@ -765,18 +826,24 @@ class AgenticOrchestrator:
                         if function_name == "edit_file" and result.requires_approval:
                             # Handle approval workflow for edit_file in parallel mode
                             thinking_indicator = context.get('thinking_indicator')
-                            preview, is_valid = resolve_edit_preview(result.result)
-                            if is_valid:
-                                approved_result, should_exit = handle_edit_approval(
-                                    preview, args_dict.get('path', ''), args_dict,
-                                    self.console, thinking_indicator,
-                                    self.chat_manager.approve_mode,
-                                    lambda: self.chat_manager.cycle_approve_mode(),
-                                    self.repo_root, self.gitignore_spec,
-                                    vault_root_str)
+                            if self.edit_approval_handler:
+                                approved_result, should_exit = self.edit_approval_handler(args_dict, self.repo_root, self.console, self.gitignore_spec, vault_root_str)
                                 result.result = approved_result
                                 if should_exit:
                                     result.should_exit = True
+                            else:
+                                preview, is_valid = resolve_edit_preview(result.result)
+                                if is_valid:
+                                    approved_result, should_exit = handle_edit_approval(
+                                        preview, args_dict.get('path', ''), args_dict,
+                                        self.console, thinking_indicator,
+                                        self.chat_manager.approve_mode,
+                                        lambda: self.chat_manager.cycle_approve_mode(),
+                                        self.repo_root, self.gitignore_spec,
+                                        vault_root_str, self.chat_manager)
+                                    result.result = approved_result
+                                    if should_exit:
+                                        result.should_exit = True
                         elif label:
                             display_tool_feedback(label, result.result, self.console, panel_updater=self.panel_updater)
                             # Force flush to ensure immediate output
@@ -895,7 +962,8 @@ class AgenticOrchestrator:
         panel = ToolConfirmationPanel(
             'Grant filesystem access',
             reason=prompt_reason,
-            is_edit_tool=False
+            is_edit_tool=False,
+            chat_manager=self.chat_manager,
         )
         suspended_panel = False
         if self.is_sub_agent and self.panel_updater and hasattr(self.panel_updater, "suspend"):
@@ -984,13 +1052,16 @@ class AgenticOrchestrator:
                         if console:
                             preview, is_valid = resolve_edit_preview(result)
                             if is_valid:
-                                approved_result, should_exit = handle_edit_approval(
-                                    preview, arguments.get('path', ''), arguments,
-                                    console, thinking_indicator,
-                                    self.chat_manager.approve_mode,
-                                    lambda: self.chat_manager.cycle_approve_mode(),
-                                    self.repo_root, self.gitignore_spec,
-                                    vault_root_str)
+                                if self.edit_approval_handler:
+                                    approved_result, should_exit = self.edit_approval_handler(arguments, self.repo_root, console, self.gitignore_spec, vault_root_str)
+                                else:
+                                    approved_result, should_exit = handle_edit_approval(
+                                        preview, arguments.get('path', ''), arguments,
+                                        console, thinking_indicator,
+                                        self.chat_manager.approve_mode,
+                                        lambda: self.chat_manager.cycle_approve_mode(),
+                                        self.repo_root, self.gitignore_spec,
+                                        vault_root_str, self.chat_manager)
                                 if should_exit:
                                     return True, approved_result
                                 result = approved_result
@@ -998,13 +1069,31 @@ class AgenticOrchestrator:
                     elif function_name == "execute_command":
                         console = self._get_console()
                         command = arguments.get('command', '')
-                        result, should_exit, command_executed = handle_command_approval(
-                            command, arguments, tool, context, console,
-                            thinking_indicator, self.chat_manager.approve_mode,
-                            self.debug_mode,
-                            cron_job_id=self.cron_job_id,
-                            cron_allowlist=self.cron_allowlist,
-                            cron_interactive=self.cron_interactive)
+                        if self.command_approval_handler:
+                            result, should_exit, command_executed = self.command_approval_handler(
+                                command=command,
+                                arguments=arguments,
+                                tool=tool,
+                                context=context,
+                                console=console,
+                                debug_mode=self.debug_mode,
+                                approve_awaiter=self.command_approval_awaiter,
+                                send_approval_fn=self.command_send_approval_fn,
+                                task_id=getattr(self, '_current_task_id', ''),
+                                worker_id=getattr(self, '_current_worker_id', ''),
+                                approval_timeout=self.approval_timeout,
+                                cron_job_id=self.cron_job_id,
+                                cron_allowlist=self.cron_allowlist,
+                                cron_interactive=self.cron_interactive)
+                        else:
+                            result, should_exit, command_executed = handle_command_approval(
+                                command, arguments, tool, context, console,
+                                thinking_indicator, self.chat_manager.approve_mode,
+                                self.debug_mode,
+                                cron_job_id=self.cron_job_id,
+                                cron_allowlist=self.cron_allowlist,
+                                cron_interactive=self.cron_interactive,
+                                chat_manager=self.chat_manager)
                         if should_exit:
                             return True, result
 
@@ -1030,7 +1119,10 @@ class AgenticOrchestrator:
                         temp_console.print()
                         temp_console.file.flush()
                     
-                    result = tool.execute(arguments, context)
+                    if function_name == "create_file" and self.create_file_handler:
+                        result = self.create_file_handler(arguments, context)
+                    else:
+                        result = tool.execute(arguments, context)
                     
                     # Resume thinking indicator for yield policy
                     if policy == TERMINAL_YIELD and thinking_indicator:

@@ -43,7 +43,7 @@ def normalize_command(command, rg_exe_path):
     return None, command, True
 
 
-def confirm_tool(command, console, reason=None, requires_approval=True, approve_mode="safe", use_panel=True, is_edit_tool=False, cycle_approve_mode=None):
+def confirm_tool(command, console, reason=None, requires_approval=True, approve_mode="safe", use_panel=True, is_edit_tool=False, cycle_approve_mode=None, chat_manager=None):
     """Prompt user for tool execution confirmation.
 
     Args:
@@ -95,7 +95,7 @@ def confirm_tool(command, console, reason=None, requires_approval=True, approve_
     # Try to use interactive panel
     if use_panel:
         from ui.tool_confirmation import ToolConfirmationPanel
-        panel = ToolConfirmationPanel(command, reason, is_edit_tool=is_edit_tool, cycle_approve_mode=cycle_approve_mode)
+        panel = ToolConfirmationPanel(command, reason, is_edit_tool=is_edit_tool, cycle_approve_mode=cycle_approve_mode, chat_manager=chat_manager)
         return panel.run()
 
     # Cancel by default if panel is disabled or fails

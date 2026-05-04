@@ -20,6 +20,7 @@ if str(src_dir) not in sys.path:
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.theme import Theme
 from rich.text import Text
 from prompt_toolkit import PromptSession
@@ -34,11 +35,12 @@ from ui.commands import process_command
 from ui.banner import display_startup_banner
 from ui.prompt_utils import get_bottom_toolbar_text, setup_common_bindings, TOOLBAR_STYLE
 from core.agentic import agentic_answer
-from utils.settings import MonokaiDarkBGStyle, left_align_headings
+from utils.settings import MonokaiDarkBGStyle, left_align_headings, swarm_settings
 from utils.paths import RG_EXE_PATH
 from utils.image_clipboard import read_clipboard_image, read_image_file
 from utils.multimodal import ImageAttachment, build_message_content
 from exceptions import BoneAgentError
+
 
 # Console setup
 console = Console(theme=Theme({
@@ -70,267 +72,10 @@ CTRL_C_TRACKER = {
     'exit_requested': False
 }
 
+from ui.thinking import ThinkingIndicator
+
 # Block input during thinking/agentic processing (prevents key presses from being queued)
 INPUT_BLOCKED = {'blocked': False}
-
-
-class ThinkingIndicator:
-    """Simple spinner wrapper that always cleans up."""
-
-    def __init__(self, console, message="Thinking ...", spinner="dots"):
-        self.console = console
-        self.message = message
-        self.spinner = spinner
-        self._last_word_change = 0
-        self._word_change_interval = 15.0  # Change word every 15 seconds
-        
-        self._common_words = [
-            "Thinking ...",
-            "Chunking ...",
-            "Completing ...",
-            "Computing ...",
-            "Programming ...",
-            "Understanding ...",
-            "Vibing ...",
-            "Perpetuating ...",
-            "Analyzing ...",
-            "Evaluating ...",
-            "Synthesizing ...",
-            "Working ...",
-            "Debugging ...",
-            "Scrutinizing ...",
-            "Formulating ...",
-            "Predicting next token ...",
-            "Outsourcing ...",
-            "Checking vitals ...",
-            "Scanning fingerprints ...",
-            "Rerouting ...",
-            "Refactoring ...",
-            "Burning tokens ...",
-            "Conjuring ...",
-            "Recalculating ...",
-            "Spinning ...",
-            "Pointing ...",
-            "Dematerializing ...",
-            "Compiling ...",
-            "Fetching ...",
-            "Buffering ...",
-            "Syncing ...",
-            "Caching ...",
-            "Connecting ...",
-            "Indexing ...",
-            "Authenticating ...",
-            "Validating ...",
-        ]
-
-        self._rare_words = [
-            '"Engineering" ...',
-            "Deleting (jk) ...",
-            "Computer... Fix my program ...",
-            "Exiting VIM ...",
-            "Rolling for perception ...",
-            "Pinging ...",
-            "Ponging ...",
-            "Programming HTML ...",
-            "Leaking memory ...",
-            "Cooking ...",
-            "Mining ...",
-            "Crafting ...",
-            "Pushing to prod ...",
-            "Checking with Altman ...",
-            "Collecting 200 ...",
-            "Rebooting...",
-            "Wasting water ...",
-            "Asking Stack Overflow ...",
-            "Reading the docs ...",
-            "Asking ChatGPT ...",
-            "Binging it ...",
-            "Googling it ...",
-            "Dockerizing ...",
-            "Forking it ...",
-            "Checking the logs ...",
-            "Checking the backup ...",
-            "Performing vLookup ...",
-            "Downloading more RAM ...",
-            "Performing SumIf ...",
-            "Spinning up servers ...",
-            "Getting chat completion ...",
-            "Merging conflicts ...",
-            "Feature creeping ...",
-        ]
-
-        self._legendary_words = [
-            "I'm confused ...",
-            "Running in O(n²) ...",
-            "Checking Jira ...",
-            "Gaining consciousness ...",
-            "Mining Bitcoin ...",
-            "Accessing null pointer ...",
-            "FIXING ME ...",
-            "READING ME ...",
-            "Converting to PDF and back ...",
-            "Rewriting in Rust ...",
-            "Rewriting in JavaScript ...",
-            "Recursively calling myself ...",
-            "Contacting AWS Support ...",
-            "Reviewing footage ...",
-            "Dedotating wam ...",
-            "Pondering the orb ...",
-            "Computer... ENHANCE ...",
-            "Consulting council ...",
-            "Releasing the files ...",
-            "Redacting the files ...",
-            "Uhhhh ...",
-            "Selling data ...",
-            "Okeyyy lets go ...",
-        ]
-        self._status = None
-        self._active = False
-        self._start_time = None
-        self._timer_thread = None
-        self._stop_timer = threading.Event()
-        self._elapsed_before_pause = 0.0
-        self._has_been_started = False
-        self._saved_termios = None
-
-    def _select_random_word(self):
-        """Select a random word from weighted word lists."""
-        roll = random.random()
-        
-        if roll < 0.80:
-            return random.choice(self._common_words)
-        elif roll < 0.95:
-            return random.choice(self._rare_words)
-        else:
-            return random.choice(self._legendary_words)
-
-    @staticmethod
-    def _format_time(seconds):
-        """Format seconds as whole seconds or minutes:seconds."""
-        if seconds >= 60:
-            mins = int(seconds // 60)
-            secs = int(seconds % 60)
-            return f"{mins}m {secs}s"
-        else:
-            return f"{int(seconds)}s"
-
-    @staticmethod
-    def _set_raw_mode():
-        """Switch stdin to raw mode to prevent keystroke echoes during spinner."""
-        if os.name == 'nt':
-            return
-        try:
-            import termios
-            fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
-            new = old.copy()
-            # lflag: disable ECHO, ICANON (line buffering), IEXTEN
-            new[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)
-            # iflag: disable ICRNL (map CR to NL) so Enter doesn't produce newline
-            new[0] &= ~(termios.ICRNL)
-            termios.tcsetattr(fd, termios.TCSANOW, new)
-            return old
-        except Exception:
-            return None
-
-    @staticmethod
-    def _restore_terminal_mode(saved):
-        """Restore terminal mode from saved termios attributes."""
-        if os.name == 'nt' or saved is None:
-            return
-        try:
-            import termios
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, saved)
-        except Exception:
-            pass
-
-    def start(self):
-        # Select initial word
-        self.message = self._select_random_word()
-        
-        # Initialize timer (reset only on first start)
-        if not self._has_been_started:
-            self._elapsed_before_pause = 0.0
-            self._has_been_started = True
-            self._last_word_change = 0
-        
-        self._start_time = time.time()
-        self._stop_timer.clear()
-        
-        # Always recreate and restart status with new message
-        if self._status and self._active:
-            self._status.stop()
-        self._saved_termios = self._set_raw_mode()
-        self._status = self.console.status(self.message, spinner=self.spinner, spinner_style="#5F9EA0")
-        self._status.start()
-        self._active = True
-        
-        # Start background timer thread
-        self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
-        self._timer_thread.start()
-    
-    def _update_timer(self):
-        """Background thread: update status message with elapsed time."""
-        while not self._stop_timer.is_set() and self._status and self._active:
-            # Calculate elapsed time including previous pauses
-            elapsed = self._elapsed_before_pause + (time.time() - self._start_time)
-
-            # Change word every 15 seconds
-            if elapsed - self._last_word_change >= self._word_change_interval:
-                self.message = self._select_random_word()
-                self._last_word_change = elapsed
-
-            # Format elapsed time (e.g., "Thinking ... (1s)" or "Thinking ... (1m 30s)")
-            time_str = f"({self._format_time(elapsed)})"
-            updated_message = f"{self.message} {time_str}"
-
-            # Update the status message
-            if self._status:
-                self._status.update(updated_message)
-            
-            self._stop_timer.wait(0.1)  # Update every 100ms
-
-    def stop(self, reset=False):
-        """Stop the thinking indicator.
-
-        Args:
-            reset: If True, reset elapsed time and state for next use cycle.
-        """
-        # Calculate and store elapsed time (including accumulated pauses)
-        elapsed_time = None
-        if self._start_time:
-            elapsed_time = self._elapsed_before_pause + (time.time() - self._start_time)
-            self._elapsed_before_pause = elapsed_time
-        
-        # Stop timer thread first (close race window before stopping status)
-        self._active = False
-        self._stop_timer.set()
-        if self._timer_thread:
-            self._timer_thread.join(timeout=0.5)
-        
-        if self._status:
-            self._status.stop()
-            self._status = None
-        
-        # Restore terminal mode (must happen after status.stop() so Rich
-        # cursor cleanup runs in raw mode, then we hand control back to ptk)
-        self._restore_terminal_mode(self._saved_termios)
-        self._saved_termios = None
-        
-        # Reset state for next use cycle
-        if reset:
-            self._has_been_started = False
-            self._elapsed_before_pause = 0.0
-        
-        self._start_time = None
-
-    def pause(self):
-        # Stop without showing completion time (accumulates elapsed time)
-        self.stop(reset=False)
-
-    def resume(self):
-        # Resume with timer continuing from accumulated time
-        self.start()
 
 
 def check_double_ctrl_c() -> bool:
@@ -381,6 +126,9 @@ def _drain_stdin(session):
         pass
 
 
+from core.swarm_auto_turn import drain_inbox_to_prompts
+
+
 def main():
     """Main interactive chat loop."""
 
@@ -404,6 +152,16 @@ def main():
     def _safety_restore():
         ThinkingIndicator._restore_terminal_mode(thinking_indicator._saved_termios)
     atexit.register(_safety_restore)
+    # Stop swarm server on process exit (best-effort cleanup)
+    def _stop_swarm_server():
+        try:
+            if chat_manager.swarm_admin_mode and chat_manager.swarm_server:
+                chat_manager.swarm_server.stop()
+                chat_manager.swarm_admin_mode = False
+                chat_manager.swarm_server = None
+        except Exception:
+            pass
+    atexit.register(_stop_swarm_server)
     # Start server if needed
     console.print("[yellow]Initializing...[/yellow]")
     chat_manager.server_process = chat_manager.start_server_if_needed()
@@ -423,6 +181,10 @@ def main():
         import logging as _log
         _log.warning("Cron scheduler failed to start: %s", e)
         console.print(f"[yellow]Cron scheduler unavailable: {e}[/yellow]")
+
+    # Start background swarm inbox poller (daemon thread).
+    # Drains server inbox items into a queue that the agentic loop checks
+    # mid-turn, so swarm events are processed even during long LLM calls.
 
     # First-run onboarding: check if active provider needs an API key but has none
     try:
@@ -498,6 +260,26 @@ def main():
         pending_attachments.clear()
         event.app.invalidate()
 
+    @bindings.add('c-1')
+    def swarm_status_page_workers(event):
+        """Swarm status Workers page (Ctrl+1, blocked during thinking)."""
+        if INPUT_BLOCKED.get('blocked', False):
+            return
+        if not getattr(chat_manager, 'swarm_admin_mode', False):
+            return
+        chat_manager.swarm_status_page = 0
+        event.app.invalidate()
+
+    @bindings.add('c-2')
+    def swarm_status_page_plan(event):
+        """Swarm status Plan page (Ctrl+2, blocked during thinking)."""
+        if INPUT_BLOCKED.get('blocked', False):
+            return
+        if not getattr(chat_manager, 'swarm_admin_mode', False):
+            return
+        chat_manager.swarm_status_page = 1
+        event.app.invalidate()
+
     @bindings.add('c-v')
     def paste_image_or_text(event):
         """Paste a clipboard image as an attachment, otherwise fall back to text paste."""
@@ -548,6 +330,8 @@ def main():
 
     session = PromptSession(key_bindings=bindings, style=TOOLBAR_STYLE)
 
+    handoff_to_worker = False
+
     try:
         while True:
             # Check if exit was requested via double Ctrl+C
@@ -555,14 +339,97 @@ def main():
                 break
 
             try:
-                # Use prompt_toolkit for input with Tab key binding and dynamic prompt
+                # Use prompt_toolkit for input with swarm-aware interrupt.
+                # pre_run launches an asyncio background task that calls
+                # get_app().exit(130) when swarm work arrives; the inputhook
+                # is a belt-and-suspenders fallback for edge cases.
+                from ui.prompt_interrupts import create_swarm_inputhook, create_swarm_pre_run
+
                 prompt_kwargs = {
                     "bottom_toolbar": lambda: get_bottom_toolbar_text(chat_manager),
                 }
+
                 raw_input = session.prompt(
                     lambda: get_prompt(chat_manager),
+                    inputhook=create_swarm_inputhook(chat_manager),
+                    pre_run=create_swarm_pre_run(chat_manager),
                     **prompt_kwargs,
                 )
+                # Sentinel 130 from swarm inputhook — pending work in server inbox.
+                # Drain pending approvals, build a synthetic prompt, and fall
+                # through to agentic_answer.  Loops via continue if nothing to do.
+                #
+                # Fallback: if the inputhook failed to interrupt (e.g. race with
+                # user pressing Enter), detect pending items directly.  Only
+                # trigger when the user hasn't typed a substantive message, so
+                # real user input is never intercepted.
+                if raw_input != 130 and chat_manager.has_pending_swarm_work():
+                    user_text = raw_input.strip() if isinstance(raw_input, str) else ""
+                    if not user_text:
+                        raw_input = 130
+
+                if raw_input == 130:
+                    pending_prompts = []
+                    # Drain server inbox via shared helper (also used by
+                    # the background poller and agentic mid-turn injection).
+                    server = getattr(chat_manager, 'swarm_server', None)
+                    if server:
+                        pending_prompts.extend(drain_inbox_to_prompts(server))
+
+                    # Also drain the inject queue — items the background
+                    # poller already moved out of the server inbox.
+                    pending_prompts.extend(chat_manager.drain_inject_queue())
+
+                    if not pending_prompts:
+                        continue
+
+                    final_content = "\n\n---\n\n".join(pending_prompts)
+                    # Skip user-input parsing, command processing, and attachment
+                    # handling — go straight to the agentic_answer call below.
+                    chat_manager.maybe_auto_compact(console)
+
+                    # Clear the orphaned prompt line — prompt_toolkit already
+                    # painted " > " before the inputhook exited with 130.
+                    import sys
+                    sys.stdout.write("\033[F\033[K")
+                    sys.stdout.flush()
+
+                    thinking_indicator.start()
+                    INPUT_BLOCKED['blocked'] = True
+                    try:
+                        console.print("─" * console.width, style="rgb(30,30,30)")
+                        console.print()
+                        if TOOLS_ENABLED:
+                            try:
+                                agentic_answer(
+                                    chat_manager,
+                                    final_content,
+                                    console,
+                                    Path.cwd().resolve(),
+                                    RG_EXE_PATH,
+                                    DEBUG_MODE_CONTAINER['debug'],
+                                    thinking_indicator=thinking_indicator,
+                                )
+                                chat_manager._update_context_tokens()
+                            except KeyboardInterrupt:
+                                if not check_double_ctrl_c():
+                                    console.print("\n[yellow]Response interrupted (Ctrl+C). Press Ctrl+C again to exit.[/yellow]")
+                                console.print()
+                            except BoneAgentError as e:
+                                console.print(f"Error: {e}", style="red", markup=False)
+                                if hasattr(e, 'details') and e.details:
+                                    console.print(f"Details: {e.details}", style="dim", markup=False)
+                        # Else: non-tools path.  Auto-turns need tools to process
+                        # approvals and completions; skip with a warning if disabled.
+                        else:
+                            chat_manager.messages.append({"role": "user", "content": final_content})
+                            chat_manager.log_message({"role": "user", "content": final_content})
+                    finally:
+                        thinking_indicator.stop(reset=True)
+                        INPUT_BLOCKED['blocked'] = False
+                        _drain_stdin(session)
+                    continue
+
                 user_input = consume_image_attach_lines(raw_input.strip())
                 prompt_attachments = list(pending_attachments)
                 pending_attachments.clear()
@@ -578,6 +445,27 @@ def main():
                 cmd_result, modified_input = process_command(chat_manager, user_input, console, DEBUG_MODE_CONTAINER, cron_scheduler)
                 if cmd_result == "exit":
                     break
+                elif cmd_result == "swarm_worker":
+                    if prompt_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    if cron_scheduler:
+                        cron_scheduler.stop()
+                        cron_scheduler = None
+                    if chat_manager.swarm_admin_mode and chat_manager.swarm_server:
+                        chat_manager.swarm_server.stop()
+                        chat_manager.swarm_admin_mode = False
+                        chat_manager.swarm_server = None
+                    chat_manager.cleanup()
+                    handoff_to_worker = True
+
+                    from core.swarm_worker import run_worker_cli
+                    return run_worker_cli(
+                        swarm_name=modified_input,
+                        repo_root=str(Path.cwd()),
+                        rg_exe_path=RG_EXE_PATH,
+                        host=swarm_settings.host,
+                        port=swarm_settings.port,
+                    ) or 0
                 elif cmd_result == "handled":
                     if prompt_attachments:
                         console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
@@ -707,16 +595,30 @@ def main():
                 break
 
     finally:
-        # Display session summary before cleanup
-        summary = chat_manager.token_tracker.get_session_summary()
-        console.print(f"\n[white]Session Summary: {summary}[/white]")
+        if not handoff_to_worker:
+            # Display session summary before cleanup
+            summary = chat_manager.token_tracker.get_session_summary()
+            console.print(f"\n[white]Session Summary: {summary}[/white]")
 
-        # Stop cron scheduler if running
-        if cron_scheduler:
-            cron_scheduler.stop()
+            # Stop cron scheduler if running
+            if cron_scheduler:
+                cron_scheduler.stop()
 
-        chat_manager.cleanup()
-        console.print("[yellow]Goodbye![/yellow]")
+            # Stop swarm server if active
+            if chat_manager.swarm_admin_mode and chat_manager.swarm_server:
+                console.print("[dim]Stopping swarm server...[/dim]")
+                try:
+                    chat_manager.swarm_server.stop()
+                except Exception:
+                    pass
+                chat_manager.swarm_admin_mode = False
+                chat_manager.swarm_server = None
+
+            # Stop background inbox poller
+            chat_manager.stop_swarm_inbox_poller()
+
+            chat_manager.cleanup()
+            console.print("[yellow]Goodbye![/yellow]")
 
 
 if __name__ == "__main__":
@@ -724,10 +626,26 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="bone-agent CLI")
     parser.add_argument("--cron-run", metavar="JOB_ID", help="Run a cron job headlessly and exit")
+    parser.add_argument("--worker", metavar="SWARM_NAME", help="Run as a swarm worker (joins the named swarm)")
+    parser.add_argument("--swarm-host", default="127.0.0.1", help="Swarm server host for --worker")
+    parser.add_argument("--swarm-port", type=int, default=8765, help="Swarm server port for --worker")
     args = parser.parse_args()
 
     if args.cron_run:
         from core.cron import run_job_headless
         sys.exit(run_job_headless(args.cron_run))
 
-    main()
+    if args.worker:
+        from core.swarm_worker import run_worker_cli
+        from utils.paths import RG_EXE_PATH
+        sys.exit(
+            run_worker_cli(
+                swarm_name=args.worker,
+                repo_root=str(Path.cwd()),
+                rg_exe_path=RG_EXE_PATH,
+                host=args.swarm_host,
+                port=args.swarm_port,
+            )
+        )
+
+    sys.exit(main() or 0)

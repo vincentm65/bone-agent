@@ -7,7 +7,7 @@ from tools import confirm_tool
 
 def handle_edit_approval(preview, file_path, args_dict, console, thinking_indicator,
                          approve_mode, cycle_approve_mode, repo_root, gitignore_spec,
-                         vault_root_str):
+                         vault_root_str, chat_manager=None):
     """Handle edit_file approval workflow.
 
     Args:
@@ -21,6 +21,7 @@ def handle_edit_approval(preview, file_path, args_dict, console, thinking_indica
         repo_root: Repository root path string.
         gitignore_spec: Gitignore spec object.
         vault_root_str: Callable returning vault root path string.
+        chat_manager: Optional ChatManager for admin interrupt polling.
 
     Returns:
         (result_str, should_exit) tuple where should_exit=True means cancel the agentic loop.
@@ -40,7 +41,8 @@ def handle_edit_approval(preview, file_path, args_dict, console, thinking_indica
         requires_approval=True,
         approve_mode=approve_mode,
         is_edit_tool=True,
-        cycle_approve_mode=cycle_approve_mode
+        cycle_approve_mode=cycle_approve_mode,
+        chat_manager=chat_manager,
     )
 
     if action == "accept":
@@ -104,13 +106,14 @@ def resolve_edit_preview(result):
 def handle_command_approval(command, arguments, tool, context, console,
                             thinking_indicator, approve_mode, debug_mode,
                             cron_job_id=None, cron_allowlist=None,
-                            cron_interactive=False):
+                            cron_interactive=False, chat_manager=None):
     """Handle execute_command approval workflow.
 
-    Checks for silent blocks, auto-approval, and prompts user if needed.
-    When a cron_job_id and cron_allowlist are provided, commands on the
-    job's allow list are auto-approved; unlisted commands are blocked
-    (in scheduled mode) or prompted interactively (in test-run mode).
+    Checks for silent blocks, auto-approval, danger-mode non-git approval,
+    and prompts user if needed. When a cron_job_id and cron_allowlist are
+    provided, commands on the job's allow list are auto-approved; unlisted
+    commands are blocked (in scheduled mode) or prompted interactively
+    (in test-run mode).
 
     Args:
         command: The shell command string.
@@ -124,6 +127,7 @@ def handle_command_approval(command, arguments, tool, context, console,
         cron_job_id: Optional cron job ID for allow list checking.
         cron_allowlist: Optional CronAllowlist instance for cron command gating.
         cron_interactive: If True, cron job is in interactive test-run mode.
+        chat_manager: Optional ChatManager for admin interrupt polling.
 
     Returns:
         (result, should_exit, command_executed) tuple.
@@ -131,6 +135,7 @@ def handle_command_approval(command, arguments, tool, context, console,
         - should_exit: True if the user canceled (break the agentic loop).
         - command_executed: True if the command was actually executed (display output).
     """
+    from utils.safe_commands import is_git_command
     from utils.validation import is_auto_approved_command, check_for_silent_blocked_command
 
     # Check if command should be silently blocked (redirect to native tool)
@@ -173,14 +178,17 @@ def handle_command_approval(command, arguments, tool, context, console,
                 )
                 return result, False, False
 
-    if cron_auto_approved or auto_approve:
+    danger_auto_approved = approve_mode == "danger" and not is_git_command(command)
+
+    if cron_auto_approved or auto_approve or danger_auto_approved:
         # Auto-approved command - execute without prompting
         result = tool.execute(arguments, context)
         command_executed = True
 
         # In cron test-run mode, auto-save newly approved commands to allow list
-        # Skip globally-safe commands — they're auto-approved regardless of the allow list
-        if cron_job_id and cron_allowlist and cron_interactive and not auto_approve:
+        # Skip globally-safe commands and danger-mode approvals — they do not need
+        # per-job allow list entries.
+        if cron_job_id and cron_allowlist and cron_interactive and not auto_approve and not danger_auto_approved:
             cron_allowlist.add_command(cron_job_id, command)
 
         return result, False, command_executed
@@ -195,7 +203,8 @@ def handle_command_approval(command, arguments, tool, context, console,
         console,
         reason=arguments.get('reason', 'Execute shell command'),
         requires_approval=True,
-        approve_mode=approve_mode
+        approve_mode=approve_mode,
+        chat_manager=chat_manager,
     )
 
     if action == "accept":

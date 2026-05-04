@@ -106,14 +106,14 @@ def _format_task_list(task_list, title=None):
 
 @tool(
     name="create_task_list",
-    description="Create or replace an in-session task list for tracking long edit workflows.",
+    description="Create or replace an in-session task list for tracking long edit workflows. Task descriptions should be short sentences that serve as labels — they appear in the status bar. Keep them concise.",
     parameters={
         "type": "object",
         "properties": {
             "tasks": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Task descriptions (non-empty after trimming)"
+                "description": "Short task descriptions — one concise sentence each. These are labels shown in the status bar, not full instructions."
             },
             "title": {
                 "type": "string",
@@ -172,6 +172,9 @@ def create_task_list(
         for t in normalized
     ]
     chat_manager.task_list_title = title or None
+
+    # Trigger live toolbar redraw while prompt is open
+    chat_manager.request_ui_invalidation()
 
     return _format_task_list(chat_manager.task_list, chat_manager.task_list_title)
 
@@ -242,6 +245,9 @@ def complete_task(
     # Mark tasks as complete
     for tid in valid_ids:
         task_list[tid]["completed"] = True
+
+    # Trigger live toolbar redraw while prompt is open
+    chat_manager.request_ui_invalidation()
 
     return _format_task_list(task_list, chat_manager.task_list_title)
 

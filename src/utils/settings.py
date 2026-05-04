@@ -1,12 +1,13 @@
 """Centralized configuration for bone-agent."""
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Set
+from typing import Any, Set
 
 # Load config from llm.config
 # Note: src/ is added to sys.path in main.py, so we can import directly
 from llm.config import _CONFIG
+from llm import config as llm_config
 
 # Styles and themes
 from pygments.styles.monokai import MonokaiStyle
@@ -25,19 +26,78 @@ def left_align_headings(text: str) -> str:
     return _HEADING_RE.sub(lambda m: m.group(2), text)
 
 
+_SERVER_SETTING_DEFAULTS = {
+    "ngl_layers": 99,
+    "ctx_size": 8192,
+    "n_predict": 8192,
+    "rope_scale": 1.0,
+    "threads": 4,
+    "batch_size": 2048,
+    "ubatch_size": 512,
+    "flash_attn": True,
+    "no_mmap": False,
+    "mlock": False,
+    "cache_type_k": "",
+    "cache_type_v": "",
+    "fit": False,
+    "fit_ctx": 0,
+    "fit_target": 0,
+    "n_parallel": 0,
+    "reasoning_budget": None,
+    "health_check_timeout_sec": 120,
+    "health_check_interval_sec": 1.0,
+}
+
+
+def _server_value(key: str) -> Any:
+    return _CONFIG.get("SERVER_SETTINGS", {}).get(key, _SERVER_SETTING_DEFAULTS[key])
+
+
 @dataclass
 class ServerSettings:
     """Local llama-server configuration."""
-    ngl_layers: int = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("ngl_layers", 99))
-    ctx_size: int = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("ctx_size", 8192))
-    n_predict: int = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("n_predict", 8192))
-    rope_scale: float = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("rope_scale", 1.0))
-    threads: int = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("threads", 4))
-    batch_size: int = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("batch_size", 2048))
-    ubatch_size: int = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("ubatch_size", 512))
-    flash_attn: bool = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("flash_attn", True))
-    health_check_timeout_sec: int = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("health_check_timeout_sec", 120))
-    health_check_interval_sec: float = field(default_factory=lambda: _CONFIG.get("SERVER_SETTINGS", {}).get("health_check_interval_sec", 1.0))
+    ngl_layers: int = field(default_factory=lambda: _server_value("ngl_layers"))
+    ctx_size: int = field(default_factory=lambda: _server_value("ctx_size"))
+    n_predict: int = field(default_factory=lambda: _server_value("n_predict"))
+    rope_scale: float = field(default_factory=lambda: _server_value("rope_scale"))
+    threads: int = field(default_factory=lambda: _server_value("threads"))
+    batch_size: int = field(default_factory=lambda: _server_value("batch_size"))
+    ubatch_size: int = field(default_factory=lambda: _server_value("ubatch_size"))
+    flash_attn: bool = field(default_factory=lambda: _server_value("flash_attn"))
+    no_mmap: bool = field(default_factory=lambda: _server_value("no_mmap"))
+    mlock: bool = field(default_factory=lambda: _server_value("mlock"))
+    cache_type_k: str = field(default_factory=lambda: _server_value("cache_type_k"))
+    cache_type_v: str = field(default_factory=lambda: _server_value("cache_type_v"))
+    fit: bool = field(default_factory=lambda: _server_value("fit"))
+    fit_ctx: int = field(default_factory=lambda: _server_value("fit_ctx"))
+    fit_target: int = field(default_factory=lambda: _server_value("fit_target"))
+    n_parallel: int = field(default_factory=lambda: _server_value("n_parallel"))
+    reasoning_budget: int | None = field(default_factory=lambda: _server_value("reasoning_budget"))
+    health_check_timeout_sec: int = field(default_factory=lambda: _server_value("health_check_timeout_sec"))
+    health_check_interval_sec: float = field(default_factory=lambda: _server_value("health_check_interval_sec"))
+
+
+def get_local_model_server_settings(model_path: str, config_data: dict | None = None) -> ServerSettings:
+    """Resolve effective llama-server settings for one local model.
+
+    Resolution order:
+    1. SERVER_SETTINGS global defaults
+    2. LOCAL_MODEL_SETTINGS[model_path] overrides
+    3. dataclass fallback defaults for omitted global keys
+    """
+    config_source = config_data if config_data is not None else llm_config._load_config()
+    global_settings = config_source.get("SERVER_SETTINGS", {}) or {}
+    per_model_settings = (config_source.get("LOCAL_MODEL_SETTINGS", {}) or {}).get(model_path, {}) or {}
+    values = {}
+
+    for item in fields(ServerSettings):
+        key = item.name
+        values[key] = per_model_settings.get(
+            key,
+            global_settings.get(key, _SERVER_SETTING_DEFAULTS[key]),
+        )
+
+    return ServerSettings(**values)
 
 
 @dataclass
@@ -181,6 +241,24 @@ class ObsidianSettings:
         return [f.strip() for f in self.exclude_folders.split(",") if f.strip()]
 
 
+@dataclass
+class SwarmSettings:
+    """Swarm pool configuration.
+
+    Swarm is inactive by default — nothing starts unless explicitly
+    invoked via /swarm or --worker flags.
+    """
+    host: str = field(default_factory=lambda: _CONFIG.get("SWARM_SETTINGS", {}).get("host", "127.0.0.1"))
+    port: int = field(default_factory=lambda: _CONFIG.get("SWARM_SETTINGS", {}).get("port", 8765))
+    max_workers: int = field(default_factory=lambda: _CONFIG.get("SWARM_SETTINGS", {}).get("max_workers", 10))
+    worker_tools: list = field(default_factory=lambda: _CONFIG.get("SWARM_SETTINGS", {}).get("worker_tools", [
+        "rg", "read_file", "list_directory", "edit_file",
+        "create_file", "execute_command",
+        "create_task_list", "complete_task", "show_task_list",
+    ]))
+    allow_active_plugins: bool = field(default_factory=lambda: _CONFIG.get("SWARM_SETTINGS", {}).get("allow_active_plugins", False))
+
+
 # Global instances
 server_settings = ServerSettings()
 tool_settings = ToolSettings()
@@ -190,6 +268,7 @@ sub_agent_settings = SubAgentSettings()
 dream_settings = DreamSettings()
 obsidian_settings = ObsidianSettings()
 prompt_settings = PromptSettings()
+swarm_settings = SwarmSettings()
 # Tool execution constants
 MAX_TOOL_CALLS = tool_settings.max_tool_calls
 MAX_COMMAND_OUTPUT_LINES = tool_settings.max_command_output_lines

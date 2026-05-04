@@ -492,3 +492,84 @@ def build_sub_agent_prompt(sub_agent_type: str = "research", soft_limit_tokens: 
     return "\n\n".join(result)
 
 
+# Admin-mode sections to suppress in swarm admin prompt
+_ADMIN_SUPPRESS_SECTIONS = {"editing_pattern", "task_lists_pattern", "temp_folder", "mode"}
+
+
+def _admin_sections(variant: str) -> list[tuple[str, callable]]:
+    """Return main sections for swarm admin prompt, suppressing edit/task/temp sections.
+
+    Keeps search/research guidance active so the admin can investigate
+    before writing worker prompts.
+    """
+    all_sections = _main_sections(variant)
+    return [
+        (key, fn) for key, fn in all_sections
+        if key not in _ADMIN_SUPPRESS_SECTIONS
+    ]
+
+
+def build_swarm_admin_prompt(variant: str | None = None, active_skills_section: str = "") -> str:
+    """Build system prompt for swarm admin (orchestrator mode).
+
+    Reuses main sections but suppresses editing/task-list/temp-folder
+    guidance. Appends swarm_admin_mode.md as the final mode section.
+
+    Args:
+        variant: Variant name ('main' or 'micro'). Defaults to settings.
+        active_skills_section: Optional rendered active-skills block.
+
+    Returns:
+        Complete system prompt string
+    """
+    if variant is None:
+        variant = _resolve_variant()
+    if not _variant_available(variant):
+        raise FileNotFoundError(
+            f"Prompt variant '{variant}' not found: "
+            f"{_PROMPTS_DIR / variant} does not exist"
+        )
+
+    result = _build_prompt(_admin_sections(variant))
+
+    # Append the swarm admin mode section as the final section
+    mode_content = _static(variant, "swarm_admin_mode.md")
+    if mode_content:
+        result += "\n\n" + mode_content
+
+    if active_skills_section.strip():
+        result += "\n\n" + active_skills_section.strip()
+
+    return result
+
+
+def build_swarm_worker_prompt(variant: str | None = None) -> str:
+    """Build system prompt for swarm worker.
+
+    Reuses main sections (full tool guidance) and appends
+    swarm_worker_mode.md as the final mode section.
+
+    Args:
+        variant: Variant name ('main' or 'micro'). Defaults to settings.
+
+    Returns:
+        Complete system prompt string
+    """
+    if variant is None:
+        variant = _resolve_variant()
+    if not _variant_available(variant):
+        raise FileNotFoundError(
+            f"Prompt variant '{variant}' not found: "
+            f"{_PROMPTS_DIR / variant} does not exist"
+        )
+
+    result = _build_prompt(_main_sections(variant))
+
+    # Append the swarm worker mode section as the final section
+    mode_content = _static(variant, "swarm_worker_mode.md")
+    if mode_content:
+        result += "\n\n" + mode_content
+
+    return result
+
+

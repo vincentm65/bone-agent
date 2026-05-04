@@ -1,6 +1,5 @@
 """Interactive tool confirmation panel with arrow key navigation."""
 
-import asyncio
 from html import escape
 from threading import Timer
 from typing import Optional, Tuple
@@ -33,7 +32,7 @@ class ToolConfirmationPanel:
         {"value": "cancel", "text": "Cancel"},
     ]
 
-    def __init__(self, tool_command: str, reason: Optional[str] = None, is_edit_tool: bool = False, cycle_approve_mode=None):
+    def __init__(self, tool_command: str, reason: Optional[str] = None, is_edit_tool: bool = False, cycle_approve_mode=None, chat_manager=None):
         """Initialize the tool confirmation panel.
 
         Args:
@@ -41,11 +40,13 @@ class ToolConfirmationPanel:
             reason: Optional reason/details about the tool execution
             is_edit_tool: Whether this is an edit tool (shows extra toggle option)
             cycle_approve_mode: Optional callback to cycle approve_mode
+            chat_manager: Optional ChatManager for admin interrupt polling
         """
         self.tool_command = tool_command
         self.reason = reason
         self.is_edit_tool = is_edit_tool
         self.cycle_approve_mode = cycle_approve_mode
+        self._chat_manager = chat_manager
         self.selected_index = 0
         self._showing_summary = False
         self._selected_value = None
@@ -222,6 +223,15 @@ class ToolConfirmationPanel:
             mouse_support=False,
         )
 
-        # Use run_async with asyncio to properly await coroutines
-        result = asyncio.run(application.run_async())
+        result = self._run_application(application)
         return self._handle_result(result)
+
+    def _run_application(self, application) -> str:
+        """Run the prompt_toolkit application, with optional swarm interrupt.
+
+        Uses _run_application_interruptible when chat_manager is provided,
+        so pending swarm approvals can interrupt the confirmation prompt.
+        Returns 130 on interrupt (treated as cancel by _handle_result).
+        """
+        from ui.prompt_interrupts import _run_application_interruptible
+        return _run_application_interruptible(application, self._chat_manager)

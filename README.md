@@ -10,6 +10,7 @@ A CLI-based AI coding assistant capable of codebase search, file editing, comput
 - **Tool-Based Interaction**: Code search (`rg`), file editing, directory operations, and web search
 - **Multiple Modes**: Edit (full access), Plan (read-only), and Learn (documentation style)
 - **Parallel Execution**: Run multiple tools concurrently for efficiency
+- **Swarm Pool**: Delegate work to parallel worker agents via `/swarm` — admin mode with task decomposition and independent workers
 - **Conversation History**: Markdown logging with context compaction
 - **Approval Workflows**: Safety checks for dangerous commands
 
@@ -119,6 +120,27 @@ bone
 - `BONE_API_KEY` - bone-agent (proxy) API key (auto-set via `/signup`)
 - `BONE_API_BASE` - bone-agent (proxy) API base URL (default: `https://api.vmcode.dev`)
 
+## Swarm Pool
+
+The swarm pool lets you delegate work to parallel worker agents. The main agent enters **admin mode** where it researches, decomposes tasks, and dispatches them to independent workers that execute with full tool access.
+
+```
+> /swarm start <name>       Start a swarm (enters admin mode)
+> /swarm join <name>        Turn this session into a worker
+> /swarm status             Show worker/task snapshot
+> /swarm close              Stop server, exit admin mode
+```
+
+Workers run in separate terminals with full REPL access. File edits are auto-approved; commands (shell execution) require admin approval. Workers are fresh `AgenticOrchestrator` instances with isolated context — they receive self-contained task prompts from the admin's research phase.
+
+**Caveats (v1):**
+- Admin process exit ends the swarm; no admin reclaim in v1.
+- No hard file locks — task prompts declare write scope, but workers have full tool access.
+- Worker edits are auto-approved to avoid serial bottlenecks.
+- Commands require approval by the admin agent.
+- Worker crash marks task interrupted, not requeued.
+- Worker manual intervention during a task marks the result as review-needed.
+
 ## Commands
 
 - `/provider <name>` - Switch LLM provider
@@ -199,3 +221,44 @@ bone-agent is currently in active development. Production readiness is in progre
 - Documentation
 - Error handling improvements
 - Performance optimizations
+
+## Swarm hands-off approval validation
+
+Practical scenarios for the admin agent approving or denying worker commands
+through the hands-off approval loop (`handle_approval`).
+
+### Safe scoped command — approve
+
+Worker asks for a logical, in-scope shell command that advances the task. Examples:
+
+- Create or remove a temp directory under `.temp/`.
+- Run a safe read-only command (e.g., `ls .temp/`, `ping -c 1 host`).
+- Write or edit a file within the task's declared write scope.
+
+**Procedure:** Inspect the pending approval, verify the command matches scope and is not
+destructive, then call `handle_approval(task_id=..., call_id=..., approved=True)`.
+Optionally include a `reason` note.
+
+### Unsafe or out-of-scope command — deny
+
+Worker requests a destructive, broad, unrelated, or out-of-scope command. Examples:
+
+- `rm -rf` outside `.temp/` or the task's scope.
+- Broad git operations (`git reset --hard`, `git push --force`).
+- File writes to paths not in the task's write scope.
+- Network exfiltration or data scraping commands.
+
+**Procedure:** Confirm unsafe scope, then call
+`handle_approval(task_id=..., call_id=..., approved=False, reason=...)` with a clear
+explanation and safer guidance.
+
+### Denial recovery
+
+After a denial, the worker receives the reason and instructions to revise. It should not
+treat the denial as opaque failure or retry the same command. Verify the worker references
+the denial reason and proposes a revised, safer approach.
+
+### Fallback: human intervention
+
+If the admin agent's approval logic is uncertain or blocked, the human can resolve the
+pending item by giving the admin agent explicit approval or denial instructions.

@@ -61,7 +61,62 @@ def get_bottom_toolbar_text(chat_manager):
     if STATUS_BAR_SETTINGS.get("show_cost", True):
         parts.append(f'<style fg="#606060"> | </style><style fg="#808080">cost</style><style fg="#606060">: ${total_cost:.4f}</style>')
     
-    return HTML('\n' + ''.join(parts))
+    toolbar_text = '\n' + ''.join(parts)
+    
+    # Append live swarm status — exactly one selected page — when in swarm admin mode.
+    try:
+        if getattr(chat_manager, 'swarm_admin_mode', False) and getattr(chat_manager, 'swarm_server', None):
+            from ui.swarm_formatting import (
+                format_swarm_toolbar_lines,
+                format_task_list_toolbar_line,
+            )
+
+            page = getattr(chat_manager, 'swarm_status_page', 0)
+            snapshot = chat_manager.swarm_server.status_snapshot()
+
+            # Page indicator line.
+            page_names = ["Workers", "Plan"]
+            total_pages = len(page_names)
+            page = min(max(page, 0), total_pages - 1)
+            page_label = page_names[page]
+            indicator = f"[{page + 1}/{total_pages} {page_label}]"
+            toolbar_text += f'\n<style fg="#555555">{indicator}</style>'
+
+            if page == 0:
+                # Page 1 — Workers.
+                swarm_lines = format_swarm_toolbar_lines(snapshot)
+                if swarm_lines:
+                    for line in swarm_lines:
+                        escaped = (line.replace("&", "&amp;")
+                                        .replace("<", "&lt;")
+                                        .replace(">", "&gt;"))
+                        toolbar_text += f'\n<style fg="#888888">{escaped}</style>'
+
+            elif page == 1:
+                # Page 2 — Plan (full checklist).
+                task_list = getattr(chat_manager, 'task_list', None)
+                swarm_complete = getattr(chat_manager, 'swarm_complete', False)
+                swarm_complete_summary = getattr(chat_manager, 'swarm_complete_summary', "")
+                plan_lines = format_task_list_toolbar_line(
+                    task_list,
+                    snapshot=snapshot,
+                    title=getattr(chat_manager, 'task_list_title', None),
+                    swarm_complete=swarm_complete,
+                    swarm_complete_summary=swarm_complete_summary,
+                    plan_map=getattr(chat_manager, '_swarm_task_plan_map', None),
+                )
+                if plan_lines:
+                    for line in plan_lines:
+                        escaped = (line.replace("&", "&amp;")
+                                        .replace("<", "&lt;")
+                                        .replace(">", "&gt;"))
+                        toolbar_text += f'\n<style fg="#aaaaaa">{escaped}</style>'
+
+
+    except Exception:
+        pass  # Never crash the toolbar
+    
+    return HTML(toolbar_text)
 
 
 TOOLBAR_STYLE = Style.from_dict({
@@ -86,28 +141,3 @@ def setup_common_bindings(chat_manager):
         event.app.invalidate()
     
     return bindings
-
-
-def create_confirmation_prompt_session(chat_manager, message_func):
-    """Create a PromptSession for confirmation prompts with key bindings and toolbar.
-    
-    This provides:
-    - Shift+Tab to toggle approval mode
-    - Bottom toolbar showing model, approval mode, and token counts
-    - Dynamic prompt message that updates when mode changes
-    
-    Args:
-        chat_manager: ChatManager instance for state access
-        message_func: Function that returns the prompt message HTML (called on each redraw)
-        
-    Returns:
-        PromptSession configured with bindings and toolbar
-    """
-    bindings = setup_common_bindings(chat_manager)
-    
-    return PromptSession(
-        key_bindings=bindings,
-        style=TOOLBAR_STYLE,
-        bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
-        message=message_func
-    )

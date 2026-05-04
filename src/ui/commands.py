@@ -13,8 +13,9 @@ from ui.banner import display_startup_banner
 from core.agentic import SubAgentPanel
 from ui.setting_selector import SettingSelector, SettingCategory, SettingOption
 
-from utils.settings import MonokaiDarkBGStyle, context_settings, left_align_headings, tool_settings
+from utils.settings import MonokaiDarkBGStyle, context_settings, get_local_model_server_settings, left_align_headings, tool_settings, swarm_settings
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.table import Table
 
 from rich import box
@@ -36,8 +37,8 @@ config_manager = ConfigManagerClass()
 @dataclass
 class CommandResult:
     """Standardized command return type."""
-    status: str  # "exit", "handled", or "continue"
-    replacement_input: Optional[str] = None  # For /edit command
+    status: str  # "exit", "handled", "continue", or "swarm_worker"
+    replacement_input: Optional[str] = None  # For /edit command or command payload
 
 # Command handler functions
 
@@ -657,6 +658,51 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
     return CommandResult(status="handled")
 
 
+def _local_server_setting_options(model_path: str):
+    """Build editable local llama-server settings for one model."""
+    effective = get_local_model_server_settings(model_path)
+    overrides = config_manager.get_local_model_settings(model_path) if model_path else {}
+
+    def value(key):
+        return overrides.get(key, getattr(effective, key))
+
+    return [
+        SettingOption(key="ngl_layers", text="GPU layers", value=value("ngl_layers"), input_type="number"),
+        SettingOption(key="ctx_size", text="Context size", value=value("ctx_size"), input_type="number"),
+        SettingOption(key="n_predict", text="Max prediction tokens", value=value("n_predict"), input_type="number"),
+        SettingOption(key="threads", text="Threads", value=value("threads"), input_type="number"),
+        SettingOption(key="batch_size", text="Batch size", value=value("batch_size"), input_type="number"),
+        SettingOption(key="ubatch_size", text="Micro-batch size", value=value("ubatch_size"), input_type="number"),
+        SettingOption(key="rope_scale", text="RoPE scale", value=value("rope_scale"), input_type="float", step=0.1),
+        SettingOption(key="flash_attn", text="Flash attention", value=value("flash_attn"), input_type="boolean"),
+        SettingOption(key="no_mmap", text="Disable mmap", value=value("no_mmap"), input_type="boolean"),
+        SettingOption(key="mlock", text="Memory lock", value=value("mlock"), input_type="boolean"),
+        SettingOption(key="cache_type_k", text="K cache type", value=value("cache_type_k"), input_type="text"),
+        SettingOption(key="cache_type_v", text="V cache type", value=value("cache_type_v"), input_type="text"),
+        SettingOption(key="fit", text="Fit model", value=value("fit"), input_type="boolean"),
+        SettingOption(key="fit_ctx", text="Fit context", value=value("fit_ctx"), input_type="number"),
+        SettingOption(key="fit_target", text="Fit target", value=value("fit_target"), input_type="number"),
+        SettingOption(key="n_parallel", text="Parallel slots", value=value("n_parallel"), input_type="number"),
+        SettingOption(key="reasoning_budget", text="Reasoning budget", value="" if value("reasoning_budget") is None else value("reasoning_budget"), input_type="text"),
+        SettingOption(key="health_check_timeout_sec", text="Health timeout seconds", value=value("health_check_timeout_sec"), input_type="number"),
+        SettingOption(key="health_check_interval_sec", text="Health interval seconds", value=value("health_check_interval_sec"), input_type="float", step=0.1),
+    ]
+
+
+def _coerce_local_server_setting(key: str, value):
+    int_keys = {"ngl_layers", "ctx_size", "n_predict", "threads", "batch_size", "ubatch_size", "fit_ctx", "fit_target", "n_parallel", "health_check_timeout_sec"}
+    float_keys = {"rope_scale", "health_check_interval_sec"}
+    if key == "reasoning_budget":
+        if value is None or value == "":
+            return None
+        return int(value)
+    if key in int_keys:
+        return int(value)
+    if key in float_keys:
+        return float(value)
+    return value
+
+
 def _handle_clear(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle clear/reset command."""
     # Display conversation cost for the previous chat
@@ -758,10 +804,16 @@ def _open_provider_editor(chat_manager, console, provider):
         ))
 
     provider_label = config.get_provider_display_name(provider)
-    category = SettingCategory(title=f"{provider_label} Settings", settings=settings)
+    categories = [SettingCategory(title=f"{provider_label} Settings", settings=settings)]
+    if provider == "local" and current_model:
+        config_manager.init_local_model_settings(current_model)
+        categories.append(SettingCategory(
+            title=f"Local Server Settings ({current_model})",
+            settings=_local_server_setting_options(current_model),
+        ))
 
     selector = SettingSelector(
-        categories=[category],
+        categories=categories,
         title=f"Configure {provider_label}",
     )
 
@@ -806,6 +858,23 @@ def _open_provider_editor(chat_manager, console, provider):
                 change_lines.append(f"  Cost: ${cost_in:.2f}/${cost_out:.2f} per 1M tokens")
             except Exception as e:
                 console.print(f"[red]Failed to set pricing: {e}[/red]")
+
+    if provider == "local":
+        local_setting_keys = {
+            "ngl_layers", "ctx_size", "n_predict", "threads", "batch_size", "ubatch_size",
+            "rope_scale", "flash_attn", "no_mmap", "mlock", "cache_type_k", "cache_type_v",
+            "fit", "fit_ctx", "fit_target", "n_parallel", "reasoning_budget",
+            "health_check_timeout_sec", "health_check_interval_sec",
+        }
+        local_changes = {key: _coerce_local_server_setting(key, value) for key, value in changes.items() if key in local_setting_keys}
+        target_model = changes.get("model") or current_model
+        if target_model and target_model != current_model:
+            config_manager.init_local_model_settings(target_model)
+        if target_model and local_changes:
+            existing_settings = config_manager.get_local_model_settings(target_model)
+            existing_settings.update(local_changes)
+            config_manager.save_local_model_settings(target_model, existing_settings)
+            change_lines.append(f"  Local server settings: {len(local_changes)} updated")
 
     # Reload config and switch provider
     config_manager.set_provider(provider)
@@ -970,6 +1039,8 @@ def _handle_model(chat_manager, console, debug_mode_container, args, cron_schedu
     # Set model for current provider
     try:
         backup_path = config_manager.set_model(current_provider, model)
+        if current_provider == "local":
+            config_manager.init_local_model_settings(model)
         console.print(f"[green]Model set to '{model}' for {current_provider} provider[/green]")
         if backup_path:
             console.print(f"[dim]Saved to config.json (backup: {backup_path.name})[/dim]")
@@ -3302,6 +3373,175 @@ def _handle_obsidian_init(console, obsidian_settings):
     return CommandResult(status="handled")
 
 
+# ── Swarm commands ─────────────────────────────────────────────────────
+
+
+def _handle_swarm(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
+    """Handle /swarm commands for swarm pool management."""
+    if not args:
+        _print_swarm_help(console)
+        return CommandResult(status="handled")
+
+    parts = args.split(maxsplit=1)
+    subcmd = parts[0].lower()
+    subargs = parts[1] if len(parts) > 1 else None
+
+    if subcmd in ("start",):
+        return _handle_swarm_start(chat_manager, console, subargs)
+    elif subcmd in ("join",):
+        return _handle_swarm_join(chat_manager, console, subargs)
+    elif subcmd in ("status", "stat"):
+        return _handle_swarm_status(chat_manager, console)
+    elif subcmd in ("close", "stop", "exit"):
+        return _handle_swarm_close(chat_manager, console)
+    else:
+        console.print(f"[red]Unknown swarm subcommand: /swarm {subcmd}[/red]")
+        _print_swarm_help(console)
+        return CommandResult(status="handled")
+
+
+def _print_swarm_help(console):
+    """Print swarm command help."""
+    console.print("")
+    table = Table(show_header=True, box=box.SIMPLE_HEAD)
+    table.add_column("Command", no_wrap=True)
+    table.add_column("Description")
+
+    table.add_row("[bold #5F9EA0]/swarm start[/bold #5F9EA0] <name>", "Start a swarm server (admin mode)")
+    table.add_row("[bold #5F9EA0]/swarm join[/bold #5F9EA0] <name>", "Turn this session into a worker")
+    table.add_row("[bold #5F9EA0]/swarm status[/bold #5F9EA0]", "Show worker/task snapshot")
+    table.add_row("[bold #5F9EA0]/swarm close[/bold #5F9EA0]", "Stop server, exit swarm admin mode")
+
+    console.print(Panel(table, title="[bold #5F9EA0]Swarm[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
+    console.print("")
+
+
+def _handle_swarm_start(chat_manager, console, name_arg):
+    """Start a new swarm server and enter admin mode."""
+    if chat_manager.swarm_admin_mode and chat_manager.swarm_server:
+        server = chat_manager.swarm_server
+        console.print(f"[yellow]Swarm '{server.swarm_name}' is already active.[/yellow]")
+        console.print(f"  Workers: {server.worker_count}")
+        console.print(f"  Idle: {len(server.idle_workers)}")
+        console.print(f"  Queue: {len(server.pending_tasks)}")
+        console.print(f"  URL: {server.base_url}")
+        return CommandResult(status="handled")
+
+    swarm_name = name_arg if name_arg else "default"
+    host = swarm_settings.host
+    port = swarm_settings.port
+    console.print(f"[dim]Starting swarm '{swarm_name}' on ws://{host}:{port}/{swarm_name}...[/dim]")
+
+    from core.swarm_server import SwarmServer
+    server = SwarmServer(swarm_name, host=host, port=port)
+    if not server.start():
+        error = server._last_error or "Unknown error"
+        console.print(f"[red]Failed to start swarm server: {error}[/red]")
+        console.print(
+            "[yellow]Tip: Run [/yellow][bold]/swarm close[/bold][yellow] first to stop "
+            "any existing swarm, or configure a different port.[/yellow]"
+        )
+        return CommandResult(status="handled")
+
+    chat_manager.swarm_server = server
+    chat_manager.swarm_admin_mode = True
+    chat_manager.start_swarm_inbox_poller()
+
+    # Remove agents.md exchange — admin doesn't need the codebase map
+    if len(chat_manager.messages) >= 3:
+        msg1, msg2 = chat_manager.messages[1], chat_manager.messages[2]
+        if msg1.get("role") == "user" and msg2.get("role") == "assistant":
+            chat_manager.messages = [chat_manager.messages[0]] + chat_manager.messages[3:]
+
+    chat_manager.update_system_prompt()
+
+    console.print("[green]Swarm is ready.[/green]")
+    console.print("  - Add workers with: /swarm join " + swarm_name)
+    console.print("  - Ask me for work; I'll delegate tasks when useful.")
+    console.print("  - I'll surface approvals and completions here.")
+    console.print("  - Stop everything with: /swarm close")
+    console.print()
+    return CommandResult(status="handled")
+
+
+def _handle_swarm_join(chat_manager, console, name_arg):
+    """Turn the current session into a swarm worker."""
+    if not name_arg:
+        console.print("[red]Usage: /swarm join <name>[/red]")
+        return CommandResult(status="handled")
+
+    swarm_name = name_arg
+    server_url = (
+        chat_manager.swarm_server.base_url
+        if chat_manager.swarm_admin_mode and chat_manager.swarm_server
+        else f"ws://{swarm_settings.host}:{swarm_settings.port}/{swarm_name}"
+    )
+
+    console.print(f"[dim]Joining swarm '{swarm_name}' as worker...[/dim]")
+    return CommandResult(status="swarm_worker", replacement_input=swarm_name)
+
+
+def _handle_swarm_status(chat_manager, console):
+    """Show swarm status snapshot using the shared formatter."""
+    from ui.swarm_formatting import format_swarm_status
+    if not chat_manager.swarm_admin_mode or not chat_manager.swarm_server:
+        console.print("[yellow]No active swarm. Start one with /swarm start <name>[/yellow]")
+        return CommandResult(status="handled")
+
+    server = chat_manager.swarm_server
+    snap = server.status_snapshot()
+
+    console.print()
+    console.print(Panel(
+        format_swarm_status(snap, mode="human"),
+        title="[bold #5F9EA0]Swarm Status[/bold #5F9EA0]",
+        border_style="grey23",
+    ))
+    console.print()
+    return CommandResult(status="handled")
+
+
+def _handle_swarm_close(chat_manager, console):
+    """Stop the swarm server and exit admin mode."""
+    if not chat_manager.swarm_admin_mode or not chat_manager.swarm_server:
+        console.print("[yellow]No active swarm.[/yellow]")
+        return CommandResult(status="handled")
+
+    server = chat_manager.swarm_server
+    console.print(f"[dim]Stopping swarm server '{server.swarm_name}'...[/dim]")
+
+    try:
+        server.stop(force=True)
+    except Exception as e:
+        console.print(f"[red]Error stopping server: {e}[/red]")
+
+    chat_manager.stop_swarm_inbox_poller()
+    chat_manager.swarm_server = None
+    chat_manager.swarm_admin_mode = False
+
+    chat_manager.update_system_prompt()
+
+    console.print("[green]Swarm stopped. Admin mode disabled.[/green]")
+
+    # Check if port is still in use (thread may have crashed)
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect((server.host, server.port))
+        s.close()
+        console.print(
+            f"[yellow]Port {server.port} is still bound. The server thread may have crashed. "
+            f"The port will be released when this vmCode process exits. "
+            f"Use a different port to start a new swarm.[/yellow]"
+        )
+    except (ConnectionRefusedError, OSError):
+        pass  # Port is free — nothing to warn about
+
+    console.print()
+    return CommandResult(status="handled")
+
+
 # Command registry - maps command names to their handlers
 _COMMAND_HANDLERS = {
     "/exit": _handle_exit,
@@ -3342,6 +3582,8 @@ _COMMAND_HANDLERS = {
     "/skill": _handle_skills,
     "/ask": _handle_ask,
     "/a": _handle_ask,
+
+    "/swarm": _handle_swarm,
 }
 
 
