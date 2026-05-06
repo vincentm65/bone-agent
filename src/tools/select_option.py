@@ -1,18 +1,11 @@
 """Interactive selection tool for presenting multiple-choice questions to the user."""
 
 from html import escape as _html_escape
-from threading import Timer
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any
 
 from prompt_toolkit import HTML
-from prompt_toolkit.application import Application
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import Layout, HSplit, Window
-from prompt_toolkit.layout.dimension import D
-from prompt_toolkit.layout.controls import FormattedTextControl
 
-from ui.prompt_utils import TOOLBAR_STYLE
+from ui.toolbar_interactions import ToolbarInteraction, run_toolbar_interaction
 
 from .helpers.base import tool
 
@@ -24,8 +17,8 @@ CUSTOM_INPUT_OPTION = {
 }
 
 
-class SelectionPanel:
-    """Inline selection panel with arrow key navigation and inline custom input."""
+class SelectionPanel(ToolbarInteraction):
+    """Toolbar-hosted selection panel with arrow key navigation and inline custom input."""
 
     # Cursor indicator
     _CURSOR = "> "
@@ -38,9 +31,9 @@ class SelectionPanel:
                        (each with 'value', 'text', optional 'description').
             chat_manager: Optional ChatManager for admin interrupt polling.
         """
+        super().__init__()
         self.questions = questions
         self._chat_manager = chat_manager
-        self._showing_summary = False
 
         # Initialize for multi-question mode (handles both single and multiple questions)
         self.current_question_idx = 0
@@ -51,7 +44,6 @@ class SelectionPanel:
         # Inline custom input editing state
         self._editing_custom_input = False
         self._custom_input_texts: Dict[int, str] = {}  # question_idx -> typed text
-        self._auto_advance_timer: Optional[Timer] = None  # Track for cancellation
 
         # Multi-select state: per-question set of checked option indices
         self._checked_indices: Dict[int, set] = {
@@ -77,419 +69,355 @@ class SelectionPanel:
             return options[opt_idx].get("value") == CUSTOM_INPUT_SENTINEL
         return False
 
-    def _wrap_description(self, text: str, indent: str, width: int = None) -> List[str]:
-        """Wrap description text preserving indent on continuation lines.
+    # ------------------------------------------------------------------
+    # ToolbarInteraction interface
+    # ------------------------------------------------------------------
 
-        Args:
-            text: The description text to wrap.
-            indent: The indentation string (e.g. '   ').
-            width: Maximum line width. Defaults to current terminal width.
+    def render(self) -> str:
+        """Return compact HTML for bottom-toolbar rendering.
 
-        Returns:
-            List of lines, first without extra indent, continuations with indent.
+        Shows question header with progress, windowed options around
+        the focused item, and a short controls hint.  Descriptions are
+        omitted to keep the toolbar compact.
         """
-        import os
-        if width is None:
-            width = os.get_terminal_size().columns
-        available = width - len(indent)
-        if available <= 0:
-            return [text]
-        words = text.split()
         lines = []
-        current = ""
-        for word in words:
-            if not current:
-                current = word
-            elif len(current) + 1 + len(word) <= available:
-                current += " " + word
-            else:
-                lines.append(current)
-                current = word
-        if current:
-            lines.append(current)
-        return lines
+        q_idx = self.current_question_idx
+        question = self.questions[q_idx]
+        q_num = q_idx + 1
+        q_total = len(self.questions)
+        is_single = q_total == 1
+
+        q_text = _html_escape(question.get("question", ""))
+
+        # Controls hint
+        if self._editing_custom_input:
+            hint = "Type \u00b7 Enter confirm \u00b7 Esc back"
+        elif self._is_multi_select(q_idx):
+            hint = "\u2191\u2193 nav \u00b7 Space toggle \u00b7 Enter confirm \u00b7 Esc cancel"
+        elif is_single:
+            hint = "\u2191\u2193 nav \u00b7 Enter select \u00b7 Esc cancel"
+        else:
+            hint = "\u2191\u2193 options \u00b7 \u2190\u2192 questions \u00b7 Enter select \u00b7 Esc cancel"
+
+        if is_single:
+            lines.append(f"<b>{q_text}</b>    <style fg='#888888'>{hint}</style>")
+        else:
+            lines.append(f"<b>Q {q_num}/{q_total}: {q_text}</b>    <style fg='#888888'>{hint}</style>")
+
+        # Options — windowed when the list is long
+        options = question.get("options", [])
+        _MAX_VISIBLE = 7
+        total_opts = len(options)
+        focused = self.selected_indices[q_idx]
+
+        if total_opts <= _MAX_VISIBLE:
+            visible_start = 0
+            visible_end = total_opts
+        else:
+            half = _MAX_VISIBLE // 2
+            visible_start = max(0, focused - half)
+            visible_end = min(total_opts, visible_start + _MAX_VISIBLE)
+            # Clamp to the right edge so we always show _MAX_VISIBLE items
+            if visible_end - visible_start < _MAX_VISIBLE:
+                visible_start = max(0, visible_end - _MAX_VISIBLE)
+
+        if visible_start > 0:
+            lines.append(
+                f'<style fg="#888888">  \u22ef {visible_start} more above \u22ef</style>'
+            )
+
+        for o_idx in range(visible_start, visible_end):
+            opt = options[o_idx]
+            self._render_option(opt, o_idx, q_idx, o_idx == focused, lines)
+
+        if visible_end < total_opts:
+            lines.append(
+                f'<style fg="#888888">  \u22ef {total_opts - visible_end} more below \u22ef</style>'
+            )
+
+        return "\n".join(lines)
 
     def _render_option(self, opt, o_idx, q_idx, is_focused, lines):
-        """Render a single option into the lines list.
-
-        Args:
-            opt: Option dict with value, text, optional description
-            o_idx: Option index
-            q_idx: Question index
-            is_focused: Whether this option has the cursor
-            lines: List to append rendered lines to
-        """
+        """Render a single option line for toolbar display (no descriptions)."""
         text = _html_escape(opt.get("text", ""))
-        description = opt.get("description", "")
         is_custom = opt.get("value") == CUSTOM_INPUT_SENTINEL
         multi = self._is_multi_select(q_idx)
         checked = o_idx in self._checked_indices.get(q_idx, set())
 
         if is_focused:
             if is_custom and self._editing_custom_input:
-                # Editing mode: show text field with user input
                 typed = _html_escape(self._custom_input_texts.get(q_idx, ""))
-                lines.append(f'<style fg="white" bold="true">{self._CURSOR}{typed}</style>')
-                lines.append(f'<style fg="gray">   Type your answer, Enter to confirm, Esc to go back</style>')
+                display = typed if typed else text
+                lines.append(
+                    f'<style fg="white" bold="true">{self._CURSOR}{display}</style>'
+                )
+            elif multi and not is_custom:
+                marker = "\u25c9" if checked else "\u25cb"
+                lines.append(
+                    f'<style fg="white" bold="true">{self._CURSOR}{marker} {text}</style>'
+                )
             else:
-                # Navigation mode
+                lines.append(
+                    f'<style fg="white" bold="true">{self._CURSOR}{text}</style>'
+                )
+        else:
+            if multi and not is_custom:
+                marker = "\u25c9" if checked else "\u25cb"
+                if checked:
+                    lines.append(
+                        f'<style fg="#5F9EA0">  {marker} {text}</style>'
+                    )
+                else:
+                    lines.append(
+                        f'<style fg="gray">  {marker} {text}</style>'
+                    )
+            else:
                 if is_custom:
                     typed = _html_escape(self._custom_input_texts.get(q_idx, ""))
                     display = typed if typed else text
                 else:
                     display = text
-
-                if multi and not is_custom:
-                    marker = "◉" if checked else "○"
-                    lines.append(f'<style fg="white" bold="true">{self._CURSOR}{marker} {display}</style>')
-                else:
-                    lines.append(f'<style fg="white" bold="true">{self._CURSOR}{display}</style>')
-
-                if description:
-                    for wl in self._wrap_description(_html_escape(description), "   "):
-                        lines.append(f'<style fg="white">   {wl}</style>')
-        else:
-            # Unfocused option
-            if is_custom:
-                typed = _html_escape(self._custom_input_texts.get(q_idx, ""))
-                display = typed if typed else text
-            else:
-                display = text
-
-            if multi and not is_custom:
-                marker = "◉" if checked else "○"
-                if checked:
-                    lines.append(f'<style fg="#5F9EA0">  {marker} {display}</style>')
-                else:
-                    lines.append(f'<style fg="gray">  {marker} {display}</style>')
-            else:
                 lines.append(f'<style fg="gray">  {display}</style>')
 
-            if description:
-                color = "#5F9EA0" if (multi and checked) else "gray"
-                for wl in self._wrap_description(_html_escape(description), "   "):
-                    lines.append(f'<style fg="{color}">   {wl}</style>')
+    def handle_key(self, event) -> bool:
+        """Handle a key event forwarded from the prompt_toolkit application."""
+        key_name = self._extract_key_name(event)
 
-    def _get_display_text(self) -> HTML:
-        """Get the formatted text to display.
+        # Editing custom input mode — delegate to specialized handler
+        if self._editing_custom_input:
+            return self._handle_editing_key(event, key_name)
 
-        Returns:
-            HTML formatted text with current selection state
-        """
-        lines = []
-        is_single = len(self.questions) == 1
-
-        # --- Summary view ---
-        if self._showing_summary:
-            if is_single:
-                lines.append("<b>Selection Summary</b>")
-                lines.append("")
-
-                question = _html_escape(self.questions[0].get("question", ""))
-                selected_value = self.selections[0]
-                options = self.questions[0].get("options", [])
-
-                if self._is_multi_select(0) and isinstance(selected_value, list):
-                    # Multi-select summary: show all checked items
-                    selected_texts = []
-                    for val in selected_value:
-                        opt = next((o for o in options if o.get("value") == val), None)
-                        selected_texts.append(_html_escape(opt.get("text", val) if opt else str(val)))
-                    lines.append(f"<b>Question:</b> {question}")
-                    lines.append(f'<style fg="gray">  Selected: {", ".join(selected_texts)}</style>')
-                else:
-                    # Single-select summary
-                    selected_opt = next((opt for opt in options if opt.get("value") == selected_value), None)
-                    selected_text = selected_opt.get("text", selected_value) if selected_opt else selected_value
-                    lines.append(f"<b>Question:</b> {question}")
-                    lines.append(f'<style fg="gray">  Selected: {_html_escape(str(selected_text))}</style>')
-                lines.append("")
-            else:
-                lines.append("<b>Selections Summary</b>")
-                lines.append("")
-
-                for q_idx, q in enumerate(self.questions):
-                    question = _html_escape(q.get("question", ""))
-                    selected_value = self.selections[q_idx] if q_idx < len(self.selections) else None
-                    options = q.get("options", [])
-
-                    if self._is_multi_select(q_idx) and isinstance(selected_value, list):
-                        selected_texts = []
-                        for val in selected_value:
-                            opt = next((o for o in options if o.get("value") == val), None)
-                            selected_texts.append(_html_escape(opt.get("text", val) if opt else str(val)))
-                        lines.append(f"<b>Question {q_idx + 1}:</b> {question}")
-                        lines.append(f'<style fg="gray">  Selected: {", ".join(selected_texts)}</style>')
-                    else:
-                        selected_opt = next((opt for opt in options if opt.get("value") == selected_value), None)
-                        selected_text = selected_opt.get("text", selected_value) if selected_opt else selected_value
-                        lines.append(f"<b>Question {q_idx + 1}:</b> {question}")
-                        lines.append(f'<style fg="gray">  Selected: {_html_escape(str(selected_text))}</style>')
-                    lines.append("")
-        # --- Option list view ---
-        else:
-            if is_single:
-                q_idx = 0
-                question = self.questions[0]
-                lines.append(f"<b>{_html_escape(question.get('question', ''))}</b>")
-                lines.append("")
-            else:
-                q_idx = self.current_question_idx
-                question = self.questions[q_idx]
-                q_num = q_idx + 1
-                q_total = len(self.questions)
-                lines.append(f"<b>Question {q_num}/{q_total}: {_html_escape(question.get('question', ''))}</b>")
-                lines.append("")
-
-            options = question.get("options", [])
-            for o_idx, opt in enumerate(options):
-                self._render_option(opt, o_idx, q_idx, o_idx == self.selected_indices[q_idx], lines)
-
-            # Add help text
-            lines.append("")
-            if self._editing_custom_input:
-                lines.append('<style fg="gray">Type your answer. Enter to confirm, Esc to go back</style>')
-            elif self._is_multi_select(q_idx):
-                lines.append('<style fg="gray">Use ↑↓ to navigate, Space to toggle, Enter to confirm, Esc to cancel</style>')
-            elif is_single:
-                lines.append('<style fg="gray">Use ↑↓ to navigate, Enter to confirm, Esc to cancel</style>')
-            else:
-                lines.append('<style fg="gray">Use ↑↓ to navigate options, ←→ for questions, Enter to confirm, Esc to cancel</style>')
-
-        return HTML("\n".join(lines))
-
-    def _advance_question(self, event) -> None:
-        """Advance to next question or finish.
-
-        Args:
-            event: PromptToolkit event object
-        """
-        if len(self.questions) == 1:
-            # Single question - show summary then auto-exit
-            self._showing_summary = True
-            event.app.invalidate()
-            self._auto_advance_timer = Timer(1.0, lambda: event.app.exit(result=self.selections[0]))
-            self._auto_advance_timer.start()
-        else:
-            # Multi-question - advance or finish
-            if self.current_question_idx < len(self.questions) - 1:
-                self.current_question_idx += 1
-                self._editing_custom_input = False
-                event.app.invalidate()
-            else:
-                self._showing_summary = True
-                event.app.invalidate()
-                self._auto_advance_timer = Timer(1.0, lambda: event.app.exit(result=self.selections))
-                self._auto_advance_timer.start()
-
-    def run(self) -> Optional[Union[str, List[str]]]:
-        """Display the selection panel and wait for user input.
-
-        Returns:
-            Single question mode: Selected value (str), or None if canceled
-            Multi-question mode: List of selected values (List[str]), or None if canceled
-        """
-        # Create key bindings for navigation
-        bindings = KeyBindings()
-
-        @bindings.add(Keys.Up)
-        def move_up(event):
-            """Move selection up."""
-            if self._showing_summary or self._editing_custom_input:
-                return
+        # Navigation mode
+        if key_name == "up":
             if self.selected_indices[self.current_question_idx] > 0:
                 self.selected_indices[self.current_question_idx] -= 1
-            event.app.invalidate()
-
-        @bindings.add(Keys.Down)
-        def move_down(event):
-            """Move selection down."""
-            if self._showing_summary or self._editing_custom_input:
-                return
-            current_options = self.questions[self.current_question_idx].get("options", [])
-            if self.selected_indices[self.current_question_idx] < len(current_options) - 1:
+            return True
+        elif key_name == "down":
+            opts = self.questions[self.current_question_idx].get("options", [])
+            if self.selected_indices[self.current_question_idx] < len(opts) - 1:
                 self.selected_indices[self.current_question_idx] += 1
-            event.app.invalidate()
-
-        @bindings.add(Keys.Left)
-        def prev_question(event):
-            """Go to previous question (multi-question mode only)."""
-            if self._showing_summary or self._editing_custom_input:
-                return
-            if len(self.questions) > 1 and self.current_question_idx > 0:
+            return True
+        elif key_name == "left" and len(self.questions) > 1:
+            if self.current_question_idx > 0:
                 self.current_question_idx -= 1
-                event.app.invalidate()
-
-        @bindings.add(Keys.Right)
-        def next_question(event):
-            """Go to next question (multi-question mode only)."""
-            if self._showing_summary or self._editing_custom_input:
-                return
-            if len(self.questions) > 1 and self.current_question_idx < len(self.questions) - 1:
+            return True
+        elif key_name == "right" and len(self.questions) > 1:
+            if self.current_question_idx < len(self.questions) - 1:
                 self.current_question_idx += 1
-                event.app.invalidate()
+            return True
+        elif key_name == "enter":
+            self._handle_enter()
+            return True
+        elif key_name == " ":
+            self._handle_space()
+            return True
+        elif key_name == "escape":
+            self.cancel()
+            return True
+        elif key_name in ("backspace", "delete"):
+            return True  # no-op in navigation mode
 
-        @bindings.add(Keys.Enter)
-        def select(event):
-            """Confirm selection or toggle custom input editing."""
-            if self._showing_summary:
-                return
+        return False
 
-            if self._editing_custom_input:
-                # Confirm custom input text
-                typed = self._custom_input_texts.get(self.current_question_idx, "").strip()
-                if not typed:
-                    # Empty input - go back to editing, don't advance
-                    return
-                self.selections[self.current_question_idx] = typed
-                self._editing_custom_input = False
-                self._advance_question(event)
-            else:
-                # Check if custom input option is selected
-                if self._is_custom_input_selected():
-                    # Enter edit mode
-                    self._editing_custom_input = True
-                    event.app.cursor_position = (0, 0)  # Reset cursor
-                    event.app.invalidate()
-                elif self._is_multi_select():
-                    # Multi-select mode: only advance if at least one option is checked
-                    q_idx = self.current_question_idx
-                    checked = self._checked_indices.get(q_idx, set())
-                    if not checked:
-                        # Nothing checked yet — ignore Enter, user must toggle with Space
-                        return
-                    options = self.questions[q_idx].get("options", [])
-                    checked_values = [
-                        options[i].get("value")
-                        for i in checked
-                        if i < len(options)
-                    ]
-                    self.selections[q_idx] = checked_values
-                    self._advance_question(event)
-                else:
-                    # Single-select: store and advance
-                    current_options = self.questions[self.current_question_idx].get("options", [])
-                    if current_options and self.selected_indices[self.current_question_idx] < len(current_options):
-                        self.selections[self.current_question_idx] = current_options[self.selected_indices[self.current_question_idx]].get("value")
-                    self._advance_question(event)
+    # ------------------------------------------------------------------
+    # Key extraction helpers (duck-type prompt_toolkit events)
+    # ------------------------------------------------------------------
 
-        @bindings.add(' ')
-        def toggle_check(event):
-            """Toggle checkbox for multi-select questions."""
-            if self._showing_summary:
-                return
-            if self._editing_custom_input:
-                q_idx = self.current_question_idx
-                self._custom_input_texts[q_idx] += ' '
-                event.app.invalidate()
-                return
-            if not self._is_multi_select():
-                return
+    @staticmethod
+    def _extract_key_name(event: object) -> Optional[str]:
+        """Extract a normalized key name from a prompt_toolkit KeyPressEvent.
+
+        Inspects the last key press in the sequence (``key_sequence[-1]``).
+        Prefers ``Keys`` enum ``.name``, falling back to ``.data`` for
+        printable characters when no enum name is available.
+        """
+        try:
+            seq = getattr(event, "key_sequence", None)
+            if seq:
+                press = seq[-1]
+                key = getattr(press, "key", None)
+                name = getattr(key, "name", None) if key is not None else None
+                if not name:
+                    name = getattr(press, "data", None)
+                return SelectionPanel._normalize_key_name(name) if name else None
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _extract_key_data(event: object) -> Optional[str]:
+        """Extract printable character data from a prompt_toolkit KeyPressEvent.
+
+        ``.data`` lives on the ``KeyPress`` object (not on ``.key``).
+        """
+        try:
+            seq = getattr(event, "key_sequence", None)
+            if seq:
+                press = seq[-1]
+                data = getattr(press, "data", None)
+                return data if data else None
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _normalize_key_name(name: str) -> str:
+        """Normalize key names with platform-dependent variants."""
+        name = name.lower()
+        if name in ("c-m", "controlm", "\r", "\n"):
+            return "enter"
+        if name in ("c-h", "controlh"):
+            return "backspace"
+        if name in ("c-i", "controli", "\t"):
+            return "tab"
+        if name in ("space",):
+            return " "
+        if name in ("delete", "c-d"):
+            return "delete"
+        return name
+
+    # ------------------------------------------------------------------
+    # Key-handling helpers
+    # ------------------------------------------------------------------
+
+    def _handle_editing_key(self, event, key_name: str) -> bool:
+        """Handle keys while editing custom input text."""
+        if key_name == "escape":
+            self._editing_custom_input = False
+            return True
+        elif key_name == "enter":
+            typed = self._custom_input_texts.get(self.current_question_idx, "").strip()
+            if not typed:
+                return True  # stay in editing mode
+            self.selections[self.current_question_idx] = typed
+            self._editing_custom_input = False
+            self._advance_or_finish()
+            return True
+        elif key_name == "backspace":
             q_idx = self.current_question_idx
-            opt_idx = self.selected_indices[q_idx]
-            options = self.questions[q_idx].get("options", [])
-            # Don't allow toggling the custom input sentinel via Space
-            if opt_idx < len(options) and options[opt_idx].get("value") != CUSTOM_INPUT_SENTINEL:
-                checked = self._checked_indices.get(q_idx, set())
-                if opt_idx in checked:
-                    checked.discard(opt_idx)
-                else:
-                    checked.add(opt_idx)
-                event.app.invalidate()
-
-        @bindings.add(Keys.Escape)
-        def cancel(event):
-            """Cancel editing or cancel selection."""
-            if self._editing_custom_input:
-                # Exit editing mode, return to navigation
-                self._editing_custom_input = False
-                event.app.invalidate()
-            else:
-                # Cancel entire selection
-                if self._auto_advance_timer:
-                    self._auto_advance_timer.cancel()
-                    self._auto_advance_timer = None
-                event.app.exit(result=None)
-
-        # Printable character input for custom input editing
-        @bindings.add(Keys.Any)
-        def handle_input(event):
-            """Handle printable character input when editing custom input."""
-            if not self._editing_custom_input or self._showing_summary:
-                return
-
-            data = event.data
-            # Filter to printable characters (no control chars)
-            if len(data) == 1 and ord(data) >= 32:
+            current = self._custom_input_texts.get(q_idx, "")
+            if current:
+                self._custom_input_texts[q_idx] = current[:-1]
+            return True
+        elif key_name == "delete":
+            q_idx = self.current_question_idx
+            current = self._custom_input_texts.get(q_idx, "")
+            if current:
+                self._custom_input_texts[q_idx] = current[:-1]
+            return True
+        elif key_name == " ":
+            q_idx = self.current_question_idx
+            self._custom_input_texts[q_idx] = (
+                self._custom_input_texts.get(q_idx, "") + " "
+            )
+            return True
+        else:
+            # Printable character
+            data = self._extract_key_data(event)
+            if data and len(data) == 1 and ord(data) >= 32:
                 q_idx = self.current_question_idx
                 current = self._custom_input_texts.get(q_idx, "")
                 self._custom_input_texts[q_idx] = current + data
-                event.app.invalidate()
+                return True
+        return False
 
-        @bindings.add(Keys.Backspace)
-        def handle_backspace(event):
-            """Handle backspace when editing custom input."""
-            if not self._editing_custom_input or self._showing_summary:
-                return
+    def _handle_enter(self) -> None:
+        """Handle Enter in navigation mode: enter edit mode, confirm multi-select,
+        or store single-select value and advance."""
+        if self._is_custom_input_selected():
+            self._editing_custom_input = True
+        elif self._is_multi_select():
             q_idx = self.current_question_idx
-            current = self._custom_input_texts.get(q_idx, "")
-            if current:
-                self._custom_input_texts[q_idx] = current[:-1]
-                event.app.invalidate()
-
-        @bindings.add(Keys.Delete)
-        def handle_delete(event):
-            """Handle delete when editing custom input."""
-            if not self._editing_custom_input or self._showing_summary:
-                return
-            # Delete at cursor position - for simplicity, same as backspace
-            # since we don't track cursor position within the text
-            q_idx = self.current_question_idx
-            current = self._custom_input_texts.get(q_idx, "")
-            if current:
-                self._custom_input_texts[q_idx] = current[:-1]
-                event.app.invalidate()
-
-        # Create the content control
-        def get_content():
-            return self._get_display_text()
-
-        content_control = FormattedTextControl(get_content)
-
-        # Create layout with the content
-        root_container = HSplit([
-            Window(content=content_control, height=D(min=1), width=D(min=1), wrap_lines=True),
-        ])
-
-        layout = Layout(root_container)
-
-        # Create and run the application
-        application = Application(
-            layout=layout,
-            key_bindings=bindings,
-            full_screen=False,
-            mouse_support=False,
-            cursor=None,
-            style=TOOLBAR_STYLE,
-        )
-
-        if self._chat_manager is not None:
-            # Use interruptible runner that polls for pending swarm approvals
-            # via Application.run(inputhook=...).  No asyncio.run() — the
-            # inputhook callback runs inside prompt_toolkit's own event loop,
-            # avoiding the event-loop corruption that causes 100% CPU hangs.
-            from ui.prompt_interrupts import _run_application_interruptible
-
-            result = _run_application_interruptible(application, self._chat_manager)
+            checked = self._checked_indices.get(q_idx, set())
+            if not checked:
+                return  # nothing checked — ignore Enter
+            options = self.questions[q_idx].get("options", [])
+            checked_values = [
+                options[i].get("value") for i in checked if i < len(options)
+            ]
+            self.selections[q_idx] = checked_values
+            self._advance_or_finish()
         else:
-            result = application.run()
+            options = self.questions[self.current_question_idx].get("options", [])
+            if (
+                options
+                and self.selected_indices[self.current_question_idx] < len(options)
+            ):
+                self.selections[self.current_question_idx] = options[
+                    self.selected_indices[self.current_question_idx]
+                ].get("value")
+            self._advance_or_finish()
 
-        return result
+    def _handle_space(self) -> None:
+        """Toggle checkbox for multi-select questions."""
+        if not self._is_multi_select():
+            return
+        q_idx = self.current_question_idx
+        opt_idx = self.selected_indices[q_idx]
+        options = self.questions[q_idx].get("options", [])
+        if (
+            opt_idx < len(options)
+            and options[opt_idx].get("value") != CUSTOM_INPUT_SENTINEL
+        ):
+            checked = self._checked_indices.get(q_idx, set())
+            if opt_idx in checked:
+                checked.discard(opt_idx)
+            else:
+                checked.add(opt_idx)
+
+    def _advance_or_finish(self) -> None:
+        """Move to the next question or signal completion via ``finish()``."""
+        if self.current_question_idx < len(self.questions) - 1:
+            self.current_question_idx += 1
+            self._editing_custom_input = False
+        else:
+            # All questions answered — finish
+            if len(self.questions) == 1:
+                self.finish(self.selections[0])
+            else:
+                self.finish(self.selections)
+
+    # ------------------------------------------------------------------
+    # Runner (agent-turn context — toolbar-hosted Application)
+    # ------------------------------------------------------------------
+
+    def run(self) -> Optional[str | List[str] | int]:
+        """Run the toolbar-hosted selection panel and wait for user input.
+
+        Returns:
+            Single question: Selected value (str), or None if canceled,
+            or 130 if interrupted by pending swarm approval.
+            Multi-question: List of selected values, or None/130.
+        """
+        # Pre-check: if swarm work is already pending, skip the
+        # interaction entirely to avoid unnecessary UI startup.
+        if self._chat_manager is not None and self._chat_manager.has_pending_swarm_work():
+            return 130
+
+        result = run_toolbar_interaction(self, chat_manager=self._chat_manager)
+
+        # run_toolbar_interaction returns None for both user cancel and
+        # swarm interrupt (it calls interaction.cancel() on 130).  Use
+        # has_pending_swarm_work() to distinguish them.
+        #
+        # Narrow race: user cancels, then swarm work arrives between
+        # cancel() and this check → we return 130 instead of None.  In
+        # practice harmless — the caller retries, user sees the swarm
+        # prompt and re-cancels if desired.
+        if result is None:
+            if self._chat_manager is not None and self._chat_manager.has_pending_swarm_work():
+                return 130
+            return None
+
+        if self.was_cancelled():
+            return None
+
+        return self.result()
 
 
 @tool(
     name="select_option",
-    description="Ask the user a question with selectable options using arrow keys. An inline panel shows options navigable with arrow keys. A 'Type your own input...' option is auto-appended for free-form answers. Supports single and multi-question forms (single = array with 1 item). Set 'multi_select': true on a question to allow the user to check multiple options with Space and confirm with Enter.",
+    description="Ask the user a question with selectable options using arrow keys. A compact toolbar panel shows options navigable with arrow keys. A 'Type your own input...' option is auto-appended for free-form answers. Supports single and multi-question forms (single = array with 1 item). Set 'multi_select': true on a question to allow the user to check multiple options with Space and confirm with Enter.",
     parameters={
         "type": "object",
         "properties": {
@@ -528,10 +456,11 @@ def select_option(
     questions: List[Dict[str, Any]],
     context: Dict[str, Any] = None
 ) -> str:
-    """Present an inline selection panel to the user.
+    """Present a toolbar-hosted selection panel to the user.
 
-    Creates a prompt_toolkit-based selection panel where the user can navigate
-    options with arrow keys and select by pressing Enter. Pressing Esc cancels.
+    Creates a prompt_toolkit-based selection panel rendered in the bottom
+    toolbar where the user can navigate options with arrow keys and select
+    by pressing Enter. Pressing Esc cancels.
 
     Args:
         questions: List of question objects, each containing:

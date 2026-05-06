@@ -34,6 +34,14 @@ from core.chat_manager import ChatManager
 from ui.commands import process_command
 from ui.banner import display_startup_banner
 from ui.prompt_utils import get_bottom_toolbar_text, setup_common_bindings, TOOLBAR_STYLE
+from ui.toolbar_interactions import (
+    set_active_interaction,
+    clear_active_interaction,
+    patch_for_active_prompt,
+    SETTING_RESOLVED_SENTINEL,
+    BOUNDARY_RESOLVED_SENTINEL,
+    COMMAND_CONFIRM_SENTINEL,
+)
 from core.agentic import agentic_answer
 from utils.settings import MonokaiDarkBGStyle, left_align_headings, swarm_settings
 from utils.paths import RG_EXE_PATH
@@ -430,6 +438,104 @@ def main():
                         _drain_stdin(session)
                     continue
 
+                # Tool approval resolved via toolbar — resume the suspended
+                # agentic orchestrator.  The active interaction's result was
+                # captured when the user selected accept/advise/cancel, and
+                # the interaction's done event was set by ToolApprovalPending.
+                # The orchestrator (stashed after agentic_answer returned
+                # "suspended") picks it up and continues.
+                if raw_input == 131 and getattr(chat_manager, '_agentic_orchestrator', None) is not None:
+                    INPUT_BLOCKED['blocked'] = True
+                    try:
+                        chat_manager._agentic_orchestrator.resume_after_approval(thinking_indicator)
+                    finally:
+                        INPUT_BLOCKED['blocked'] = False
+                        _drain_stdin(session)
+                    continue
+
+                # Select_option resolved via toolbar — resume the suspended
+                # agentic orchestrator.  The user made a selection (or
+                # cancelled) in the active toolbar interaction, which set the
+                # done event and exited the prompt with sentinel 132.
+                if raw_input == 132 and getattr(chat_manager, '_agentic_orchestrator', None) is not None:
+                    INPUT_BLOCKED['blocked'] = True
+                    try:
+                        chat_manager._agentic_orchestrator.resume_after_selection(thinking_indicator)
+                    finally:
+                        INPUT_BLOCKED['blocked'] = False
+                        _drain_stdin(session)
+                    continue
+
+                # Setting selector resolved via toolbar — the user finished
+                # interacting with a command-driven SettingSelector (e.g.
+                # /config, /provider, /tools, /obsidian).  The selector's
+                # finish() exited the prompt with sentinel 133.  Call the
+                # stored continuation to apply the changes.
+                if raw_input == 133 and getattr(chat_manager, '_setting_selector', None) is not None:
+                    selector = chat_manager._setting_selector
+                    continuation = getattr(chat_manager, '_setting_continuation', None)
+                    try:
+                        if continuation is not None:
+                            continuation(selector)
+                    finally:
+                        new_selector = getattr(chat_manager, '_setting_selector', None)
+                        if new_selector is not selector:
+                            # Continuation replaced the selector — patch and activate the new one
+                            patch_for_active_prompt(new_selector, SETTING_RESOLVED_SENTINEL)
+                            set_active_interaction(chat_manager, new_selector)
+                        else:
+                            # Selector unchanged/completed — clear as before
+                            chat_manager._setting_selector = None
+                            chat_manager._setting_continuation = None
+                            clear_active_interaction(chat_manager)
+                    continue
+
+                # Boundary approval resolved via toolbar — resume the suspended
+                # agentic orchestrator.  The user granted or denied full
+                # filesystem access for a path outside project boundaries, and
+                # the interaction's done event was set by ToolApprovalPending
+                # (with exit_sentinel=134).
+                if raw_input == BOUNDARY_RESOLVED_SENTINEL and getattr(chat_manager, '_agentic_orchestrator', None) is not None:
+                    INPUT_BLOCKED['blocked'] = True
+                    try:
+                        chat_manager._agentic_orchestrator.resume_after_boundary(thinking_indicator)
+                    finally:
+                        INPUT_BLOCKED['blocked'] = False
+                        _drain_stdin(session)
+                    continue
+
+                # Command confirmation (yes/no toolbar interaction) resolved
+                # via sentinel 135.  The user selected Yes, No, or pressed Esc
+                # in a CommandConfirmInteraction.  Read the result and call
+                # the stored continuation with the bool result (or None for
+                # cancel).
+                if raw_input == COMMAND_CONFIRM_SENTINEL and getattr(chat_manager, '_confirm_interaction', None) is not None:
+                    interaction = chat_manager._confirm_interaction
+                    continuation = getattr(chat_manager, '_confirm_continuation', None)
+                    cancelled = interaction.was_cancelled()
+                    result = None if cancelled else interaction.result()
+                    try:
+                        if continuation is not None:
+                            continuation(result)
+                    finally:
+                        chat_manager._confirm_interaction = None
+                        chat_manager._confirm_continuation = None
+                        clear_active_interaction(chat_manager)
+                    continue
+
+                # Pending interaction resolution — intercept submitted text
+                # instead of treating it as a normal prompt command.
+                pending = chat_manager.get_pending_interaction()
+                if pending is not None:
+                    raw_text = raw_input
+                    chat_manager.resolve_pending_interaction(raw_text)
+                    # Call text continuation if this was a command-level text input
+                    continuation = getattr(chat_manager, '_pending_text_continuation', None)
+                    if continuation is not None:
+                        chat_manager._pending_text_continuation = None
+                        continuation(raw_text)
+                    continue
+
                 user_input = consume_image_attach_lines(raw_input.strip())
                 prompt_attachments = list(pending_attachments)
                 pending_attachments.clear()
@@ -467,6 +573,44 @@ def main():
                         port=swarm_settings.port,
                     ) or 0
                 elif cmd_result == "handled":
+                    if prompt_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    continue
+                elif cmd_result == "setting_selector":
+                    # Command handler (e.g. /config) stored a SettingSelector
+                    # and continuation on chat_manager.  Patch the selector
+                    # so finish/cancel exit the prompt app with sentinel 133,
+                    # set it as the active toolbar interaction, then loop
+                    # back to session.prompt() where it will be rendered.
+                    if prompt_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    selector = getattr(chat_manager, '_setting_selector', None)
+                    if selector is not None:
+                        patch_for_active_prompt(selector, SETTING_RESOLVED_SENTINEL)
+                        set_active_interaction(chat_manager, selector)
+                    continue
+
+                elif cmd_result == "confirm_input":
+                    # Command handler (e.g. a migrated Confirm.ask) stored a
+                    # CommandConfirmInteraction and continuation.  Patch the
+                    # interaction so finish/cancel exit with sentinel 135,
+                    # set it as the active toolbar interaction, then loop
+                    # back to session.prompt() where it will be rendered.
+                    if prompt_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    interaction = getattr(chat_manager, '_confirm_interaction', None)
+                    if interaction is not None:
+                        patch_for_active_prompt(interaction, COMMAND_CONFIRM_SENTINEL)
+                        set_active_interaction(chat_manager, interaction)
+                    continue
+
+                elif cmd_result == "text_input":
+                    # Command handler (e.g. a migrated Prompt.ask) stored a
+                    # PendingInteraction and continuation.  The pending
+                    # interaction is already set on chat_manager by the
+                    # handoff function.  Just loop back to session.prompt()
+                    # where render_pending_interaction() shows the prompt
+                    # in the toolbar, and typing text resolves it.
                     if prompt_attachments:
                         console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
                     continue

@@ -37,6 +37,72 @@ from exceptions import (
     LLMResponseError,
 )
 
+
+class ToolApprovalSuspended(Exception):
+    """Raised when a tool needs user approval and yields to the main prompt.
+
+    Carries all state needed to resume the agentic loop after the user
+    resolves the approval via the toolbar interaction.
+    """
+
+    def __init__(self, interaction, tool_id, function_name, tool, arguments,
+                 context, remaining_tool_calls=None):
+        super().__init__("Tool approval suspended — yield to main prompt")
+        # ToolApprovalPending interaction (result readable after resolve)
+        self.interaction = interaction
+        # Tool call identity
+        self.tool_id = tool_id
+        self.function_name = function_name
+        # Execution state for resume
+        self.tool = tool
+        self.arguments = arguments
+        self.context = context
+        # Remaining tool calls in the batch (for sequential execution)
+        self.remaining_tool_calls = remaining_tool_calls or []
+
+
+class SelectionSuspended(Exception):
+    """Raised when select_option suspends to the main prompt for user input.
+
+    Carries all state needed to resume the agentic loop after the user
+    makes a selection via the toolbar interaction.
+    """
+
+    def __init__(self, interaction, tool_id, function_name, tool, arguments,
+                 context, questions, remaining_tool_calls=None):
+        super().__init__("Select_option suspended — yield to main prompt")
+        self.interaction = interaction
+        self.tool_id = tool_id
+        self.function_name = function_name
+        self.tool = tool
+        self.arguments = arguments
+        self.context = context
+        # The validated questions list (with custom input option appended)
+        self.questions = questions
+        self.remaining_tool_calls = remaining_tool_calls or []
+
+
+class BoundaryApprovalSuspended(Exception):
+    """Raised when a tool hits a path-boundary error and yields to the main prompt.
+
+    Carries all state needed to resume the agentic loop after the user
+    grants or denies full filesystem access. On resume, if access is
+    granted, the original tool is re-executed with the boundary lifted.
+    """
+
+    def __init__(self, interaction, tool_id, function_name, tool, arguments,
+                 context, path_arg, access_reason, remaining_tool_calls=None):
+        super().__init__("Boundary approval suspended — yield to main prompt")
+        self.interaction = interaction
+        self.tool_id = tool_id
+        self.function_name = function_name
+        self.tool = tool
+        self.arguments = arguments
+        self.context = context
+        self.path_arg = path_arg
+        self.access_reason = access_reason
+        self.remaining_tool_calls = remaining_tool_calls or []
+
 from core.tool_feedback import (
     vault_root_str,
     _print_or_append,
@@ -130,7 +196,7 @@ class AgenticOrchestrator:
             cron_interactive: If True, cron job is running in interactive test mode
             edit_approval_handler: Optional override for edit approval (default: handle_edit_approval)
             create_file_handler: Optional override for create_file execution.
-            command_approval_handler: Optional override for command approval (default: handle_command_approval)
+            command_approval_handler: Optional override for command approval; only set by swarm workers (default: None → uses inline suspend path)
             command_approval_awaiter: Optional ApprovalAwaiter for worker command approvals
             command_send_approval_fn: Optional callable to send approval_request to server
             approval_timeout: Timeout for command approval in seconds
@@ -158,6 +224,8 @@ class AgenticOrchestrator:
         self.gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
         # For parallel execution: temporary console override
         self._parallel_context = {}
+        # Suspension state for tool approval/selection handoff to main prompt
+        self._suspended_exc: Optional[ToolApprovalSuspended | SelectionSuspended | BoundaryApprovalSuspended] = None
         # Initialize vault session with known repo_root (for project folder derivation)
         try:
             from tools.obsidian import init_session
@@ -221,6 +289,10 @@ class AgenticOrchestrator:
             thinking_indicator: Optional ThinkingIndicator instance
             allowed_tools: Optional list of allowed tool names (for research)
             allow_active_plugins: Whether to include active plugin tools in restricted runs
+
+        Returns:
+            "done" on normal completion, "suspended" if a tool approval was
+            handed off to the main prompt and the caller must resume.
         """
         self._current_allowed_tools = allowed_tools
         self._current_allow_active_plugins = allow_active_plugins
@@ -294,6 +366,11 @@ class AgenticOrchestrator:
                     )
                     if should_exit:
                         return
+        except (ToolApprovalSuspended, SelectionSuspended, BoundaryApprovalSuspended) as e:
+            # Save state for later resume; return to caller so the main
+            # prompt loop can present the interaction.
+            self._suspended_exc = e
+            return "suspended"
         except KeyboardInterrupt:
             msgs = self.chat_manager.messages
             if msgs and msgs[-1] is user_message:
@@ -601,13 +678,15 @@ class AgenticOrchestrator:
         # Lock compaction during tool execution to prevent orphaning tool_call_ids
         self.chat_manager.set_compaction_lock(True)
 
-        if use_parallel:
-            result = self._execute_tools_parallel(tool_calls, thinking_indicator)
-        else:
-            result = self._execute_tools_sequential(tool_calls, thinking_indicator)
-
-        # Unlock compaction after all tool results are appended
-        self.chat_manager.set_compaction_lock(False)
+        try:
+            if use_parallel:
+                result = self._execute_tools_parallel(tool_calls, thinking_indicator)
+            else:
+                result = self._execute_tools_sequential(tool_calls, thinking_indicator)
+        finally:
+            # Always unlock — even on suspension the resume path will
+            # handle compaction at its own pace.
+            self.chat_manager.set_compaction_lock(False)
 
         return result
 
@@ -620,14 +699,26 @@ class AgenticOrchestrator:
 
         Returns:
             True if should exit the orchestration loop
+
+        Raises:
+            ToolApprovalSuspended: If a tool approval was handed off to the
+                main prompt.  The exception carries ``remaining_tool_calls``
+                so the resume path can finish the batch.
         """
         end_loop = False
 
-        for tool_call in tool_calls:
+        for i, tool_call in enumerate(tool_calls):
             tool_id = tool_call["id"]
-            should_exit, tool_result = self._process_single_tool_call(
-                tool_call, thinking_indicator
-            )
+            try:
+                should_exit, tool_result = self._process_single_tool_call(
+                    tool_call, thinking_indicator
+                )
+            except (ToolApprovalSuspended, SelectionSuspended, BoundaryApprovalSuspended) as e:
+                # Attach remaining tool calls (those after this one) so the
+                # resume path can process them after the interaction is resolved.
+                e.remaining_tool_calls = tool_calls[i + 1:]
+                # Re-raise so _handle_tool_calls → run() can catch it.
+                raise
 
             if should_exit:
                 # Cancel was selected - append this result and break immediately
@@ -931,19 +1022,29 @@ class AgenticOrchestrator:
             # Restore console output
             self._parallel_context['console'] = self.console
 
-    def _boundary_prompt(self, path_str, access_reason, thinking_indicator=None):
+    def _boundary_prompt(self, path_str, access_reason, thinking_indicator=None,
+                         tool_id=None, function_name=None, tool=None,
+                         arguments=None, context=None):
         """Prompt the user to grant filesystem access for a path outside boundaries.
 
-        Called after a tool returns a boundary error. If the user grants access,
-        the caller retries the tool with the boundary lifted.
+        Called after a tool returns a boundary error. In normal main-agent
+        runtime, suspends to the main prompt toolbar (via
+        ``BoundaryApprovalSuspended``). In sub-agent / cron / no-chat-manager
+        contexts, falls back to the blocking ``ToolConfirmationPanel.run()``.
 
         Args:
             path_str: The path that triggered the boundary violation.
             access_reason: Agent-provided reason for requesting broader access.
-            thinking_indicator: Optional ThinkingIndicator instance to pause during approval.
+            thinking_indicator: Optional ThinkingIndicator instance to pause.
+            tool_id: Tool call ID (required for suspension path).
+            function_name: Tool function name (required for suspension path).
+            tool: The tool instance (required for suspension path).
+            arguments: Tool arguments dict (required for suspension path).
+            context: Tool execution context dict (required for suspension path).
 
         Returns:
-            True if user granted access, False if denied.
+            True if user granted access, False if denied (fallback path only).
+            The suspension path raises ``BoundaryApprovalSuspended`` instead.
         """
         console = self._get_console()
         if console is None:
@@ -953,6 +1054,42 @@ class AgenticOrchestrator:
         if not access_reason:
             return False
 
+        # ---- Suspension path: yield to main prompt toolbar -----------------
+        if self._can_suspend_approval():
+            if thinking_indicator:
+                thinking_indicator.stop()
+            try:
+                from ui.toolbar_interactions import (
+                    ToolApprovalPending,
+                    set_active_interaction,
+                    BOUNDARY_RESOLVED_SENTINEL,
+                )
+                prompt_display = path_str
+                if len(prompt_display) > 60:
+                    prompt_display = prompt_display[:57] + "..."
+                interaction = ToolApprovalPending(
+                    tool_command=f"Grant access to: {prompt_display}",
+                    reason=access_reason,
+                    is_edit_tool=False,
+                    exit_sentinel=BOUNDARY_RESOLVED_SENTINEL,
+                )
+                set_active_interaction(self.chat_manager, interaction)
+                raise BoundaryApprovalSuspended(
+                    interaction=interaction,
+                    tool_id=tool_id,
+                    function_name=function_name,
+                    tool=tool,
+                    arguments=arguments,
+                    context=context,
+                    path_arg=path_str,
+                    access_reason=access_reason,
+                )
+            finally:
+                if thinking_indicator:
+                    thinking_indicator.start()
+            # Unreachable — exception always raised in this branch
+
+        # ---- Fallback path: blocking panel for sub-agents / cron ----------
         prompt_reason = (
             f"Agent requested access outside project boundary: {path_str}\n\n"
             f"Requested purpose: {access_reason}"
@@ -982,6 +1119,19 @@ class AgenticOrchestrator:
             console.print("[yellow]Full filesystem access granted[/yellow]\n")
             return True
         return False
+
+    def _can_suspend_approval(self) -> bool:
+        """Return True if tool approvals should suspend to the main prompt.
+
+        Suspension is only valid when the main prompt loop is available
+        to render and resolve the toolbar interaction.  Sub-agents, cron
+        jobs, and custom-handler contexts use the blocking fallback.
+        """
+        return (
+            not self.is_sub_agent
+            and not self.cron_job_id
+            and self.chat_manager is not None
+        )
 
     def _process_single_tool_call(self, tool_call, thinking_indicator):
         """Process a single tool call.
@@ -1054,6 +1204,38 @@ class AgenticOrchestrator:
                             if is_valid:
                                 if self.edit_approval_handler:
                                     approved_result, should_exit = self.edit_approval_handler(arguments, self.repo_root, console, self.gitignore_spec, vault_root_str)
+                                    if should_exit:
+                                        return True, approved_result
+                                    result = approved_result
+                                elif self._can_suspend_approval():
+                                    # Display preview then yield to main prompt
+                                    console.print(preview)
+                                    console.print()
+                                    if thinking_indicator:
+                                        thinking_indicator.stop()
+                                    try:
+                                        from ui.toolbar_interactions import (
+                                            ToolApprovalPending,
+                                            set_active_interaction,
+                                        )
+                                        interaction = ToolApprovalPending(
+                                            tool_command=f"edit_file: {arguments.get('path', '')}",
+                                            reason=arguments.get('reason', 'Apply file edit with above changes'),
+                                            is_edit_tool=True,
+                                            cycle_approve_mode=lambda: self.chat_manager.cycle_approve_mode(),
+                                        )
+                                        set_active_interaction(self.chat_manager, interaction)
+                                        raise ToolApprovalSuspended(
+                                            interaction=interaction,
+                                            tool_id=tool_id,
+                                            function_name=function_name,
+                                            tool=tool,
+                                            arguments=arguments,
+                                            context=context,
+                                        )
+                                    finally:
+                                        if thinking_indicator:
+                                            thinking_indicator.start()
                                 else:
                                     approved_result, should_exit = handle_edit_approval(
                                         preview, arguments.get('path', ''), arguments,
@@ -1062,9 +1244,9 @@ class AgenticOrchestrator:
                                         lambda: self.chat_manager.cycle_approve_mode(),
                                         self.repo_root, self.gitignore_spec,
                                         vault_root_str, self.chat_manager)
-                                if should_exit:
-                                    return True, approved_result
-                                result = approved_result
+                                    if should_exit:
+                                        return True, approved_result
+                                    result = approved_result
                         return False, str(result)
                     elif function_name == "execute_command":
                         console = self._get_console()
@@ -1085,6 +1267,80 @@ class AgenticOrchestrator:
                                 cron_job_id=self.cron_job_id,
                                 cron_allowlist=self.cron_allowlist,
                                 cron_interactive=self.cron_interactive)
+                            if should_exit:
+                                return True, result
+                            if command_executed:
+                                label = build_tool_label(function_name, arguments)
+                                label_text = f"[grey]{label}[/grey]"
+                                if not self.panel_updater:
+                                    console.print(label_text, highlight=False)
+                                    console.file.flush()
+                                display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
+                            return False, result
+                        elif self._can_suspend_approval():
+                            # Check auto-approval conditions inline, then
+                            # suspend to main prompt if interactive approval
+                            # is actually needed.
+                            from utils.safe_commands import is_git_command
+                            from utils.validation import (
+                                is_auto_approved_command,
+                                check_for_silent_blocked_command,
+                            )
+
+                            # Silent block check
+                            is_blocked, reprompt_msg = check_for_silent_blocked_command(command)
+                            if is_blocked:
+                                if self.debug_mode:
+                                    console.print(f"[dim]Silently blocked command: {command.split()[0]}[/dim]")
+                                return False, f"exit_code=1\n{reprompt_msg}"
+
+                            # Auto-approve checks
+                            auto_approve = is_auto_approved_command(command)
+                            danger_auto = (
+                                self.chat_manager.approve_mode == "danger"
+                                and not is_git_command(command)
+                            )
+                            if auto_approve or danger_auto:
+                                result = tool.execute(arguments, context)
+                                label = build_tool_label(function_name, arguments)
+                                label_text = f"[grey]{label}[/grey]"
+                                if not self.panel_updater:
+                                    console.print(label_text, highlight=False)
+                                    console.file.flush()
+                                display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
+                                return False, result
+
+                            # Needs interactive approval — suspend to main prompt
+                            reason = arguments.get('reason', 'Execute shell command')
+                            cmd_display = (
+                                f"execute_command: {command[:80]}"
+                                f"{'...' if len(command) > 80 else ''}"
+                            )
+                            if thinking_indicator:
+                                thinking_indicator.stop()
+                            try:
+                                from ui.toolbar_interactions import (
+                                    ToolApprovalPending,
+                                    set_active_interaction,
+                                )
+                                interaction = ToolApprovalPending(
+                                    tool_command=cmd_display,
+                                    reason=reason,
+                                    is_edit_tool=False,
+                                    cycle_approve_mode=lambda: self.chat_manager.cycle_approve_mode(),
+                                )
+                                set_active_interaction(self.chat_manager, interaction)
+                                raise ToolApprovalSuspended(
+                                    interaction=interaction,
+                                    tool_id=tool_id,
+                                    function_name=function_name,
+                                    tool=tool,
+                                    arguments=arguments,
+                                    context=context,
+                                )
+                            finally:
+                                if thinking_indicator:
+                                    thinking_indicator.start()
                         else:
                             result, should_exit, command_executed = handle_command_approval(
                                 command, arguments, tool, context, console,
@@ -1094,18 +1350,18 @@ class AgenticOrchestrator:
                                 cron_allowlist=self.cron_allowlist,
                                 cron_interactive=self.cron_interactive,
                                 chat_manager=self.chat_manager)
-                        if should_exit:
-                            return True, result
+                            if should_exit:
+                                return True, result
 
-                        # Display execute_command output when command actually ran
-                        if command_executed:
-                            label = build_tool_label(function_name, arguments)
-                            label_text = f"[grey]{label}[/grey]"
-                            if not self.panel_updater:
-                                console.print(label_text, highlight=False)
-                                console.file.flush()
-                            display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
-                        return False, result
+                            # Display execute_command output when command actually ran
+                            if command_executed:
+                                label = build_tool_label(function_name, arguments)
+                                label_text = f"[grey]{label}[/grey]"
+                                if not self.panel_updater:
+                                    console.print(label_text, highlight=False)
+                                    console.file.flush()
+                                display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
+                            return False, result
                     else:
                         # Other tools with requires_approval can be handled here in the future
                         result = tool.execute(arguments, context)
@@ -1121,6 +1377,45 @@ class AgenticOrchestrator:
                     
                     if function_name == "create_file" and self.create_file_handler:
                         result = self.create_file_handler(arguments, context)
+                    elif function_name == "select_option" and self._can_suspend_approval():
+                        # Suspend select_option to the main prompt toolbar
+                        # instead of running a nested prompt_toolkit Application.
+                        # Validate questions first (same checks as the tool itself).
+                        questions = arguments.get("questions", [])
+                        if not isinstance(questions, list) or not questions:
+                            result = "exit_code=1\nQuestions must be a non-empty list"
+                        else:
+                            # Append custom input option (same as tool does)
+                            from tools.select_option import CUSTOM_INPUT_OPTION
+                            for q in questions:
+                                q["options"] = list(q.get("options", [])) + [CUSTOM_INPUT_OPTION]
+                            if thinking_indicator:
+                                thinking_indicator.stop()
+                            try:
+                                from tools.select_option import SelectionPanel
+                                from ui.toolbar_interactions import (
+                                    set_active_interaction,
+                                    patch_for_active_prompt,
+                                    SELECTION_RESOLVED_SENTINEL,
+                                )
+                                panel = SelectionPanel(questions, chat_manager=self.chat_manager)
+                                # patch_for_active_prompt wraps finish/cancel with an
+                                # is_done() guard so duplicate key events are idempotent.
+                                patch_for_active_prompt(panel, SELECTION_RESOLVED_SENTINEL)
+                                set_active_interaction(self.chat_manager, panel)
+                                raise SelectionSuspended(
+                                    interaction=panel,
+                                    tool_id=tool_id,
+                                    function_name=function_name,
+                                    tool=tool,
+                                    arguments=arguments,
+                                    context=context,
+                                    questions=questions,
+                                )
+                            finally:
+                                if thinking_indicator:
+                                    thinking_indicator.start()
+                        # Validation failure already set result — fall through.
                     else:
                         result = tool.execute(arguments, context)
                     
@@ -1142,7 +1437,11 @@ class AgenticOrchestrator:
                             "Full filesystem access requires a non-empty reason. "
                             "Retry this tool call with a reason explaining why access outside the project boundary is necessary."
                         )
-                    granted = self._boundary_prompt(path_arg, access_reason, thinking_indicator)
+                    granted = self._boundary_prompt(
+                        path_arg, access_reason, thinking_indicator,
+                        tool_id=tool_id, function_name=function_name,
+                        tool=tool, arguments=arguments, context=context,
+                    )
                     if granted:
                         set_full_filesystem_access(True)
                         # Retry with the boundary now lifted
@@ -1182,6 +1481,10 @@ class AgenticOrchestrator:
                             display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
 
                 return False, result_str
+            except (ToolApprovalSuspended, SelectionSuspended, BoundaryApprovalSuspended):
+                # Re-raise suspension exceptions so they propagate to
+                # _execute_tools_sequential → _handle_tool_calls → run().
+                raise
             except Exception as e:
                 # If thinking_indicator was paused (TERMINAL_YIELD) and tool
                 # raised, resume it so the spinner reappears for the next iteration
@@ -1190,6 +1493,454 @@ class AgenticOrchestrator:
                 return False, f"Error executing tool '{function_name}': {str(e)}"
 
         return False, f"Error: Unknown tool '{function_name}'."
+
+    def resume_after_approval(self, thinking_indicator=None):
+        """Resume the agentic loop after a suspended tool approval is resolved.
+
+        Reads the (action, guidance) tuple from the suspended interaction,
+        builds the appropriate tool result message, appends it to history,
+        processes any remaining tool calls in the batch, and then continues
+        the main while loop.
+
+        Args:
+            thinking_indicator: Optional ThinkingIndicator instance.
+
+        Returns:
+            "done" on normal completion, "suspended" if another approval
+            was handed off.
+        """
+        exc = self._suspended_exc
+        if exc is None:
+            return "done"
+        self._suspended_exc = None
+
+        interaction = exc.interaction
+        result = interaction.result()
+
+        # Clear the active toolbar interaction now that it's resolved.
+        # This prevents stale rendering on the next prompt cycle.
+        from ui.toolbar_interactions import clear_active_interaction
+        clear_active_interaction(self.chat_manager)
+
+        action, guidance = result if isinstance(result, tuple) else (result, None)
+
+        console = self._get_console()
+
+        # ---- Build tool result from approval action -----------------------
+        if action == "accept":
+            if exc.function_name == "edit_file":
+                # Re-execute the edit since it was preview-only before suspension
+                from tools.edit import _execute_edit_file
+                final_result = _execute_edit_file(
+                    path=exc.arguments.get('path'),
+                    search=exc.arguments.get('search'),
+                    replace=exc.arguments.get('replace'),
+                    repo_root=self.repo_root,
+                    console=console,
+                    gitignore_spec=self.gitignore_spec,
+                    context_lines=exc.arguments.get('context_lines', 3),
+                    vault_root=vault_root_str(),
+                )
+                if final_result and isinstance(final_result, str):
+                    result_lines = [l for l in final_result.split('\n')
+                                   if not l.startswith('exit_code=')]
+                    final_result = '\n'.join(result_lines).strip()
+                tool_result = str(final_result)
+            elif exc.function_name == "execute_command":
+                # Execute the command now that it's approved
+                tool_result = exc.tool.execute(exc.arguments, exc.context)
+                # Display output
+                if console:
+                    from core.tool_feedback import build_tool_label, display_tool_feedback
+                    label = build_tool_label(exc.function_name, exc.arguments)
+                    label_text = f"[grey]{label}[/grey]"
+                    console.print(label_text, highlight=False)
+                    console.file.flush()
+                    display_tool_feedback(
+                        label, tool_result, console,
+                        indent=self.is_sub_agent,
+                        panel_updater=self.panel_updater,
+                    )
+            else:
+                tool_result = exc.tool.execute(exc.arguments, exc.context)
+            tool_result_str = str(tool_result)
+        elif action == "advise":
+            tool_result_str = (
+                f"exit_code=1\nTool not applied. User advice: {guidance}"
+            )
+            if console:
+                console.print(f"[dim]Not applied. User advice: {guidance}[/dim]")
+        else:  # cancel
+            tool_result_str = (
+                "exit_code=1\nOperation canceled by user. "
+                "Do not retry this operation."
+            )
+            if console:
+                console.print("[dim]Operation canceled by user.[/dim]")
+
+        # ---- Append tool result message ----------------------------------
+        if isinstance(tool_result_str, str):
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": exc.tool_id,
+                "content": tool_result_str,
+            }
+        else:
+            # Rich Text object from edit_file
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": exc.tool_id,
+                "content": f"exit_code=0\n{str(tool_result_str)}",
+            }
+        self.chat_manager.messages.append(tool_msg)
+        self.chat_manager.log_message(tool_msg)
+
+        # ---- Process remaining tool calls in the batch -------------------
+        remaining = exc.remaining_tool_calls
+        if remaining:
+            for tool_call in remaining:
+                tool_id = tool_call["id"]
+                should_exit, tool_result = self._process_single_tool_call(
+                    tool_call, thinking_indicator
+                )
+                if should_exit:
+                    if tool_result is not None and tool_result is not False:
+                        content = (
+                            f"exit_code=0\n{str(tool_result)}"
+                            if hasattr(tool_result, '__rich__')
+                            else str(tool_result)
+                        )
+                        tool_msg = {
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "content": content,
+                        }
+                        self.chat_manager.messages.append(tool_msg)
+                        self.chat_manager.log_message(tool_msg)
+                    return "done"
+
+                if tool_result is not None and tool_result is not False:
+                    content = (
+                        f"exit_code=0\n{str(tool_result)}"
+                        if hasattr(tool_result, '__rich__')
+                        else str(tool_result)
+                    )
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": content,
+                    }
+                    self.chat_manager.messages.append(tool_msg)
+                    self.chat_manager.log_message(tool_msg)
+
+        # ---- Compact tool results and continue the while loop ------------
+        self.chat_manager.compact_tool_results(skip_token_update=True)
+
+        tools_for_mode = self._get_effective_tools(
+            allowed_tools=getattr(self, "_current_allowed_tools", None),
+            allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
+        )
+        self.chat_manager._update_context_tokens(tools_for_mode)
+        self.chat_manager.ensure_context_fits(console=self.console)
+
+        # Re-enter the main while loop (without appending a new user message).
+        return self._continue_loop(thinking_indicator)
+
+    def resume_after_selection(self, thinking_indicator=None):
+        """Resume the agentic loop after a suspended select_option is resolved.
+
+        Reads the selection result from the suspended interaction, builds
+        the appropriate tool result message (matching the format the
+        select_option tool normally returns), appends it to history,
+        processes any remaining tool calls, and continues the main loop.
+
+        Args:
+            thinking_indicator: Optional ThinkingIndicator instance.
+
+        Returns:
+            "done" on normal completion, "suspended" if another interaction
+            was handed off.
+        """
+        exc = self._suspended_exc
+        if exc is None:
+            return "done"
+        self._suspended_exc = None
+
+        interaction = exc.interaction
+
+        # Clear the active toolbar interaction now that it's resolved.
+        from ui.toolbar_interactions import clear_active_interaction
+        clear_active_interaction(self.chat_manager)
+
+        # Build the tool result from the selection outcome.
+        if interaction.was_cancelled():
+            tool_result_str = "exit_code=1\nUser canceled selection"
+            console = self._get_console()
+            if console:
+                console.print("[dim]Selection canceled by user.[/dim]")
+        else:
+            raw_result = interaction.result()
+            # Replicate select_option's formatting logic
+            if raw_result is None:
+                tool_result_str = "exit_code=1\nUser canceled selection"
+            elif isinstance(raw_result, str):
+                tool_result_str = f"exit_code=0\n{raw_result}"
+            elif isinstance(raw_result, list):
+                formatted = []
+                for r in raw_result:
+                    if isinstance(r, list):
+                        formatted.append(', '.join(str(v) for v in r))
+                    else:
+                        formatted.append(str(r))
+                tool_result_str = f"exit_code=0\n{', '.join(formatted)}"
+            else:
+                tool_result_str = f"exit_code=0\n{raw_result}"
+
+        # Append tool result message
+        tool_msg = {
+            "role": "tool",
+            "tool_call_id": exc.tool_id,
+            "content": tool_result_str,
+        }
+        self.chat_manager.messages.append(tool_msg)
+        self.chat_manager.log_message(tool_msg)
+
+        # Process remaining tool calls in the batch
+        remaining = exc.remaining_tool_calls
+        if remaining:
+            for tool_call in remaining:
+                tool_id = tool_call["id"]
+                should_exit, tool_result = self._process_single_tool_call(
+                    tool_call, thinking_indicator
+                )
+                if should_exit:
+                    if tool_result is not None and tool_result is not False:
+                        content = (
+                            f"exit_code=0\n{str(tool_result)}"
+                            if hasattr(tool_result, '__rich__')
+                            else str(tool_result)
+                        )
+                        tool_msg = {
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "content": content,
+                        }
+                        self.chat_manager.messages.append(tool_msg)
+                        self.chat_manager.log_message(tool_msg)
+                    return "done"
+
+                if tool_result is not None and tool_result is not False:
+                    content = (
+                        f"exit_code=0\n{str(tool_result)}"
+                        if hasattr(tool_result, '__rich__')
+                        else str(tool_result)
+                    )
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": content,
+                    }
+                    self.chat_manager.messages.append(tool_msg)
+                    self.chat_manager.log_message(tool_msg)
+
+        # Compact and continue the while loop
+        self.chat_manager.compact_tool_results(skip_token_update=True)
+
+        tools_for_mode = self._get_effective_tools(
+            allowed_tools=getattr(self, "_current_allowed_tools", None),
+            allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
+        )
+        self.chat_manager._update_context_tokens(tools_for_mode)
+        self.chat_manager.ensure_context_fits(console=self.console)
+
+        return self._continue_loop(thinking_indicator)
+
+    def resume_after_boundary(self, thinking_indicator=None):
+        """Resume the agentic loop after a suspended boundary approval is resolved.
+
+        Reads the (action, _) tuple from the suspended interaction.
+        If the user granted access, sets full filesystem access and
+        re-executes the original tool with the boundary lifted.
+        If denied, uses the original boundary error as the tool result.
+
+        Args:
+            thinking_indicator: Optional ThinkingIndicator instance.
+
+        Returns:
+            "done" on normal completion, "suspended" if another interaction
+            was handed off.
+        """
+        exc = self._suspended_exc
+        if exc is None:
+            return "done"
+        self._suspended_exc = None
+
+        interaction = exc.interaction
+        result = interaction.result()
+
+        # Clear the active toolbar interaction now that it's resolved.
+        from ui.toolbar_interactions import clear_active_interaction
+        clear_active_interaction(self.chat_manager)
+
+        action, _ = result if isinstance(result, tuple) else (result, None)
+        console = self._get_console()
+
+        # ---- Build tool result from boundary decision --------------------
+        if action == "accept":
+            set_full_filesystem_access(True)
+            if console:
+                console.print("[yellow]Full filesystem access granted[/yellow]\n")
+            # Re-execute the tool with the boundary now lifted
+            tool_result = exc.tool.execute(exc.arguments, exc.context)
+            tool_result_str = str(tool_result)
+            # Display output
+            if console:
+                from core.tool_feedback import build_tool_label, display_tool_feedback
+                label = build_tool_label(exc.function_name, exc.arguments)
+                label_text = f"[grey]{label}[/grey]"
+                console.print(label_text, highlight=False)
+                console.file.flush()
+                display_tool_feedback(
+                    label, tool_result_str, console,
+                    indent=self.is_sub_agent,
+                    panel_updater=self.panel_updater,
+                )
+        else:  # cancel
+            tool_result_str = (
+                "exit_code=1\n"
+                "Full filesystem access denied by user. "
+                "Do not retry this operation on this path."
+            )
+            if console:
+                console.print("[dim]Full filesystem access denied by user.[/dim]")
+
+        # ---- Append tool result message ----------------------------------
+        tool_msg = {
+            "role": "tool",
+            "tool_call_id": exc.tool_id,
+            "content": tool_result_str,
+        }
+        self.chat_manager.messages.append(tool_msg)
+        self.chat_manager.log_message(tool_msg)
+
+        # ---- Process remaining tool calls in the batch -------------------
+        remaining = exc.remaining_tool_calls
+        if remaining:
+            for tool_call in remaining:
+                tool_id = tool_call["id"]
+                should_exit, tool_result = self._process_single_tool_call(
+                    tool_call, thinking_indicator
+                )
+                if should_exit:
+                    if tool_result is not None and tool_result is not False:
+                        content = (
+                            f"exit_code=0\n{str(tool_result)}"
+                            if hasattr(tool_result, '__rich__')
+                            else str(tool_result)
+                        )
+                        tool_msg = {
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "content": content,
+                        }
+                        self.chat_manager.messages.append(tool_msg)
+                        self.chat_manager.log_message(tool_msg)
+                    return "done"
+
+                if tool_result is not None and tool_result is not False:
+                    content = (
+                        f"exit_code=0\n{str(tool_result)}"
+                        if hasattr(tool_result, '__rich__')
+                        else str(tool_result)
+                    )
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": content,
+                    }
+                    self.chat_manager.messages.append(tool_msg)
+                    self.chat_manager.log_message(tool_msg)
+
+        # ---- Compact tool results and continue the while loop ------------
+        self.chat_manager.compact_tool_results(skip_token_update=True)
+
+        tools_for_mode = self._get_effective_tools(
+            allowed_tools=getattr(self, "_current_allowed_tools", None),
+            allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
+        )
+        self.chat_manager._update_context_tokens(tools_for_mode)
+        self.chat_manager.ensure_context_fits(console=self.console)
+
+        return self._continue_loop(thinking_indicator)
+
+    def _continue_loop(self, thinking_indicator=None):
+        """Internal: continue the main orchestration loop from its current state.
+
+        Does NOT append a new user message — picks up where ``run()`` left off.
+        """
+        from tools.helpers.base import ToolRegistry
+
+        try:
+            while True:
+                evicted = ToolRegistry.decrement_plugin_ttls()
+                if evicted and self.debug_mode:
+                    self.console.print(
+                        f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]"
+                    )
+
+                # Mid-turn swarm inbox injection
+                inject_queue = getattr(
+                    self.chat_manager, '_swarm_inject_queue', None
+                )
+                if inject_queue is not None:
+                    pending_prompts = []
+                    while not inject_queue.empty():
+                        try:
+                            pending_prompts.append(inject_queue.get_nowait())
+                        except Exception:
+                            break
+                    if pending_prompts:
+                        inject_content = "\n\n---\n\n".join(pending_prompts)
+                        inject_msg = {"role": "user", "content": inject_content}
+                        self.chat_manager.messages.append(inject_msg)
+                        self.chat_manager.log_message(inject_msg)
+                        if self.debug_mode:
+                            self.console.print(
+                                f"[dim]Injected {len(pending_prompts)} "
+                                f"swarm event(s) mid-turn[/dim]"
+                            )
+
+                response = self._get_llm_response(
+                    allowed_tools=getattr(self, "_current_allowed_tools", None),
+                    allow_active_plugins=getattr(
+                        self, "_current_allow_active_plugins", False
+                    ),
+                )
+                if response is None:
+                    return "done"
+
+                self.chat_manager.maybe_auto_compact()
+
+                tool_calls = response.get("tool_calls")
+                if not tool_calls:
+                    if self._handle_final_response(response, thinking_indicator):
+                        return "done"
+                else:
+                    should_exit = self._handle_tool_calls(
+                        response,
+                        thinking_indicator,
+                        allowed_tools=getattr(self, "_current_allowed_tools", None),
+                        allow_active_plugins=getattr(
+                            self, "_current_allow_active_plugins", False
+                        ),
+                    )
+                    if should_exit:
+                        return "done"
+        except (ToolApprovalSuspended, SelectionSuspended, BoundaryApprovalSuspended) as e:
+            self._suspended_exc = e
+            return "suspended"
+        except KeyboardInterrupt:
+            raise
 
 def agentic_answer(chat_manager, user_input: str | list[dict[str, Any]], console, repo_root, rg_exe_path, debug_mode, thinking_indicator=None):
     """Main agent loop using OpenAI-style function calling.
@@ -1205,6 +1956,11 @@ def agentic_answer(chat_manager, user_input: str | list[dict[str, Any]], console
         rg_exe_path: Path to rg.exe
         debug_mode: Whether to show debug output
         thinking_indicator: Optional ThinkingIndicator instance
+
+    Returns:
+        "done" on normal completion, "suspended" if a tool approval was
+        handed off to the main prompt.  The orchestrator is stored on
+        ``chat_manager._agentic_orchestrator`` for later resume.
     """
     orchestrator = AgenticOrchestrator(
         chat_manager=chat_manager,
@@ -1213,4 +1969,8 @@ def agentic_answer(chat_manager, user_input: str | list[dict[str, Any]], console
         console=console,
         debug_mode=debug_mode,
     )
-    orchestrator.run(user_input, thinking_indicator)
+    result = orchestrator.run(user_input, thinking_indicator)
+    if result == "suspended":
+        # Stash the orchestrator so the main loop can resume it.
+        chat_manager._agentic_orchestrator = orchestrator
+    return result

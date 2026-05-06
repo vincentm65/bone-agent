@@ -53,6 +53,16 @@ class ChatManager:
         self.task_list = []
         self.task_list_title = None
 
+        # Active toolbar interaction (rendered/dispatched by main prompt loop).
+        # Formalised here so it's always present; toolbar_interactions.py
+        # helpers use duck-typed access via this attribute.
+        self._toolbar_interaction: Any = None
+
+        # Pending toolbar interaction (staged for later resolution).
+        # When set, the main prompt loop or input hook should present it to
+        # the user and call resolve_pending_interaction() with the response.
+        self._pending_interaction: Any = None
+
         # In-session active skill tracking. These skills are rendered into the
         # system prompt for the current chat.
         self.loaded_skills = set()
@@ -1634,6 +1644,59 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                 server._app.invalidate()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Pending toolbar interaction contract
+    # ------------------------------------------------------------------
+
+    def set_pending_interaction(self, interaction: Any) -> None:
+        """Stage a ``PendingInteraction`` for the main prompt loop to resolve.
+
+        The pending interaction represents a request for user input that
+        yields to the main prompt.  Agent-turn code should set this and
+        return; the main prompt loop (or an input hook) picks it up,
+        presents the prompt, and calls ``resolve_pending_interaction()``
+        with the user's response.
+
+        Args:
+            interaction: A ``PendingInteraction`` instance (from
+                         ``ui.toolbar_interactions``).
+        """
+        self._pending_interaction = interaction
+
+    def get_pending_interaction(self) -> Any:
+        """Return the current pending interaction, or None."""
+        return self._pending_interaction
+
+    def clear_pending_interaction(self) -> None:
+        """Remove the current pending interaction without resolving it."""
+        self._pending_interaction = None
+
+    def resolve_pending_interaction(self, result: Any = None) -> bool:
+        """Resolve the current pending interaction with a result.
+
+        If a pending interaction exists and hasn't already been resolved,
+        calls ``interaction.resolve(result)`` and clears it.  Safe to
+        call when no pending interaction is set (returns False).
+
+        Args:
+            result: The value to pass through to the pending
+                    interaction's ``resolve()`` method.
+
+        Returns:
+            True if a pending interaction was resolved, False if there
+            was nothing to resolve or it was already resolved.
+        """
+        interaction = self._pending_interaction
+        if interaction is None:
+            return False
+        if interaction.is_resolved:
+            # Already resolved externally; just clear our reference.
+            self._pending_interaction = None
+            return False
+        interaction.resolve(result)
+        self._pending_interaction = None
+        return True
 
     def start_swarm_inbox_poller(self, poll_interval: float = 0.1) -> None:
         """Start a background daemon thread that drains the swarm server

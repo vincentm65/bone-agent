@@ -106,7 +106,8 @@ def resolve_edit_preview(result):
 def handle_command_approval(command, arguments, tool, context, console,
                             thinking_indicator, approve_mode, debug_mode,
                             cron_job_id=None, cron_allowlist=None,
-                            cron_interactive=False, chat_manager=None):
+                            cron_interactive=False, chat_manager=None,
+                            **_kwargs):
     """Handle execute_command approval workflow.
 
     Checks for silent blocks, auto-approval, danger-mode non-git approval,

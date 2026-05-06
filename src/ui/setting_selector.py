@@ -1,18 +1,21 @@
-"""Reusable component for interactive setting selection and editing."""
+"""Reusable component for interactive setting selection and editing.
 
-import asyncio
+Toolbar-hosted via ``ToolbarInteraction`` — renders compact config/
+provider selectors in the bottom toolbar area instead of an inline
+prompt_toolkit ``Application``.
+"""
+
 from dataclasses import dataclass, field
+from html import escape as _html_escape
 from typing import Optional, List, Dict, Any, Callable, Union
 
-from prompt_toolkit import HTML
-from prompt_toolkit.application import Application
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import Layout, HSplit, Window
-from prompt_toolkit.layout.dimension import D
-from prompt_toolkit.layout.controls import FormattedTextControl
-
-from ui.prompt_utils import TOOLBAR_STYLE
+from ui.toolbar_interactions import (
+    ToolbarInteraction,
+    run_toolbar_interaction,
+    escape_html,
+    styled,
+    make_section,
+)
 
 
 @dataclass
@@ -44,15 +47,15 @@ class SettingCategory:
     settings: List[SettingOption] = field(default_factory=list)
 
 
-class SettingSelector:
-    """Interactive setting selector with live value editing.
+class SettingSelector(ToolbarInteraction):
+    """Interactive setting selector with live value editing — toolbar-hosted.
 
-    Boolean settings display one per line with green ON / red OFF.
+    Boolean settings display with ON / OFF labels.
     Enter toggles booleans directly. A Save option sits at the bottom.
-    Non-boolean types still support inline editing.
+    Non-boolean types support inline editing in the toolbar.
     """
 
-    _CURSOR = "  "
+    _CURSOR = "> "
     _ON_SAVE = False  # Sentinel: cursor is on the Save button
 
     def __init__(
@@ -61,6 +64,7 @@ class SettingSelector:
         title: str = "Settings",
         on_change: Callable[[str, str, Any], None] = None,  # Called on value change
         show_save: bool = True,  # Whether to show the Save button
+        chat_manager: Any = None,  # For swarm interrupt support
     ):
         """Initialize the setting selector.
 
@@ -69,11 +73,14 @@ class SettingSelector:
             title: Panel title
             on_change: Callback(key, action, value) when setting changes
             show_save: Whether to display the Save button
+            chat_manager: Optional ChatManager for swarm admin interrupt polling
         """
+        super().__init__()
         self.categories = categories
         self.title = title
         self.on_change = on_change
         self.show_save = show_save
+        self._chat_manager = chat_manager
 
         self.current_cat_idx = 0
         self.current_setting_idx = 0
@@ -120,179 +127,523 @@ class SettingSelector:
         """Check if a setting is a boolean toggle or nav item."""
         return setting is not None and setting.input_type in ("boolean", "nav")
 
-    def _get_display_text(self) -> HTML:
-        """Build the display HTML with one-line boolean toggles."""
+    def _get_flat_index(self) -> int:
+        """Get the flat index of the currently focused setting."""
+        idx = 0
+        for c in range(self.current_cat_idx):
+            idx += len(self.categories[c].settings)
+        idx += self.current_setting_idx
+        return idx
+
+    def _flat_to_position(self, flat_idx: int) -> tuple[int, int]:
+        """Convert a flat index to (category_idx, setting_idx)."""
+        for c_idx, cat in enumerate(self.categories):
+            if flat_idx < len(cat.settings):
+                return c_idx, flat_idx
+            flat_idx -= len(cat.settings)
+        # Past all settings — return last
+        last_cat = len(self.categories) - 1
+        return last_cat, len(self.categories[last_cat].settings) - 1
+
+
+    # ------------------------------------------------------------------
+    # ToolbarInteraction interface
+    # ------------------------------------------------------------------
+
+    def render(self) -> str:
+        """Return compact HTML for bottom-toolbar rendering.
+
+        Shows title/category header, a windowed list around the focused
+        setting, focused value/edit buffer, and a short controls hint.
+        Options-type settings expand to show a windowed radio list.
+        """
         lines = []
 
-        # Title (only if provided)
-        if self.title:
-            lines.append(f"<b>{self.title}</b>")
-            lines.append("")
-
-        # Show category headers only when there are multiple categories
+        # Header line: title + category + controls hint
+        title_text = escape_html(self.title) if self.title else ""
         show_headers = len(self.categories) > 1
+        cat = self.categories[self.current_cat_idx]
+        cat_text = f" \u2014 {escape_html(cat.title)}" if show_headers else ""
 
-        for c_idx, cat in enumerate(self.categories):
-            is_active_cat = c_idx == self.current_cat_idx
+        hint = self._controls_hint()
+        header = f"<b>{title_text}{cat_text}</b>    <style fg='#555555'>{hint}</style>"
+        lines.append(header)
 
-            # Add spacing between categories
-            if c_idx > 0:
-                lines.append("")
+        # Settings window
+        setting = self._get_current_setting()
+        is_options_focused = (
+            not self._on_save
+            and setting is not None
+            and setting.input_type == "options"
+            and setting.options
+        )
 
-            if show_headers:
-                lines.append(f"<b><style fg='#5F9EA0'>{cat.title}</style></b>")
+        if is_options_focused:
+            lines.extend(self._render_options_window(setting))
+        else:
+            lines.extend(self._render_settings_window())
 
-            for s_idx, setting in enumerate(cat.settings):
-                is_selected = (is_active_cat
-                               and s_idx == self.current_setting_idx
-                               and not self._on_save)
-                is_editing = is_selected and self.editing_value
-
-                if setting.input_type == "boolean":
-                    is_on = bool(setting.value)
-                    tag = "ON" if is_on else "OFF"
-                    label = setting.text
-
-                    if is_selected:
-                        color = "green" if is_on else "red"
-                        lines.append(
-                            f"> <style fg='{color}' bold='true'>{tag}</style>"
-                            f"  <b>{label}</b>"
-                        )
-                    else:
-                        lines.append(
-                            f"  <style fg='gray'>{tag}</style>"
-                            f"  {label}"
-                        )
-
-                elif setting.input_type == "nav":
-                    tag = self._format_value(setting)
-                    label = setting.text
-
-                    if is_selected:
-                        if tag and tag not in ("ON", "OFF"):
-                            lines.append(
-                                f"> <style fg='#5F9EA0' bold='true'>{tag}</style>"
-                                f"  <b>{label}</b>"
-                            )
-                        else:
-                            lines.append(
-                                f"> <b>{label}</b>"
-                            )
-                    else:
-                        if tag and tag not in ("ON", "OFF"):
-                            lines.append(
-                                f"  <style fg='gray'>{tag}</style>"
-                                f"  {label}"
-                            )
-                        else:
-                            lines.append(
-                                f"  {label}"
-                            )
-
-                elif is_editing and setting.input_type in ("number", "float"):
-                    label = setting.text
-                    lines.append(
-                        f"> <b>{label}:</b>"
-                        f"  <style fg='yellow'>{self.input_buffer}</style>"
-                    )
-                elif is_editing and setting.input_type == "text":
-                    label = setting.text
-                    lines.append(
-                        f"> <b>{label}:</b>"
-                        f"  <style fg='yellow'>{self.input_buffer}</style>"
-                    )
-                elif is_editing and setting.input_type == "select" and setting.options:
-                    tag = self._format_value(setting)
-                    label = setting.text
-                    lines.append(
-                        f"> <style fg='yellow' bold='true'>{tag}</style>"
-                        f"  <b>{label}</b>"
-                    )
-                elif setting.input_type == "select" and setting.options:
-                    tag = self._format_value(setting)
-                    label = setting.text
-                    if is_selected:
-                        lines.append(
-                            f"> <style fg='#5F9EA0' bold='true'>{tag}</style>"
-                            f"  <b>{label}</b>"
-                        )
-                    else:
-                        lines.append(
-                            f"  <style fg='gray'>{tag}</style>"
-                            f"  {label}"
-                        )
-
-                elif setting.input_type == "options" and setting.options:
-                    # Show each option on its own line with radio-style selection
-                    label = setting.text
-                    lines.append(f"  <b>{label}</b>")
-                    for opt_idx, opt in enumerate(setting.options):
-                        opt_text = opt.get("text", str(opt.get("value", "")))
-                        opt_value = opt.get("value")
-                        is_current = opt_value == setting.value
-                        is_opt_selected = is_selected and is_current
-                        indent = "  > " if is_opt_selected else "    "
-                        marker = "◉" if is_current else "○"
-                        desc = opt.get("description", "")
-                        if is_current:
-                            color = "#5F9EA0"
-                            lines.append(
-                                f'{indent}<style fg="{color}">{marker}</style> '
-                                f'<style fg="{color}" bold="true">{opt_text}</style>'
-                                + (f'  <style fg="gray">{desc}</style>' if desc else '')
-                            )
-                        else:
-                            lines.append(
-                                f'{indent}<style fg="gray">{marker}</style> '
-                                f'{opt_text}'
-                                + (f'  <style fg="gray">{desc}</style>' if desc else '')
-                            )
-                else:
-                    label = setting.text
-                    val = self._format_value(setting)
-                    if is_selected:
-                        lines.append(
-                            f"> <b>{label}:</b>"
-                            f"  <style fg='#5F9EA0'>{val}</style>"
-                        )
-                    else:
-                        lines.append(
-                            f"  {label}:  "
-                            f"<style fg='gray'>{val}</style>"
-                        )
-
-        # Separator + Save button
+        # Save button
         if self.show_save:
-            lines.append("")
             if self._on_save:
-                lines.append("> <b>[ Save ]</b>")
+                lines.append(f"{self._CURSOR}<b>[ Save ]</b>")
             else:
                 lines.append("  [ Save ]")
 
-        # Help text
-        lines.append("")
+        return make_section(lines=lines)
+
+    def _controls_hint(self) -> str:
+        """Build the short controls hint based on current state."""
         setting = self._get_current_setting()
         if self._on_save:
-            lines.append("<style fg='gray'>Enter to save changes, Esc to save &amp; close</style>")
-        elif self.editing_value:
+            return "\u21b5 save  Esc save &amp; close"
+        if self.editing_value:
             if setting and setting.input_type in ("number", "float", "text"):
-                lines.append("<style fg='gray'>Type value, Enter to confirm, Esc to discard</style>")
-            elif setting and setting.input_type == "select":
-                lines.append("<style fg='gray'>↑↓ Change, Enter to confirm, Esc to discard</style>")
-        else:
-            if setting and setting.input_type == "nav":
-                lines.append("<style fg='gray'>↑↓ Navigate, Enter to open, Esc to save &amp; close</style>")
-            elif setting and setting.input_type == "options":
-                lines.append("<style fg='gray'>↑↓ Change option, Enter to select, Esc to save &amp; close</style>")
-            elif setting and self._is_boolean_setting(setting):
-                lines.append("<style fg='gray'>↑↓ Navigate, Enter to toggle, Esc to save &amp; close</style>")
-            elif setting:
-                lines.append("<style fg='gray'>↑↓ Navigate, Enter to edit, Esc to save &amp; close</style>")
-            else:
-                lines.append("<style fg='gray'>↑↓ Navigate, Esc to save &amp; close</style>")
+                return "Type  \u21b5 confirm  Esc discard"
+            if setting and setting.input_type == "select":
+                return "\u2191\u2193 change  \u21b5 confirm  Esc discard"
+            return "\u21b5 confirm  Esc discard"
+        # Navigation mode
+        if setting and setting.input_type == "nav":
+            return "\u2191\u2193 navigate  \u21b5 open  Esc cancel"
+        if setting and setting.input_type == "options":
+            return "\u2191\u2193 change option  \u21b5 select  Esc cancel"
+        if setting and self._is_boolean_setting(setting):
+            return "\u2191\u2193 navigate  \u21b5 toggle  Esc cancel"
+        if setting:
+            return "\u2191\u2193 navigate  \u21b5 edit  Esc cancel"
+        return "\u2191\u2193 navigate  Esc cancel"
 
-        return HTML("\n".join(lines))
+    def _render_settings_window(self) -> list:
+        """Render a windowed list of settings around the focused one."""
+        lines_out = []
+        _MAX_VISIBLE = 4
+        total = self._total_setting_rows()
+
+        if total == 0:
+            return lines_out
+
+        flat_idx = self._get_flat_index() if not self._on_save else total
+
+        if total <= _MAX_VISIBLE:
+            visible_start = 0
+            visible_end = total
+        else:
+            half = _MAX_VISIBLE // 2
+            visible_start = max(0, flat_idx - half)
+            visible_end = min(total, visible_start + _MAX_VISIBLE)
+            if visible_end - visible_start < _MAX_VISIBLE:
+                visible_start = max(0, visible_end - _MAX_VISIBLE)
+
+        if visible_start > 0:
+            lines_out.append(
+                f'<style fg="#888888">  \u22ef {visible_start} more above \u22ef</style>'
+            )
+
+        for idx in range(visible_start, visible_end):
+            cat_idx, setting_idx = self._flat_to_position(idx)
+            setting = self.categories[cat_idx].settings[setting_idx]
+            is_focused = (
+                cat_idx == self.current_cat_idx
+                and setting_idx == self.current_setting_idx
+                and not self._on_save
+            )
+            is_editing = is_focused and self.editing_value
+            lines_out.append(self._render_setting_line(setting, is_focused, is_editing))
+
+        if visible_end < total:
+            lines_out.append(
+                f'<style fg="#888888">  \u22ef {total - visible_end} more below \u22ef</style>'
+            )
+
+        return lines_out
+
+    def _render_options_window(self, setting: "SettingOption") -> list:
+        """Render a windowed radio-button list of options for an options-type setting."""
+        lines_out = []
+        _MAX_VISIBLE = 5
+        options = setting.options or []
+        total = len(options)
+
+        if total == 0:
+            return lines_out
+
+        # Show the setting label
+        lines_out.append(f"<b>{escape_html(setting.text)}</b>")
+
+        # Find currently selected option index
+        current_idx = next(
+            (i for i, o in enumerate(options) if o.get("value") == setting.value), 0
+        )
+
+        if total <= _MAX_VISIBLE:
+            visible_start = 0
+            visible_end = total
+        else:
+            half = _MAX_VISIBLE // 2
+            visible_start = max(0, current_idx - half)
+            visible_end = min(total, visible_start + _MAX_VISIBLE)
+            if visible_end - visible_start < _MAX_VISIBLE:
+                visible_start = max(0, visible_end - _MAX_VISIBLE)
+
+        if visible_start > 0:
+            lines_out.append(
+                f'<style fg="#888888">    \u22ef {visible_start} more above \u22ef</style>'
+            )
+
+        for o_idx in range(visible_start, visible_end):
+            opt = options[o_idx]
+            opt_text = escape_html(opt.get("text", str(opt.get("value", ""))))
+            opt_value = opt.get("value")
+            is_current = opt_value == setting.value
+            desc = opt.get("description", "")
+
+            if is_current:
+                prefix = "  > "
+                marker = "\u25c9"
+                color = "#5F9EA0"
+                lines_out.append(
+                    f'{prefix}<style fg="{color}">{marker}</style> '
+                    f'<style fg="{color}" bold="true">{opt_text}</style>'
+                    + (f'  <style fg="gray">{escape_html(desc)}</style>' if desc else "")
+                )
+            else:
+                prefix = "    "
+                marker = "\u25cb"
+                desc_suffix = f'  <style fg="gray">{escape_html(desc)}</style>' if desc else ""
+                lines_out.append(
+                    f'{prefix}<style fg="gray">{marker}</style> '
+                    f'{opt_text}{desc_suffix}'
+                )
+
+        if visible_end < total:
+            lines_out.append(
+                f'<style fg="#888888">    \u22ef {total - visible_end} more below \u22ef</style>'
+            )
+
+        return lines_out
+
+    def _render_setting_line(
+        self, setting: "SettingOption", is_focused: bool, is_editing: bool
+    ) -> str:
+        """Render a single setting as one toolbar line."""
+        prefix = self._CURSOR if is_focused else "  "
+        label = escape_html(setting.text)
+
+        if setting.input_type == "boolean":
+            is_on = bool(setting.value)
+            tag = "ON" if is_on else "OFF"
+            if is_focused:
+                color = "green" if is_on else "red"
+                return f'{prefix}<style fg="{color}" bold="true">{tag}</style>  <b>{label}</b>'
+            return f'{prefix}<style fg="gray">{tag}</style>  {label}'
+
+        if setting.input_type == "nav":
+            tag = escape_html(self._format_value(setting))
+            if is_focused:
+                return f'{prefix}<b>{label}</b>  <style fg="#5F9EA0">{tag}</style>'
+            return f'{prefix}{label}  <style fg="gray">{tag}</style>'
+
+        if is_editing:
+            if setting.input_type in ("number", "float", "text"):
+                buf = escape_html(self.input_buffer)
+                cursor = styled("\u258c", fg="#FFFFFF")
+                return f'{prefix}<b>{label}:</b>  <style fg="yellow">{buf}{cursor}</style>'
+            if setting.input_type == "select" and setting.options:
+                tag = escape_html(self._format_value(setting))
+                return f'{prefix}<style fg="yellow" bold="true">{tag}</style>  <b>{label}</b>'
+
+        if setting.input_type == "select" and setting.options:
+            tag = escape_html(self._format_value(setting))
+            if is_focused:
+                return f'{prefix}<style fg="#5F9EA0" bold="true">{tag}</style>  <b>{label}</b>'
+            return f'{prefix}<style fg="gray">{tag}</style>  {label}'
+
+        # Generic: label: value
+        val = escape_html(self._format_value(setting))
+        if is_focused:
+            return f'{prefix}<b>{label}:</b>  <style fg="#5F9EA0">{val}</style>'
+        return f'{prefix}{label}:  <style fg="gray">{val}</style>'
+
+    # ------------------------------------------------------------------
+    # Key handling (ToolbarInteraction interface)
+    # ------------------------------------------------------------------
+
+    def handle_key(self, event: object) -> bool:
+        """Handle a key event forwarded from the prompt_toolkit application."""
+        name = self._extract_key_name(event)
+
+        # ── Editing mode ──
+        if self.editing_value:
+            return self._handle_editing_key(event, name)
+
+        # ── Navigation mode ──
+        if name == "up":
+            self._handle_up()
+            return True
+        if name == "down":
+            self._handle_down()
+            return True
+        if name == "enter":
+            self._handle_enter()
+            return True
+        if name == "escape":
+            if self._on_save:
+                self._save_and_finish()
+            else:
+                self.cancel()
+            return True
+        if name == "right":
+            self._enter_edit_mode()
+            return True
+        if name in ("backspace", "delete"):
+            return True  # no-op in navigation mode
+
+        return True  # consume all keys while active
+
+    def _handle_editing_key(self, event: object, name: str) -> bool:
+        """Handle keys while editing a text/number/float/select setting."""
+        setting = self._get_current_setting()
+
+        if name == "escape":
+            self.editing_value = False
+            self.input_buffer = ""
+            return True
+
+        if name == "enter":
+            if setting and setting.input_type in ("text", "number", "float"):
+                if self._validate_input(setting, self.input_buffer):
+                    if setting.input_type == "number":
+                        new_val = int(self.input_buffer)
+                    elif setting.input_type == "float":
+                        new_val = float(self.input_buffer)
+                    else:
+                        new_val = self.input_buffer
+                    self._apply_change(setting.key, new_val)
+                self.editing_value = False
+                self.input_buffer = ""
+            elif setting and setting.input_type == "select" and setting.options:
+                # Confirm current selection in edit mode
+                self.editing_value = False
+            return True
+
+        if name == "up":
+            if setting and setting.input_type == "select" and setting.options:
+                current_idx = next(
+                    (i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0
+                )
+                new_idx = max(0, current_idx - 1)
+                self._apply_change(setting.key, setting.options[new_idx].get("value"))
+            return True
+
+        if name == "down":
+            if setting and setting.input_type == "select" and setting.options:
+                current_idx = next(
+                    (i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0
+                )
+                new_idx = min(len(setting.options) - 1, current_idx + 1)
+                self._apply_change(setting.key, setting.options[new_idx].get("value"))
+            return True
+
+        if name == "backspace":
+            if self.input_buffer:
+                self.input_buffer = self.input_buffer[:-1]
+            return True
+
+        if name == "delete":
+            if self.input_buffer:
+                self.input_buffer = self.input_buffer[:-1]
+            return True
+
+        # Printable characters for text/number/float editing
+        if setting and setting.input_type in ("text", "number", "float"):
+            data = self._extract_key_data(event)
+            if data and len(data) == 1 and ord(data) >= 32:
+                if setting.input_type == "number":
+                    if data.isdigit() or (data == '-' and not self.input_buffer):
+                        self.input_buffer += data
+                elif setting.input_type == "float":
+                    if (data.isdigit()
+                            or (data == '.' and '.' not in self.input_buffer)
+                            or (data == '-' and not self.input_buffer)):
+                        self.input_buffer += data
+                else:
+                    self.input_buffer += data
+            return True
+
+        return True
+
+    def _handle_up(self):
+        """Move selection up (or change option for options type)."""
+        if self.editing_value:
+            return
+        setting = self._get_current_setting()
+        if setting and setting.input_type == "options" and setting.options:
+            current_idx = next(
+                (i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0
+            )
+            new_idx = max(0, current_idx - 1)
+            self._apply_change(setting.key, setting.options[new_idx].get("value"))
+            return
+        self._navigate_up()
+
+    def _handle_down(self):
+        """Move selection down (or change option for options type)."""
+        if self.editing_value:
+            return
+        setting = self._get_current_setting()
+        if setting and setting.input_type == "options" and setting.options:
+            current_idx = next(
+                (i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0
+            )
+            new_idx = min(len(setting.options) - 1, current_idx + 1)
+            self._apply_change(setting.key, setting.options[new_idx].get("value"))
+            return
+        self._navigate_down()
+
+    def _handle_enter(self):
+        """Handle Enter in navigation mode."""
+        if self._on_save:
+            self._save_and_finish()
+            return
+
+        setting = self._get_current_setting()
+        if not setting:
+            return
+
+        # Nav: signal drill-down
+        if setting.input_type == "nav":
+            self.finish({"_nav": setting.key})
+            return
+
+        # Boolean: toggle directly
+        if self._is_boolean_setting(setting):
+            self._apply_change(setting.key, not setting.value)
+            return
+
+        # Select: cycle to next option
+        if setting.input_type == "select" and setting.options:
+            current_idx = next(
+                (i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0
+            )
+            new_idx = (current_idx + 1) % len(setting.options)
+            self._apply_change(setting.key, setting.options[new_idx].get("value"))
+            return
+
+        # Options: confirm and save
+        if setting.input_type == "options" and setting.options:
+            self._save_and_finish()
+            return
+
+        # Text/number/float: enter edit mode
+        if setting.input_type in ("text", "number", "float"):
+            self.editing_value = True
+            self.input_buffer = str(setting.value)
+            return
+
+    def _enter_edit_mode(self):
+        """Enter edit mode for the current setting (if applicable)."""
+        if self.editing_value or self._on_save:
+            return
+        setting = self._get_current_setting()
+        if setting and setting.input_type not in ("boolean", "nav"):
+            self.editing_value = True
+            if setting.input_type in ("text", "number", "float"):
+                self.input_buffer = str(setting.value)
+
+    def _save_and_finish(self):
+        """Compute changes and finish the interaction."""
+        changes = {}
+        for cat in self.categories:
+            for setting in cat.settings:
+                if setting.value != self._initial_values.get(setting.key):
+                    changes[setting.key] = setting.value
+        self.finish(changes if changes else {})
+
+    # ------------------------------------------------------------------
+    # Key extraction helpers (duck-type prompt_toolkit events)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_key_name(event: object) -> str:
+        """Extract a normalized key name from a prompt_toolkit KeyPressEvent."""
+        try:
+            seq = getattr(event, "key_sequence", None)
+            if seq:
+                press = seq[-1]
+                key = getattr(press, "key", None)
+                name = getattr(key, "name", None) if key is not None else None
+                if not name:
+                    name = getattr(press, "data", None)
+                return SettingSelector._normalize_key_name(name) if name else ""
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _extract_key_data(event: object) -> str:
+        """Extract printable character data from a prompt_toolkit KeyPressEvent."""
+        try:
+            seq = getattr(event, "key_sequence", None)
+            if seq:
+                press = seq[-1]
+                data = getattr(press, "data", None)
+                return data if data else ""
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _normalize_key_name(name: str) -> str:
+        """Normalize key names with platform-dependent variants."""
+        name = name.lower()
+        if name in ("c-m", "controlm", "\r", "\n"):
+            return "enter"
+        if name in ("c-h", "controlh"):
+            return "backspace"
+        if name in ("c-i", "controli", "\t"):
+            return "tab"
+        if name in ("space",):
+            return " "
+        if name in ("delete", "c-d"):
+            return "delete"
+        return name
+
+    # ------------------------------------------------------------------
+    # Runner
+    # ------------------------------------------------------------------
+
+    def run(self, chat_manager: Any = None) -> Optional[Dict[str, Any]]:
+        """Display the setting selector via toolbar interaction.
+
+        Runs in a minimal prompt_toolkit Application via
+        ``run_toolbar_interaction``.  Nothing is written to the chat
+        transcript.
+
+        Args:
+            chat_manager: Optional ChatManager for swarm interrupt support.
+                          Overrides the one set in __init__.
+
+        Returns:
+            Dict of {key: new_value} for changed settings, {} if saved
+            with no changes, or None if cancelled / interrupted.
+        """
+        cm = chat_manager or self._chat_manager
+
+        # Pre-check: if swarm work is pending, skip interaction entirely.
+        if cm is not None and hasattr(cm, "has_pending_swarm_work"):
+            if cm.has_pending_swarm_work():
+                return None
+
+        result = run_toolbar_interaction(self, chat_manager=cm)
+
+        if result is None:
+            return None
+
+        if self.was_cancelled():
+            return None
+
+        return self.result()
 
     def _validate_input(self, setting: SettingOption, value: str) -> bool:
         """Validate user input for a setting."""
@@ -340,7 +691,6 @@ class SettingSelector:
 
     def _apply_change(self, key: str, new_value: Any) -> None:
         """Apply a setting change."""
-        # Find and update the setting
         for cat in self.categories:
             for setting in cat.settings:
                 if setting.key == key:
@@ -353,7 +703,7 @@ class SettingSelector:
     def _navigate_down(self):
         """Move selection down one row, wrapping into the Save button."""
         if self._on_save:
-            return  # Already at bottom
+            return
         cat = self.categories[self.current_cat_idx]
         if self.current_setting_idx < len(cat.settings) - 1:
             self.current_setting_idx += 1
@@ -361,7 +711,6 @@ class SettingSelector:
             self.current_cat_idx += 1
             self.current_setting_idx = 0
         elif self.show_save:
-            # Past last setting -> move to Save button
             self._on_save = True
 
     def _navigate_up(self):
@@ -375,222 +724,9 @@ class SettingSelector:
             self.current_cat_idx -= 1
             self.current_setting_idx = len(self.categories[self.current_cat_idx].settings) - 1
 
-    def _save(self, event):
-        """Exit with changes (or empty dict if nothing changed)."""
-        changes = {}
-        for cat in self.categories:
-            for setting in cat.settings:
-                if setting.value != self._initial_values.get(setting.key):
-                    changes[setting.key] = setting.value
-        event.app.exit(result=changes if changes else {})
 
-    def run(self) -> Optional[Dict[str, Any]]:
-        """Display and run the setting selector.
 
-        Returns:
-            Dict of {key: new_value} for changed settings, or None if canceled
-        """
-        bindings = KeyBindings()
 
-        def invalidate():
-            if hasattr(invalidate, 'app'):
-                invalidate.app.invalidate()
 
-        @bindings.add(Keys.Up)
-        def move_up(event):
-            if self.editing_value:
-                setting = self._get_current_setting()
-                if setting and setting.input_type == "select" and setting.options:
-                    current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
-                    new_idx = max(0, current_idx - 1)
-                    self._apply_change(setting.key, setting.options[new_idx].get("value"))
-                invalidate()
-                return
-            # Options type: navigate within options
-            setting = self._get_current_setting()
-            if setting and setting.input_type == "options" and setting.options:
-                current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
-                new_idx = max(0, current_idx - 1)
-                self._apply_change(setting.key, setting.options[new_idx].get("value"))
-                invalidate()
-                return
-            self._navigate_up()
-            invalidate()
 
-        @bindings.add(Keys.Down)
-        def move_down(event):
-            if self.editing_value:
-                setting = self._get_current_setting()
-                if setting and setting.input_type == "select" and setting.options:
-                    current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
-                    new_idx = min(len(setting.options) - 1, current_idx + 1)
-                    self._apply_change(setting.key, setting.options[new_idx].get("value"))
-                invalidate()
-                return
-            # Options type: navigate within options
-            setting = self._get_current_setting()
-            if setting and setting.input_type == "options" and setting.options:
-                current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
-                new_idx = min(len(setting.options) - 1, current_idx + 1)
-                self._apply_change(setting.key, setting.options[new_idx].get("value"))
-                invalidate()
-                return
-            self._navigate_down()
-            invalidate()
 
-        @bindings.add(Keys.Enter)
-        def confirm(event):
-            # On the Save button -> commit
-            if self._on_save:
-                self._save(event)
-                return
-
-            setting = self._get_current_setting()
-            if not setting:
-                return
-
-            # Nav: activate drill-down
-            if setting.input_type == 'nav':
-                event.app.exit(result={'_nav': setting.key})
-                return
-
-            # Boolean: toggle directly
-            if self._is_boolean_setting(setting):
-                self._apply_change(setting.key, not setting.value)
-                invalidate()
-                return
-
-            # Select: cycle to next option directly
-            if setting.input_type == "select" and setting.options:
-                current_idx = next((i for i, o in enumerate(setting.options) if o.get("value") == setting.value), 0)
-                new_idx = (current_idx + 1) % len(setting.options)
-                self._apply_change(setting.key, setting.options[new_idx].get("value"))
-                invalidate()
-                return
-
-            # Options: confirm selection (same behavior as save)
-            if setting.input_type == "options" and setting.options:
-                self._save(event)
-                return
-
-            if self.editing_value:
-                if setting.input_type in ("text", "number", "float"):
-                    if self._validate_input(setting, self.input_buffer):
-                        if setting.input_type == "number":
-                            new_val = int(self.input_buffer)
-                        elif setting.input_type == "float":
-                            new_val = float(self.input_buffer)
-                        else:
-                            new_val = self.input_buffer
-                        self._apply_change(setting.key, new_val)
-                    self.editing_value = False
-                    self.input_buffer = ""
-                invalidate()
-            else:
-                # Start editing for text/number/float types
-                if setting.input_type in ("text", "number", "float"):
-                    self.editing_value = True
-                    self.input_buffer = str(setting.value)
-                invalidate()
-
-        @bindings.add(Keys.Escape)
-        def close(event):
-            if self.editing_value:
-                # First Esc while editing: discard in-progress input
-                self.editing_value = False
-                self.input_buffer = ""
-                invalidate()
-                return
-            # Esc saves (same as Save button)
-            self._save(event)
-
-        @bindings.add(Keys.Right)
-        def enter_edit(event):
-            setting = self._get_current_setting()
-            if setting and not self.editing_value and setting.input_type not in ("boolean",):
-                self.editing_value = True
-                if setting.input_type in ("text", "number", "float"):
-                    self.input_buffer = str(setting.value)
-                invalidate()
-
-        @bindings.add(Keys.Left)
-        def exit_edit(event):
-            if self.editing_value:
-                self.editing_value = False
-                self.input_buffer = ""
-                invalidate()
-
-        # Character input for text/number editing
-        @bindings.add(Keys.Any)
-        def handle_char(event):
-            if not self.editing_value:
-                return
-            setting = self._get_current_setting()
-            if setting and setting.input_type in ("text", "number", "float"):
-                data = event.data
-                if not data or not any(ord(c) >= 32 for c in data):
-                    return
-                if setting.input_type == "number":
-                    valid = data.isdigit() or (data == '-' and not self.input_buffer)
-                    if valid:
-                        self.input_buffer += data
-                elif setting.input_type == "float":
-                    valid = (data.isdigit()
-                             or (data == '.' and '.' not in self.input_buffer)
-                             or (data == '-' and not self.input_buffer))
-                    if valid:
-                        self.input_buffer += data
-                else:
-                    # text: accept entire paste (multi-char) or single char
-                    self.input_buffer += data
-                invalidate()
-
-        @bindings.add(Keys.Backspace)
-        def handle_backspace(event):
-            if self.editing_value and self.input_buffer:
-                self.input_buffer = self.input_buffer[:-1]
-                invalidate()
-
-        @bindings.add(Keys.Delete)
-        def handle_delete(event):
-            if self.editing_value and self.input_buffer:
-                self.input_buffer = self.input_buffer[:-1]
-                invalidate()
-
-        # Layout
-        def get_content():
-            return self._get_display_text()
-
-        content = FormattedTextControl(get_content)
-        container = HSplit([
-            Window(content=content, height=D(min=1), width=D(min=1), wrap_lines=True),
-        ])
-
-        application = Application(
-            layout=Layout(container),
-            key_bindings=bindings,
-            full_screen=False,
-            mouse_support=False,
-            cursor=None,
-            style=TOOLBAR_STYLE,
-        )
-
-        invalidate.app = application
-        # Add a blank line before the selector to separate from prior output
-        application.output.write_raw("\n")
-        # Save cursor position before rendering so we can erase on exit
-        application.output.write_raw("\033[s")
-        application.output.flush()
-        # Use run_async with asyncio to properly await coroutines
-        result = asyncio.run(application.run_async())
-
-        # Erase rendered content: use ANSI save/restore cursor position.
-        # We saved cursor before the app rendered, so restoring it puts
-        # us back at the top of our content. Then erase to end of screen.
-        output = application.output
-        output.write_raw("\033[u")  # Restore cursor to saved position
-        output.write_raw("\033[J")  # Erase from cursor to end of screen
-        output.flush()
-
-        # None = cancelled, {} = saved with no changes, {...} = saved with changes
-        return result

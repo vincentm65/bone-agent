@@ -34,11 +34,79 @@ logger = logging.getLogger(__name__)
 config_manager = ConfigManagerClass()
 
 
+def _setting_selector_handoff(chat_manager, selector, continuation):
+    """Store selector + continuation on chat_manager for main-loop handoff.
+
+    The main loop detects ``CommandResult(status="setting_selector")``,
+    patches the selector so finish/cancel exit with sentinel 133, sets it
+    as the active toolbar interaction, and re-enters ``session.prompt()``.
+    When the user finishes, the sentinel is detected and *continuation* is
+    called with the resolved selector.
+
+    Returns:
+        CommandResult(status="setting_selector") for the main loop.
+    """
+    chat_manager._setting_selector = selector
+    chat_manager._setting_continuation = continuation
+    return CommandResult(status="setting_selector")
+
+
 @dataclass
 class CommandResult:
     """Standardized command return type."""
-    status: str  # "exit", "handled", "continue", or "swarm_worker"
+    status: str  # "exit", "handled", "continue", "swarm_worker", "setting_selector",
+                 # "confirm_input", or "text_input"
     replacement_input: Optional[str] = None  # For /edit command or command payload
+
+
+def _confirm_handoff(chat_manager, prompt, continuation):
+    """Store a yes/no confirmation interaction + continuation on chat_manager.
+
+    The main loop detects ``CommandResult(status="confirm_input")``,
+    patches the interaction so finish/cancel exit with sentinel 135, sets
+    it as the active toolbar interaction, and re-enters
+    ``session.prompt()``.  When the user selects Yes/No or presses Esc,
+    the sentinel is detected and *continuation* is called with the result.
+
+    The continuation receives:
+        ``True``  — user selected "Yes"
+        ``False`` — user selected "No"
+        ``None``  — user cancelled (Esc)
+
+    Returns:
+        CommandResult(status="confirm_input") for the main loop.
+    """
+    from ui.toolbar_interactions import CommandConfirmInteraction
+
+    interaction = CommandConfirmInteraction(prompt)
+    chat_manager._confirm_interaction = interaction
+    chat_manager._confirm_continuation = continuation
+    return CommandResult(status="confirm_input")
+
+
+def _text_input_handoff(chat_manager, prompt, continuation):
+    """Store a text-input pending interaction + continuation on chat_manager.
+
+    The main loop detects ``CommandResult(status="text_input")``, leaves
+    the pending interaction already set on chat_manager, and re-enters
+    ``session.prompt()``.  The toolbar renders the prompt text.  When the
+    user types text and presses Enter, the main loop resolves the pending
+    interaction and calls *continuation* with the input string.
+
+    The continuation receives:
+        The user's input string (possibly empty).
+        ``None`` is not sent — empty string indicates the user pressed
+        Enter without typing.
+
+    Returns:
+        CommandResult(status="text_input") for the main loop.
+    """
+    from ui.toolbar_interactions import PendingInteraction
+
+    pending = PendingInteraction(prompt)
+    chat_manager.set_pending_interaction(pending)
+    chat_manager._pending_text_continuation = continuation
+    return CommandResult(status="text_input")
 
 # Command handler functions
 
@@ -89,7 +157,6 @@ def _get_latest_npm_version(package_name: str) -> str | None:
 
 def _handle_update(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Check for and install npm package updates."""
-    from rich.prompt import Confirm
     from src import __version__
 
     package_name = "bone-agent"
@@ -111,9 +178,44 @@ def _handle_update(chat_manager, console, debug_mode_container, args, cron_sched
             console.print(f"[green]Already on the latest version (v{__version__})[/green]")
             return CommandResult(status="handled")
 
-        if not Confirm.ask(f"Install {package_name}@{latest_version} now?", default=False):
-            console.print("[dim]Cancelled.[/dim]")
+        def _install_continuation(confirmed):
+            if not confirmed:
+                console.print("[dim]Cancelled.[/dim]")
+                return CommandResult(status="handled")
+            target = f"{package_name}@latest"
+            console.print(f"[dim]Installing {target}...[/dim]")
+            try:
+                result = subprocess.run(
+                    ["npm", "install", "-g", target],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                )
+            except FileNotFoundError:
+                console.print("[red]npm was not found. Install npm or update manually.[/red]")
+                return CommandResult(status="handled")
+            except subprocess.TimeoutExpired:
+                console.print("[red]Update timed out after 120 seconds.[/red]")
+                return CommandResult(status="handled")
+            except Exception as e:
+                console.print(f"[red]Update failed: {e}[/red]")
+                return CommandResult(status="handled")
+
+            output = ((result.stdout or "") + (result.stderr or "")).strip()
+            if result.returncode != 0:
+                console.print(f"[red]npm install failed with exit code {result.returncode}[/red]")
+                if output:
+                    console.print(output)
+                return CommandResult(status="handled")
+
+            installed_version = latest_version or "latest"
+            console.print(f"[green]Updated {package_name} to {installed_version}.[/green]")
+            console.print("[dim]Restart bone to use the new version.[/dim]")
             return CommandResult(status="handled")
+
+        return _confirm_handoff(chat_manager, f"Install {package_name}@{latest_version} now?", _install_continuation)
 
     target = f"{package_name}@latest"
     console.print(f"[dim]Installing {target}...[/dim]")
@@ -452,7 +554,13 @@ def _handle_compact(chat_manager, console, debug_mode_container, args, cron_sche
 
 
 def _handle_config(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle config command - interactive runtime settings editor."""
+    """Handle config command - interactive runtime settings editor.
+
+    Uses the clean handoff path: stores a SettingSelector + continuation
+    on chat_manager and returns ``"setting_selector"`` so the main prompt
+    loop can render it in the toolbar instead of launching a nested
+    prompt_toolkit Application.
+    """
     from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
 
     # Build runtime settings from current state
@@ -488,27 +596,27 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
     ]
 
     # Build status bar settings
-    sb_config = config.STATUS_BAR_SETTINGS
+    sb_config_data = config.STATUS_BAR_SETTINGS
     sb_settings = [
         SettingOption(
             key="show_curr_tokens", text="Current context tokens",
-            value=sb_config.get("show_curr_tokens", True), input_type="boolean",
+            value=sb_config_data.get("show_curr_tokens", True), input_type="boolean",
         ),
         SettingOption(
             key="show_in_tokens", text="Total prompt tokens",
-            value=sb_config.get("show_in_tokens", True), input_type="boolean",
+            value=sb_config_data.get("show_in_tokens", True), input_type="boolean",
         ),
         SettingOption(
             key="show_out_tokens", text="Total completion tokens",
-            value=sb_config.get("show_out_tokens", True), input_type="boolean",
+            value=sb_config_data.get("show_out_tokens", True), input_type="boolean",
         ),
         SettingOption(
             key="show_total_tokens", text="Total session tokens",
-            value=sb_config.get("show_total_tokens", True), input_type="boolean",
+            value=sb_config_data.get("show_total_tokens", True), input_type="boolean",
         ),
         SettingOption(
             key="show_cost", text="Session cost",
-            value=sb_config.get("show_cost", True), input_type="boolean",
+            value=sb_config_data.get("show_cost", True), input_type="boolean",
         ),
     ]
 
@@ -547,115 +655,117 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
         title="Configuration",
     )
 
-    changes = selector.run()
-
-    # Selector manages its own rendering; just print a separator on dismissal
-    console.print()
-
-    if changes is None:
-        console.print("[dim]Cancelled.[/dim]")
-        return CommandResult(status="handled")
-
-    if not changes:
-        console.print("[dim]No changes made.[/dim]")
-        return CommandResult(status="handled")
-
-    # Apply changes
-    change_lines = []
-    sb_changes = {}
+    # Build the continuation closure that runs after the user finishes
+    # interacting with the selector in the main prompt toolbar.
     sb_labels = {s.key: s.text for s in sb_settings}
-    for key, value in changes.items():
-        if key == "debug":
-            debug_mode_container['debug'] = value
-            state = "enabled" if value else "disabled"
-            change_lines.append(f"  Debug Mode: {state}")
-        elif key == "logging":
-            chat_manager.set_logging(value)
-            state = "enabled" if value else "disabled"
-            change_lines.append(f"  Conversation Logging: {state}")
-        elif key == "approve":
-            chat_manager.approve_mode = value
-            labels = {"safe": "SAFE", "accept_edits": "ACCEPT EDITS", "danger": "DANGER"}
-            change_lines.append(f"  Approval Mode: {labels.get(value, value.upper())}")
-            if value == "danger":
-                console.print()
-                console.print("[bold red on default]  WARNING: DANGER MODE ENABLED[/bold red on default]")
-                console.print("[bold red on default]  All commands will be auto-approved.[/bold red on default]")
-                console.print("[bold red on default]  Dangerous git commands are still blocked.[/bold red on default]")
-                console.print("[bold yellow on default]  Use at your own risk![/bold yellow on default]")
-                console.print()
-        elif key == "memory_enabled":
-            config.update_memory_settings({"enabled": value})
-            state = "enabled" if value else "disabled"
-            change_lines.append(f"  Memory: {state}")
-        elif key == "compact_trigger_tokens":
-            context_settings.compact_trigger_tokens = int(value)
-            change_lines.append(f"  Compaction Threshold: {value:,} tokens")
-        elif key == "enable_tool_compaction":
-            context_settings.tool_compaction.enable_per_message_compaction = value
-            state = "enabled" if value else "disabled"
-            change_lines.append(f"  Per-Message Tool Compaction: {state}")
-        elif key == "uncompacted_tail_tokens":
-            context_settings.tool_compaction.uncompacted_tail_tokens = int(value)
-            change_lines.append(f"  Uncompacted Tail Tokens: {value:,}")
-        elif key == "min_tool_blocks":
-            context_settings.tool_compaction.min_tool_blocks = int(value)
-            change_lines.append(f"  Min Tool Blocks Preserved: {value}")
-        elif key in sb_labels:
-            sb_changes[key] = value
-            state = "ON" if value else "OFF"
-            change_lines.append(f"  {sb_labels[key]}: {state}")
 
-    # Persist context setting changes to config
-    ctx_changes = {k: v for k, v in changes.items() if k in ("compact_trigger_tokens", "enable_tool_compaction", "uncompacted_tail_tokens", "min_tool_blocks")}
-    if ctx_changes:
-        try:
-            cfg_data = config_manager.load(force_reload=True)
-            if "CONTEXT_SETTINGS" not in cfg_data:
-                cfg_data["CONTEXT_SETTINGS"] = {}
-            if "tool_compaction" not in cfg_data["CONTEXT_SETTINGS"]:
-                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"] = {}
-            if "compact_trigger_tokens" in ctx_changes:
-                cfg_data["CONTEXT_SETTINGS"]["compact_trigger_tokens"] = int(ctx_changes["compact_trigger_tokens"])
-            if "enable_tool_compaction" in ctx_changes:
-                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["enable_per_message_compaction"] = ctx_changes["enable_tool_compaction"]
-            if "uncompacted_tail_tokens" in ctx_changes:
-                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["uncompacted_tail_tokens"] = int(ctx_changes["uncompacted_tail_tokens"])
-            if "min_tool_blocks" in ctx_changes:
-                cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["min_tool_blocks"] = int(ctx_changes["min_tool_blocks"])
-            config_manager.save(cfg_data)
-        except Exception as e:
-            console.print(f"[red]Failed to save context settings: {e}[/red]")
+    def _config_continuation(sel):
+        """Apply config changes after toolbar interaction resolves."""
+        changes = sel.result()
+        console.print()
 
-    # Persist status bar changes to config
-    if sb_changes:
-        config.update_status_bar_settings(sb_changes)
-        try:
-            cfg_data = config_manager.load(force_reload=True)
-            if "STATUS_BAR_SETTINGS" not in cfg_data:
-                cfg_data["STATUS_BAR_SETTINGS"] = {}
-            cfg_data["STATUS_BAR_SETTINGS"].update(sb_changes)
-            config_manager.save(cfg_data)
-        except Exception as e:
-            console.print(f"[red]Failed to save status bar settings: {e}[/red]")
+        if sel.was_cancelled() or changes is None:
+            console.print("[dim]Cancelled.[/dim]")
+            return
 
-    # Persist memory setting to config
-    if "memory_enabled" in changes:
-        try:
-            cfg_data = config_manager.load(force_reload=True)
-            if "MEMORY_SETTINGS" not in cfg_data:
-                cfg_data["MEMORY_SETTINGS"] = {}
-            cfg_data["MEMORY_SETTINGS"]["enabled"] = changes["memory_enabled"]
-            config_manager.save(cfg_data)
-        except Exception as e:
-            console.print(f"[red]Failed to save memory settings: {e}[/red]")
+        if not changes:
+            console.print("[dim]No changes made.[/dim]")
+            return
 
-    # Display summary
-    console.print(f"[green]Settings updated:[/green]")
-    for line in change_lines:
-        console.print(line)
+        change_lines = []
+        sb_changes = {}
+        for key, value in changes.items():
+            if key == "debug":
+                debug_mode_container['debug'] = value
+                state = "enabled" if value else "disabled"
+                change_lines.append(f"  Debug Mode: {state}")
+            elif key == "logging":
+                chat_manager.set_logging(value)
+                state = "enabled" if value else "disabled"
+                change_lines.append(f"  Conversation Logging: {state}")
+            elif key == "approve":
+                chat_manager.approve_mode = value
+                labels = {"safe": "SAFE", "accept_edits": "ACCEPT EDITS", "danger": "DANGER"}
+                change_lines.append(f"  Approval Mode: {labels.get(value, value.upper())}")
+                if value == "danger":
+                    console.print()
+                    console.print("[bold red on default]  WARNING: DANGER MODE ENABLED[/bold red on default]")
+                    console.print("[bold red on default]  All commands will be auto-approved.[/bold red on default]")
+                    console.print("[bold red on default]  Dangerous git commands are still blocked.[/bold red on default]")
+                    console.print("[bold yellow on default]  Use at your own risk![/bold yellow on default]")
+                    console.print()
+            elif key == "memory_enabled":
+                config.update_memory_settings({"enabled": value})
+                state = "enabled" if value else "disabled"
+                change_lines.append(f"  Memory: {state}")
+            elif key == "compact_trigger_tokens":
+                context_settings.compact_trigger_tokens = int(value)
+                change_lines.append(f"  Compaction Threshold: {value:,} tokens")
+            elif key == "enable_tool_compaction":
+                context_settings.tool_compaction.enable_per_message_compaction = value
+                state = "enabled" if value else "disabled"
+                change_lines.append(f"  Per-Message Tool Compaction: {state}")
+            elif key == "uncompacted_tail_tokens":
+                context_settings.tool_compaction.uncompacted_tail_tokens = int(value)
+                change_lines.append(f"  Uncompacted Tail Tokens: {value:,}")
+            elif key == "min_tool_blocks":
+                context_settings.tool_compaction.min_tool_blocks = int(value)
+                change_lines.append(f"  Min Tool Blocks Preserved: {value}")
+            elif key in sb_labels:
+                sb_changes[key] = value
+                state = "ON" if value else "OFF"
+                change_lines.append(f"  {sb_labels[key]}: {state}")
 
-    return CommandResult(status="handled")
+        # Persist context setting changes to config
+        ctx_changes = {k: v for k, v in changes.items() if k in ("compact_trigger_tokens", "enable_tool_compaction", "uncompacted_tail_tokens", "min_tool_blocks")}
+        if ctx_changes:
+            try:
+                cfg_data = config_manager.load(force_reload=True)
+                if "CONTEXT_SETTINGS" not in cfg_data:
+                    cfg_data["CONTEXT_SETTINGS"] = {}
+                if "tool_compaction" not in cfg_data["CONTEXT_SETTINGS"]:
+                    cfg_data["CONTEXT_SETTINGS"]["tool_compaction"] = {}
+                if "compact_trigger_tokens" in ctx_changes:
+                    cfg_data["CONTEXT_SETTINGS"]["compact_trigger_tokens"] = int(ctx_changes["compact_trigger_tokens"])
+                if "enable_tool_compaction" in ctx_changes:
+                    cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["enable_per_message_compaction"] = ctx_changes["enable_tool_compaction"]
+                if "uncompacted_tail_tokens" in ctx_changes:
+                    cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["uncompacted_tail_tokens"] = int(ctx_changes["uncompacted_tail_tokens"])
+                if "min_tool_blocks" in ctx_changes:
+                    cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["min_tool_blocks"] = int(ctx_changes["min_tool_blocks"])
+                config_manager.save(cfg_data)
+            except Exception as e:
+                console.print(f"[red]Failed to save context settings: {e}[/red]")
+
+        # Persist status bar changes to config
+        if sb_changes:
+            config.update_status_bar_settings(sb_changes)
+            try:
+                cfg_data = config_manager.load(force_reload=True)
+                if "STATUS_BAR_SETTINGS" not in cfg_data:
+                    cfg_data["STATUS_BAR_SETTINGS"] = {}
+                cfg_data["STATUS_BAR_SETTINGS"].update(sb_changes)
+                config_manager.save(cfg_data)
+            except Exception as e:
+                console.print(f"[red]Failed to save status bar settings: {e}[/red]")
+
+        # Persist memory setting to config
+        if "memory_enabled" in changes:
+            try:
+                cfg_data = config_manager.load(force_reload=True)
+                if "MEMORY_SETTINGS" not in cfg_data:
+                    cfg_data["MEMORY_SETTINGS"] = {}
+                cfg_data["MEMORY_SETTINGS"]["enabled"] = changes["memory_enabled"]
+                config_manager.save(cfg_data)
+            except Exception as e:
+                console.print(f"[red]Failed to save memory settings: {e}[/red]")
+
+        # Display summary
+        console.print("[green]Settings updated:[/green]")
+        for line in change_lines:
+            console.print(line)
+
+    return _setting_selector_handoff(chat_manager, selector, _config_continuation)
 
 
 def _local_server_setting_options(model_path: str):
@@ -752,16 +862,10 @@ def _handle_clear(chat_manager, console, debug_mode_container, args, cron_schedu
     return CommandResult(status="handled")
 
 
-def _open_provider_editor(chat_manager, console, provider):
-    """Open interactive setting editor for a specific provider.
+def _build_provider_editor_selector(console, provider):
+    """Build a SettingSelector for editing a provider's settings.
 
-    Args:
-        chat_manager: ChatManager instance
-        console: Rich console for output
-        provider: Provider name (e.g. 'openrouter', 'glm')
-
-    Returns:
-        True if settings were saved, False if cancelled
+    Returns a selector suitable for toolbar handoff (no .run() call).
     """
     from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
 
@@ -769,7 +873,6 @@ def _open_provider_editor(chat_manager, console, provider):
     config_data = config_manager.load()
     settings = []
 
-    # Model setting
     current_model = cfg.get('model') or cfg.get('api_model') or ''
     model_label = "Model path" if provider == "local" else "Model"
     settings.append(SettingOption(
@@ -777,19 +880,14 @@ def _open_provider_editor(chat_manager, console, provider):
         value=current_model, input_type="text",
     ))
 
-    # API key (not for local or bone — bone manages its own key via /signup)
     if provider not in ("local", "bone"):
         current_key = cfg.get('api_key', '')
-        # Show masked value, store actual in description for comparison
         masked = (current_key[:8] + "...") if len(current_key) > 8 else (current_key or "")
         settings.append(SettingOption(
             key="api_key", text="API Key",
             value=masked, input_type="text",
             description=current_key,
         ))
-
-    # Cost in/out (not for local or bone — costs are server-side)
-    if provider not in ("local", "bone"):
         model_prices = config_data.get("MODEL_PRICES", {})
         existing = model_prices.get(current_model, {})
         settings.append(SettingOption(
@@ -812,18 +910,28 @@ def _open_provider_editor(chat_manager, console, provider):
             settings=_local_server_setting_options(current_model),
         ))
 
-    selector = SettingSelector(
+    return SettingSelector(
         categories=categories,
         title=f"Configure {provider_label}",
     )
 
-    changes = selector.run()
 
-    if changes is None:
-        console.print("[dim]No changes made.[/dim]")
-        return False
+def _apply_provider_changes(chat_manager, console, provider, changes):
+    """Apply a set of provider setting changes.
 
-    # Apply changes
+    Args:
+        chat_manager: ChatManager instance
+        console: Rich console
+        provider: Provider name
+        changes: dict of change key -> new value (from selector)
+
+    Returns:
+        True if changes were applied, False if cancelled/no-op.
+    """
+    cfg = config.get_provider_config(provider)
+    config_data = config_manager.load()
+    current_model = cfg.get('model') or cfg.get('api_model') or ''
+
     change_lines = []
 
     if "model" in changes and changes["model"]:
@@ -834,10 +942,8 @@ def _open_provider_editor(chat_manager, console, provider):
             console.print(f"[red]Failed to set model: {e}[/red]")
 
     if "api_key" in changes and changes["api_key"]:
-        # Don't re-save if the user didn't actually change it (masked display)
         api_key_input = changes["api_key"]
         original_key = cfg.get('api_key', '')
-        # Detect if user typed a real key (longer than masked display or different)
         if api_key_input != original_key and not api_key_input.endswith("..."):
             try:
                 config_manager.set_api_key(provider, api_key_input)
@@ -849,10 +955,9 @@ def _open_provider_editor(chat_manager, console, provider):
     if "cost_in" in changes or "cost_out" in changes:
         model_name = changes.get("model") or current_model
         if model_name:
-            # Use changed values, falling back to originals (not 0.0)
             existing_prices = config_data.get("MODEL_PRICES", {}).get(model_name, {})
-            cost_in = changes.get("cost_in", existing_prices.get("cost_in", 0.0))
-            cost_out = changes.get("cost_out", existing_prices.get("cost_out", 0.0))
+            cost_in = changes.get("cost_in", existing_prices.get('cost_in', 0.0))
+            cost_out = changes.get("cost_out", existing_prices.get('cost_out', 0.0))
             try:
                 config_manager.set_model_price(model_name, cost_in, cost_out)
                 change_lines.append(f"  Cost: ${cost_in:.2f}/${cost_out:.2f} per 1M tokens")
@@ -876,10 +981,9 @@ def _open_provider_editor(chat_manager, console, provider):
             config_manager.save_local_model_settings(target_model, existing_settings)
             change_lines.append(f"  Local server settings: {len(local_changes)} updated")
 
-    # Reload config and switch provider
     config_manager.set_provider(provider)
     chat_manager.reload_config()
-    result = chat_manager.switch_provider(provider)
+    chat_manager.switch_provider(provider)
 
     if change_lines:
         console.print(f"[green]{provider} updated:[/green]")
@@ -923,7 +1027,7 @@ def _handle_provider(chat_manager, console, debug_mode_container, args, cron_sch
 
         return CommandResult(status="handled")
     else:
-        # Show all providers as a radio-button list (same style as model selector)
+        # Show all providers as a radio-button list (toolbar handoff)
         from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
 
         provider_options = []
@@ -948,18 +1052,28 @@ def _handle_provider(chat_manager, console, debug_mode_container, args, cron_sch
             title="",
             show_save=False,
         )
-        result = selector.run()
 
-        if result is None:
-            console.print("[dim]Cancelled.[/dim]")
-            return CommandResult(status="handled")
+        # Step-1 continuation: after provider selection, hand off step-2 (editor)
+        def _provider_selection_continuation(sel):
+            if sel.was_cancelled() or sel.result() is None:
+                console.print("[dim]Cancelled.[/dim]")
+                return
+            provider = sel.result().get('provider', current)
+            editor_selector = _build_provider_editor_selector(console, provider)
 
-        # Get selected provider (from changes, or current if unchanged)
-        provider = result.get('provider', current)
+            def _provider_editor_continuation(editor_sel):
+                changes = editor_sel.result()
+                if editor_sel.was_cancelled() or changes is None:
+                    console.print("[dim]Cancelled.[/dim]")
+                    return
+                _apply_provider_changes(chat_manager, console, provider, changes)
 
-    # Open interactive editor for the selected provider
-    _open_provider_editor(chat_manager, console, provider)
+            chat_manager._setting_selector = editor_selector
+            chat_manager._setting_continuation = _provider_editor_continuation
 
+        return _setting_selector_handoff(chat_manager, selector, _provider_selection_continuation)
+
+    # _handle_provider <name> — direct switch, already handled above
     return CommandResult(status="handled")
 
 
@@ -1019,13 +1133,27 @@ def _handle_model(chat_manager, console, debug_mode_container, args, cron_schedu
             title="",
             show_save=False,
         )
-        result = selector.run()
-        
-        if result is None or not isinstance(result, dict) or 'model' not in result:
-            console.print("[dim]Cancelled.[/dim]")
-            return CommandResult(status="handled")
-        
-        model = result['model']
+
+        def _model_continuation(sel):
+            result = sel.result()
+            if sel.was_cancelled() or result is None or not isinstance(result, dict) or 'model' not in result:
+                console.print("[dim]Cancelled.[/dim]")
+                return
+            model = result["model"]
+            try:
+                backup_path = config_manager.set_model(current_provider, model)
+                if current_provider == "local":
+                    config_manager.init_local_model_settings(model)
+                console.print(f"[green]Model set to '{model}' for {current_provider} provider[/green]")
+                if backup_path:
+                    console.print(f"[dim]Saved to config.json (backup: {backup_path.name})[/dim]")
+                chat_manager.reload_config()
+            except ValueError as e:
+                console.print(f"[red]Error: {e}[/red]")
+            except Exception as e:
+                console.print(f"[red]Failed to set model: {e}[/red]")
+
+        return _setting_selector_handoff(chat_manager, selector, _model_continuation)
     elif not args:
         # Show current model for current provider
         cfg = config.get_provider_config(current_provider)
@@ -1887,41 +2015,44 @@ def _handle_account(chat_manager, console, debug_mode_container, args, cron_sche
     return CommandResult(status="handled")
 
 
-def _send_reset_key_email(console, api_base, email):
+def _send_reset_key_email(chat_manager, console, api_base, email):
     """Shared logic for sending a new API key via email.
 
     Used by both /login (path 2: user lost key) and /reset-key.
+    Uses _confirm_handoff for the confirmation step to avoid blocking Prompt.ask.
     Returns CommandResult.
     """
     console.print(f"[#5F9EA0]Sending new API key to {email}...[/#5F9EA0]")
     console.print("[dim]This will create a new key and email it to you. Old keys remain valid.[/dim]")
     console.print()
 
-    from rich.prompt import Confirm
-    if not Confirm.ask("Send a new API key to this email?", default=False):
-        console.print("[dim]Cancelled.[/dim]")
+    def _send_key_continuation(confirmed):
+        if not confirmed:
+            console.print("[dim]Cancelled.[/dim]")
+            console.print()
+            return CommandResult(status="handled")
+
+        status, data = _call_proxy_api("POST", "/v1/auth/reset-key", api_base, body={"email": email})
+
+        if status == 429:
+            detail = (data or {}).get("detail", "Too many requests.") if data else "Too many requests."
+            console.print(f"[yellow]{detail}[/yellow]")
+            console.print()
+            return CommandResult(status="handled")
+
+        if status != 200 and status != 201:
+            detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
+            console.print(f"[red]Failed to send: {detail}[/red]")
+            console.print()
+            return CommandResult(status="handled")
+
+        message = (data or {}).get("message", "Check your email for the new API key.")
+        console.print(f"[green]{message}[/green]")
+        console.print("[dim]Once you receive the key, run: [bold #5F9EA0]/key <your-new-key>[/bold #5F9EA0][/dim]")
         console.print()
         return CommandResult(status="handled")
 
-    status, data = _call_proxy_api("POST", "/v1/auth/reset-key", api_base, body={"email": email})
-
-    if status == 429:
-        detail = (data or {}).get("detail", "Too many requests.") if data else "Too many requests."
-        console.print(f"[yellow]{detail}[/yellow]")
-        console.print()
-        return CommandResult(status="handled")
-
-    if status != 200 and status != 201:
-        detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
-        console.print(f"[red]Failed to send: {detail}[/red]")
-        console.print()
-        return CommandResult(status="handled")
-
-    message = (data or {}).get("message", "Check your email for the new API key.")
-    console.print(f"[green]{message}[/green]")
-    console.print("[dim]Once you receive the key, run: [bold #5F9EA0]/key <your-new-key>[/bold #5F9EA0][/dim]")
-    console.print()
-    return CommandResult(status="handled")
+    return _confirm_handoff(chat_manager, "Send a new API key to this email?", _send_key_continuation)
 
 
 def _handle_login(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
@@ -1950,76 +2081,86 @@ def _handle_login(chat_manager, console, debug_mode_container, args, cron_schedu
 
     # Check if already logged in to a different account
     api_key, api_base = _get_proxy_config(chat_manager)
+
+    def _start_key_flow():
+        """Start the 'do you have your API key?' handoff chain."""
+        console.print()
+        console.print(f"[bold #5F9EA0]bone-agent Login[/bold #5F9EA0]")
+        console.print(f"[dim]Logging in as {email}[/dim]")
+        console.print()
+
+        def _key_text_continuation(raw_key):
+            """Handle API key text input — validate and save."""
+            if not raw_key.strip():
+                console.print("[yellow]No key entered. Aborted.[/yellow]")
+                console.print()
+                return CommandResult(status="handled")
+
+            raw_key = raw_key.strip()
+
+            console.print("[#5F9EA0]Validating API key...[/#5F9EA0]")
+            status, data = _call_proxy_api("GET", "/v1/auth/account", api_base, api_key=raw_key)
+
+            if status == 200 and data and data.get("email", "").lower() == email.lower():
+                # Valid key — save and switch
+                try:
+                    config_manager.set_api_key("bone", raw_key)
+                except Exception as e:
+                    console.print(f"[yellow]Could not save API key to config: {e}[/yellow]")
+                    console.print(f"[dim]Use [bold #5F9EA0]/key {raw_key}[/bold #5F9EA0] to set it manually.[/dim]")
+
+                try:
+                    config_manager.set_provider("bone")
+                    chat_manager.reload_config()
+                    chat_manager.switch_provider("bone")
+                    console.print("[green]Switched to bone provider.[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Could not auto-switch to bone: {e}[/yellow]")
+                    console.print("[dim]Run [bold #5F9EA0]/provider bone[/bold #5F9EA0] to switch manually.[/dim]")
+
+                plan = data.get("plan", "free")
+                verified = "yes" if data.get("verified") else "no"
+                console.print(f"[green]Logged in as {email}[/green] (plan: {plan}, verified: {verified})")
+                console.print()
+                return CommandResult(status="handled")
+
+            if status in (401, 403):
+                console.print("[red]Invalid API key.[/red]")
+                console.print("[dim]Double-check your key and try again, or say 'no' to get a new one emailed.[/dim]")
+            else:
+                detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
+                console.print(f"[red]Validation failed: {detail}[/red]")
+            console.print()
+            return CommandResult(status="handled")
+
+        def _has_key_continuation(confirmed):
+            """Handle the 'do you have your API key?' confirmation."""
+            if not confirmed:
+                return _send_reset_key_email(chat_manager, console, api_base, email)
+            return _text_input_handoff(chat_manager, "API key", _key_text_continuation)
+
+        return _confirm_handoff(chat_manager, "Do you have your API key?", _has_key_continuation)
+
     if api_key:
         try:
             acct_status, acct_data = _call_proxy_api("GET", "/v1/auth/account", api_base, api_key=api_key)
             if acct_status == 200 and acct_data:
                 current_email = acct_data.get("email", "")
                 if current_email and current_email.lower() != email.lower():
-                    from rich.prompt import Confirm
                     console.print(f"[yellow]Already logged in as {current_email}[/yellow]")
-                    if not Confirm.ask(f"Switch to {email}?", default=False):
-                        console.print("[dim]Cancelled.[/dim]")
-                        console.print()
-                        return CommandResult(status="handled")
+
+                    def _switch_continuation(confirmed):
+                        if not confirmed:
+                            console.print("[dim]Cancelled.[/dim]")
+                            console.print()
+                            return CommandResult(status="handled")
+                        return _start_key_flow()
+
+                    return _confirm_handoff(chat_manager, f"Switch to {email}?", _switch_continuation)
         except Exception:
             pass  # If we can't check, just proceed
 
-    console.print()
-    console.print(f"[bold #5F9EA0]bone-agent Login[/bold #5F9EA0]")
-    console.print(f"[dim]Logging in as {email}[/dim]")
-    console.print()
-
-    from rich.prompt import Confirm, Prompt
-
-    if Confirm.ask("Do you have your API key?", default=True):
-        # Path 1: user has their key — validate and save
-        raw_key = Prompt.ask("API key")
-
-        if not raw_key.strip():
-            console.print("[yellow]No key entered. Aborted.[/yellow]")
-            console.print()
-            return CommandResult(status="handled")
-
-        raw_key = raw_key.strip()
-
-        console.print("[#5F9EA0]Validating API key...[/#5F9EA0]")
-        status, data = _call_proxy_api("GET", "/v1/auth/account", api_base, api_key=raw_key)
-
-        if status == 200 and data and data.get("email", "").lower() == email.lower():
-            # Valid key — save and switch
-            try:
-                config_manager.set_api_key("bone", raw_key)
-            except Exception as e:
-                console.print(f"[yellow]Could not save API key to config: {e}[/yellow]")
-                console.print(f"[dim]Use [bold #5F9EA0]/key {raw_key}[/bold #5F9EA0] to set it manually.[/dim]")
-
-            try:
-                config_manager.set_provider("bone")
-                chat_manager.reload_config()
-                chat_manager.switch_provider("bone")
-                console.print("[green]Switched to bone provider.[/green]")
-            except Exception as e:
-                console.print(f"[yellow]Could not auto-switch to bone: {e}[/yellow]")
-                console.print("[dim]Run [bold #5F9EA0]/provider bone[/bold #5F9EA0] to switch manually.[/dim]")
-
-            plan = data.get("plan", "free")
-            verified = "yes" if data.get("verified") else "no"
-            console.print(f"[green]Logged in as {email}[/green] (plan: {plan}, verified: {verified})")
-            console.print()
-            return CommandResult(status="handled")
-
-        if status in (401, 403):
-            console.print("[red]Invalid API key.[/red]")
-            console.print("[dim]Double-check your key and try again, or say 'no' to get a new one emailed.[/dim]")
-        else:
-            detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
-            console.print(f"[red]Validation failed: {detail}[/red]")
-        console.print()
-        return CommandResult(status="handled")
-
-    # Path 2: user lost their key — email a new one
-    return _send_reset_key_email(console, api_base, email)
+    return _start_key_flow()
 
 
 
@@ -2097,7 +2238,7 @@ def _handle_reset_key(chat_manager, console, debug_mode_container, args, cron_sc
         console.print()
         return CommandResult(status="handled")
 
-    return _send_reset_key_email(console, api_base, email)
+    return _send_reset_key_email(chat_manager, console, api_base, email)
 
 
 def _handle_manage(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
@@ -2227,50 +2368,51 @@ def _handle_upgrade(chat_manager, console, debug_mode_container, args, cron_sche
         show_save=False,
     )
 
-    result = selector.run()
+    def _upgrade_continuation(sel):
+        result = sel.result()
+        if sel.was_cancelled() or result is None:
+            console.print("[dim]Cancelled.[/dim]")
+            console.print()
+            return
 
-    if result is None:
-        console.print("[dim]Cancelled.[/dim]")
+        target = result.get("plan", first_upgrade)
+
+        # Upgrade: open Stripe Checkout
+        console.print(f"[#5F9EA0]Opening checkout for {target.capitalize()}...[/#5F9EA0]")
+
+        status, data = _call_proxy_api(
+            "POST", "/v1/billing/checkout", api_base,
+            body={
+                "plan": target,
+                "success_url": "https://vmcode.dev",
+                "cancel_url": "https://vmcode.dev",
+            },
+            api_key=api_key,
+        )
+        action = "create checkout session"
+
+        if status == 200 and data and "url" in data:
+            url = data["url"]
+        else:
+            detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
+            console.print(f"[red]Failed to {action}: {detail}[/red]")
+            console.print()
+            return
+
+        # Open in browser
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            console.print("[green]Opened in browser[/green]")
+        except Exception:
+            pass
+
         console.print()
-        return CommandResult(status="handled")
-
-    target = result.get("plan", first_upgrade)
-
-    # Upgrade: open Stripe Checkout
-    console.print(f"[#5F9EA0]Opening checkout for {target.capitalize()}...[/#5F9EA0]")
-
-    status, data = _call_proxy_api(
-        "POST", "/v1/billing/checkout", api_base,
-        body={
-            "plan": target,
-            "success_url": "https://vmcode.dev",
-            "cancel_url": "https://vmcode.dev",
-        },
-        api_key=api_key,
-    )
-    action = "create checkout session"
-
-    if status == 200 and data and "url" in data:
-        url = data["url"]
-    else:
-        detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
-        console.print(f"[red]Failed to {action}: {detail}[/red]")
+        console.print("[#5F9EA0]Or copy this link:[/#5F9EA0]")
+        console.print(f"  [bold]{url}[/bold]")
         console.print()
-        return CommandResult(status="handled")
 
-    # Open in browser
-    try:
-        import webbrowser
-        webbrowser.open(url)
-        console.print("[green]Opened in browser[/green]")
-    except Exception:
-        pass
-
-    console.print()
-    console.print("[#5F9EA0]Or copy this link:[/#5F9EA0]")
-    console.print(f"  [bold]{url}[/bold]")
-    console.print()
-    return CommandResult(status="handled")
+    return _setting_selector_handoff(chat_manager, selector, _upgrade_continuation)
 
 
 def _handle_rotate_key(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
@@ -2289,56 +2431,58 @@ def _handle_rotate_key(chat_manager, console, debug_mode_container, args, cron_s
     console.print("[dim]Make sure you can save the new key before proceeding.[/dim]")
     console.print()
 
-    from rich.prompt import Confirm
-    if not Confirm.ask("Rotate your API key?", default=False):
-        console.print("[dim]Cancelled.[/dim]")
+    def _rotate_continuation(confirmed):
+        if not confirmed:
+            console.print("[dim]Cancelled.[/dim]")
+            console.print()
+            return CommandResult(status="handled")
+
+        console.print("[#5F9EA0]Rotating API key...[/#5F9EA0]")
+        status, data = _call_proxy_api(
+            "POST", "/v1/auth/rotate-key", api_base,
+            body={},
+            api_key=api_key,
+        )
+
+        if status != 200 or not data or "api_key" not in data:
+            detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
+            console.print(f"[red]Failed to rotate key: {detail}[/red]")
+            console.print()
+            return CommandResult(status="handled")
+
+        new_key = data["api_key"]
+
+        # Display new key
+        console.print()
+        console.print("[bold green]API key rotated successfully.[/bold green]")
+        console.print("[bold red]Your old key is no longer valid.[/bold red]")
+        console.print()
+        console.print("[bold #5F9EA0]Your new API key (save this — it won't be shown again):[/bold #5F9EA0]")
+        console.print(f"[bold white on grey23]  {new_key}  [/bold white on grey23]")
+        console.print()
+
+        # Save to config
+        try:
+            config_manager.set_api_key("bone", new_key)
+            console.print("[green]New key saved to config.[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Could not save to config: {e}[/yellow]")
+            console.print(f"[dim]Use [bold #5F9EA0]/key {new_key}[/bold #5F9EA0] to set it manually.[/dim]")
+
+        # Backup to file
+        try:
+            key_path = Path.home() / ".bone" / "api_key.txt"
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            key_path.write_text(new_key)
+            key_path.chmod(0o600)
+            console.print(f"[dim]Key backed up to {key_path}[/dim]")
+        except Exception:
+            pass
+
         console.print()
         return CommandResult(status="handled")
 
-    console.print("[#5F9EA0]Rotating API key...[/#5F9EA0]")
-    status, data = _call_proxy_api(
-        "POST", "/v1/auth/rotate-key", api_base,
-        body={},
-        api_key=api_key,
-    )
-
-    if status != 200 or not data or "api_key" not in data:
-        detail = (data or {}).get("detail", "Unknown error") if data else "Network error"
-        console.print(f"[red]Failed to rotate key: {detail}[/red]")
-        console.print()
-        return CommandResult(status="handled")
-
-    new_key = data["api_key"]
-
-    # Display new key
-    console.print()
-    console.print("[bold green]API key rotated successfully.[/bold green]")
-    console.print("[bold red]Your old key is no longer valid.[/bold red]")
-    console.print()
-    console.print("[bold #5F9EA0]Your new API key (save this — it won't be shown again):[/bold #5F9EA0]")
-    console.print(f"[bold white on grey23]  {new_key}  [/bold white on grey23]")
-    console.print()
-
-    # Save to config
-    try:
-        config_manager.set_api_key("bone", new_key)
-        console.print("[green]New key saved to config.[/green]")
-    except Exception as e:
-        console.print(f"[yellow]Could not save to config: {e}[/yellow]")
-        console.print(f"[dim]Use [bold #5F9EA0]/key {new_key}[/bold #5F9EA0] to set it manually.[/dim]")
-
-    # Backup to file
-    try:
-        key_path = Path.home() / ".bone" / "api_key.txt"
-        key_path.parent.mkdir(parents=True, exist_ok=True)
-        key_path.write_text(new_key)
-        key_path.chmod(0o600)
-        console.print(f"[dim]Key backed up to {key_path}[/dim]")
-    except Exception:
-        pass
-
-    console.print()
-    return CommandResult(status="handled")
+    return _confirm_handoff(chat_manager, "Rotate your API key?", _rotate_continuation)
 
 
 def _persist_obsidian_config(console, **kwargs):
@@ -2530,29 +2674,29 @@ def _handle_obsidian(chat_manager, console, debug_mode_container, args, cron_sch
         title="Obsidian Integration",
     )
 
-    changes = selector.run()
+    def _obsidian_continuation(sel):
+        changes = sel.result()
+        if sel.was_cancelled() or changes is None:
+            console.print("[dim]Cancelled.[/dim]")
+            return
 
-    if changes is None:
-        console.print("[dim]Cancelled.[/dim]")
-        return CommandResult(status="handled")
+        if not changes:
+            console.print("[dim]No changes made.[/dim]")
+            return
 
-    if not changes:
-        console.print("[dim]No changes made.[/dim]")
-        return CommandResult(status="handled")
+        change_lines = _apply_obsidian_changes(chat_manager, console, obsidian_settings, changes)
 
-    change_lines = _apply_obsidian_changes(chat_manager, console, obsidian_settings, changes)
+        if change_lines:
+            # Show active status after changes
+            is_active = obsidian_settings.is_active()
+            status_label = "[green]ACTIVE[/green]" if is_active else "[dim]inactive[/dim]"
+            console.print(f"[green]Obsidian settings updated:[/green] ({status_label})")
+            for line in change_lines:
+                console.print(line)
+        else:
+            console.print("[dim]No changes applied.[/dim]")
 
-    if change_lines:
-        # Show active status after changes
-        is_active = obsidian_settings.is_active()
-        status_label = "[green]ACTIVE[/green]" if is_active else "[dim]inactive[/dim]"
-        console.print(f"[green]Obsidian settings updated:[/green] ({status_label})")
-        for line in change_lines:
-            console.print(line)
-    else:
-        console.print("[dim]No changes applied.[/dim]")
-
-    return CommandResult(status="handled")
+    return _setting_selector_handoff(chat_manager, selector, _obsidian_continuation)
 
 
 def _persist_tool_visibility(console):
@@ -2816,66 +2960,66 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
         title="Tool Settings",
     )
 
-    changes = selector.run()
+    def _tools_continuation(sel):
+        changes = sel.result()
+        if sel.was_cancelled() or changes is None:
+            console.print("[dim]Cancelled.[/dim]")
+            return
 
-    if changes is None:
-        console.print("[dim]Cancelled.[/dim]")
-        return CommandResult(status="handled")
+        if not changes:
+            console.print("[dim]No changes made.[/dim]")
+            return
 
-    if not changes:
-        console.print("[dim]No changes made.[/dim]")
-        return CommandResult(status="handled")
+        # Apply changes
+        newly_disabled = []
+        newly_enabled = []
+        newly_hidden_skills = []
+        newly_visible_skills = []
+        for name, enabled in changes.items():
+            if name.startswith("skill:"):
+                skill_name = name.split(":", 1)[1]
+                if enabled and skill_name in hidden_skills:
+                    newly_visible_skills.append(skill_name)
+                elif not enabled and skill_name not in hidden_skills:
+                    newly_hidden_skills.append(skill_name)
+                continue
 
-    # Apply changes
-    newly_disabled = []
-    newly_enabled = []
-    newly_hidden_skills = []
-    newly_visible_skills = []
-    for name, enabled in changes.items():
-        if name.startswith("skill:"):
-            skill_name = name.split(":", 1)[1]
-            if enabled and skill_name in hidden_skills:
-                newly_visible_skills.append(skill_name)
-            elif not enabled and skill_name not in hidden_skills:
-                newly_hidden_skills.append(skill_name)
-            continue
+            if not enabled and name not in disabled:
+                ToolRegistry.disable(name)
+                newly_disabled.append(name)
+            elif enabled and name in disabled:
+                ToolRegistry.enable(name)
+                newly_enabled.append(name)
 
-        if not enabled and name not in disabled:
-            ToolRegistry.disable(name)
-            newly_disabled.append(name)
-        elif enabled and name in disabled:
-            ToolRegistry.enable(name)
-            newly_enabled.append(name)
+        tool_settings.disabled_tools = sorted(ToolRegistry.get_disabled())
+        next_hidden_skills = set(hidden_skills)
+        next_hidden_skills.update(newly_hidden_skills)
+        next_hidden_skills.difference_update(newly_visible_skills)
+        tool_settings.hidden_skills = sorted(next_hidden_skills)
 
-    tool_settings.disabled_tools = sorted(ToolRegistry.get_disabled())
-    next_hidden_skills = set(hidden_skills)
-    next_hidden_skills.update(newly_hidden_skills)
-    next_hidden_skills.difference_update(newly_visible_skills)
-    tool_settings.hidden_skills = sorted(next_hidden_skills)
+        _persist_tool_visibility(console)
 
-    _persist_tool_visibility(console)
+        # Summary
+        change_lines = []
+        for name in newly_disabled:
+            change_lines.append(f"  [yellow]Disabled:[/yellow] {name}")
+        for name in newly_enabled:
+            change_lines.append(f"  [green]Enabled:[/green] {name}")
+        for name in newly_hidden_skills:
+            change_lines.append(f"  [yellow]Hidden skill:[/yellow] {name}")
+        for name in newly_visible_skills:
+            change_lines.append(f"  [green]Visible skill:[/green] {name}")
 
-    # Summary
-    change_lines = []
-    for name in newly_disabled:
-        change_lines.append(f"  [yellow]Disabled:[/yellow] {name}")
-    for name in newly_enabled:
-        change_lines.append(f"  [green]Enabled:[/green] {name}")
-    for name in newly_hidden_skills:
-        change_lines.append(f"  [yellow]Hidden skill:[/yellow] {name}")
-    for name in newly_visible_skills:
-        change_lines.append(f"  [green]Visible skill:[/green] {name}")
+        if change_lines:
+            total_enabled = len(ToolRegistry.get_all())
+            total_disabled = len(ToolRegistry.get_disabled())
+            console.print(f"[green]Tools updated:[/green] ({total_enabled} enabled, {total_disabled} disabled)")
+            for line in change_lines:
+                console.print(line)
+        else:
+            console.print("[dim]No changes applied.[/dim]")
 
-    if change_lines:
-        total_enabled = len(ToolRegistry.get_all())
-        total_disabled = len(ToolRegistry.get_disabled())
-        console.print(f"[green]Tools updated:[/green] ({total_enabled} enabled, {total_disabled} disabled)")
-        for line in change_lines:
-            console.print(line)
-    else:
-        console.print("[dim]No changes applied.[/dim]")
-
-    return CommandResult(status="handled")
+    return _setting_selector_handoff(chat_manager, selector, _tools_continuation)
 
 
 def _handle_cd(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
@@ -3096,13 +3240,15 @@ def _handle_skills(chat_manager, console, debug_mode_container, args, cron_sched
                 console.print("[red]Usage: /skills remove <name>[/red]")
                 return CommandResult(status="handled")
             name = validate_skill_name(parts[1])
-            from rich.prompt import Confirm
-            if not Confirm.ask(f"Remove skill '{name}'?", default=False):
-                console.print("[dim]Cancelled.[/dim]")
-                return CommandResult(status="handled")
-            remove_skill(name)
-            console.print(f"[green]Removed skill '{name}'.[/green]")
-            return CommandResult(status="handled")
+
+            def _remove_skill_continuation(result):
+                if result is None or result is False:
+                    console.print("[dim]Cancelled.[/dim]")
+                    return
+                remove_skill(name)
+                console.print(f"[green]Removed skill '{name}'.[/green]")
+
+            return _confirm_handoff(chat_manager, f"Remove skill '{name}'?", _remove_skill_continuation)
 
         if subcmd == "edit":
             if len(parts) < 2:

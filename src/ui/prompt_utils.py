@@ -1,10 +1,17 @@
 """Shared prompt utilities for bone-agent CLI."""
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
 from llm.config import get_provider_config, APPROVE_MODE_LABELS, STATUS_BAR_SETTINGS
+from ui.toolbar_interactions import (
+    dispatch_toolbar_key,
+    get_active_interaction,
+    render_active_interaction,
+    render_pending_interaction,
+)
 
 
 def get_bottom_toolbar_text(chat_manager):
@@ -12,11 +19,35 @@ def get_bottom_toolbar_text(chat_manager):
 
     This is extracted from main.py for reuse in confirmation prompts.
 
+    When an active toolbar interaction is present (e.g. select_option,
+    tool approval), it takes priority and a compact status line is shown
+    below it.
+
     Args:
         chat_manager: ChatManager instance for state access
 
     Returns:
         HTML formatted toolbar text
+    """
+    # Active interaction: render interaction content + full normal status.
+    active_render = render_active_interaction(chat_manager)
+    if active_render is not None:
+        return HTML(active_render + _get_normal_status_text(chat_manager))
+
+    # Pending interaction: render prompt + full normal status.
+    pending_render = render_pending_interaction(chat_manager)
+    if pending_render is not None:
+        return HTML(pending_render + _get_normal_status_text(chat_manager))
+
+    # No interaction: normal status only.
+    return HTML(_get_normal_status_text(chat_manager))
+
+
+def _get_normal_status_text(chat_manager):
+    """Return the full normal status toolbar text (model, tokens, cost, swarm).
+
+    Returns a string starting with ``\\n`` suitable for concatenating after
+    interaction content and wrapping in ``HTML()``.
     """
     provider_name = chat_manager.client.provider
     model = get_provider_config(provider_name).get("model", "Unknown")
@@ -116,7 +147,7 @@ def get_bottom_toolbar_text(chat_manager):
     except Exception:
         pass  # Never crash the toolbar
     
-    return HTML(toolbar_text)
+    return toolbar_text
 
 
 TOOLBAR_STYLE = Style.from_dict({
@@ -126,8 +157,74 @@ TOOLBAR_STYLE = Style.from_dict({
 
 
 def setup_common_bindings(chat_manager):
-    """Create KeyBindings with shared logic (e.g., Shift+Tab for mode cycling)."""
+    """Create KeyBindings with shared logic (e.g., Shift+Tab for mode cycling).
+
+    Toolbar interaction key dispatch is registered first so it takes
+    priority over other bindings when an interaction is active.
+    """
     bindings = KeyBindings()
+
+    # --- Toolbar interaction key dispatch -----------------------------------
+    # Each handler is gated behind a Condition filter so it is only active
+    # while a toolbar interaction exists.  When no interaction is active the
+    # keys are untouched and prompt_toolkit's default behaviour (history
+    # navigation, submission, etc.) works normally.  This avoids the
+    # "registered handler swallows the key" problem — in prompt_toolkit a
+    # bound handler owns its key; simply returning does not fall through.
+
+    _interaction_active = Condition(lambda: get_active_interaction(chat_manager) is not None)
+
+    @bindings.add('up', filter=_interaction_active)
+    def _tb_up(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('down', filter=_interaction_active)
+    def _tb_down(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('left', filter=_interaction_active)
+    def _tb_left(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('right', filter=_interaction_active)
+    def _tb_right(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('enter', filter=_interaction_active)
+    def _tb_enter(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('escape', filter=_interaction_active, eager=True)
+    def _tb_escape(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('space', filter=_interaction_active)
+    def _tb_space(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('backspace', filter=_interaction_active)
+    def _tb_backspace(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('delete', filter=_interaction_active)
+    def _tb_delete(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('tab', filter=_interaction_active)
+    def _tb_tab(event):
+        dispatch_toolbar_key(event, chat_manager)
+
+    @bindings.add('<any>', filter=_interaction_active)
+    def _tb_any(event):
+        """Forward printable characters to the active toolbar interaction.
+
+        This handler only matches when an interaction is active (Condition
+        filter).  It always consumes the event — the interaction owns all
+        printable input while it is active.
+        """
+        dispatch_toolbar_key(event, chat_manager)
+
+    # --- Existing bindings --------------------------------------------------
 
     @bindings.add('s-tab')
     def toggle_approve_mode(event):

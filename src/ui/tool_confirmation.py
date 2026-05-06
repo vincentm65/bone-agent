@@ -1,24 +1,305 @@
-"""Interactive tool confirmation panel with arrow key navigation."""
+"""Interactive tool confirmation panel — toolbar-hosted.
 
-from html import escape
-from threading import Timer
+Replaced the old inline-nested-Application approach with a ToolbarInteraction
+subclass rendered via ``run_toolbar_interaction()``.  The public
+``ToolConfirmationPanel`` API is unchanged.
+"""
+
 from typing import Optional, Tuple
-from prompt_toolkit import HTML
-from prompt_toolkit.application import Application
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import Layout, HSplit, Window
-from prompt_toolkit.layout.dimension import Dimension as D
-from prompt_toolkit.layout.controls import FormattedTextControl
+
+from ui.toolbar_interactions import (
+    ToolbarInteraction,
+    run_toolbar_interaction,
+    escape_html,
+    styled,
+    make_section,
+)
+
+# Re-export for callers that used the original import path.
+__all__ = ["ToolConfirmationPanel"]
 
 
 
+
+# ---------------------------------------------------------------------------
+# Toolbar-hosted interaction (internal)
+# ---------------------------------------------------------------------------
+
+class _ToolApprovalInteraction(ToolbarInteraction):
+    """Compact toolbar tool-approval interaction.
+
+    Renders a one-line or few-line toolbar with arrow-key navigation,
+    advice text entry, and Accept All Edits support.  Completion is
+    signalled via ``finish((action, guidance))``.
+    """
+
+    _CURSOR = "> "
+
+    def __init__(
+        self,
+        tool_command: str,
+        reason: Optional[str],
+        options: list[dict],
+        cycle_approve_mode=None,
+    ) -> None:
+        super().__init__()
+        self._tool_command = tool_command
+        self._reason = reason
+        self._options = options
+        self._cycle_approve_mode = cycle_approve_mode
+        self._selected_index = 0
+        self._advice_buffer = ""
+        # Modes: "navigate" (choose option) | "advise" (type advice)
+        self._mode = "navigate"
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _append_field(
+        lines: list[str], label: str, value: object, *, formatted: bool = False
+    ) -> None:
+        value_text = str(value)
+        if not formatted:
+            value_text = escape_html(value_text)
+        value_lines = value_text.splitlines() or [""]
+        lines.append(f"<b>{escape_html(label)}:</b> {value_lines[0]}")
+        for continuation in value_lines[1:]:
+            lines.append(f"    {continuation}")
+
+    def _render_navigate(self) -> str:
+        """Render the option-navigation toolbar content."""
+        lines: list[str] = []
+
+        # Tool name (truncated for compactness)
+        cmd_display = self._tool_command
+        if len(cmd_display) > 72:
+            cmd_display = cmd_display[:69] + "..."
+        lines.append(styled(escape_html(cmd_display), fg="#cad2d9", bold=True))
+
+        # Reason (single line, truncated)
+        if self._reason:
+            reason_display = self._reason.splitlines()[0]
+            if len(reason_display) > 90:
+                reason_display = reason_display[:87] + "..."
+            lines.append(styled(escape_html(reason_display), fg="#888888"))
+
+        lines.append("")  # spacer
+
+        # Options row
+        option_texts: list[str] = []
+        for idx, opt in enumerate(self._options):
+            text = opt.get("text", "")
+            if idx == self._selected_index:
+                option_texts.append(
+                    styled(f"{self._CURSOR}{text}", fg="#FFFFFF", bold=True)
+                )
+            else:
+                option_texts.append(styled(f"  {text}", fg="#6a737d"))
+        lines.append("   ".join(option_texts))
+
+        # Controls hint
+        lines.append(
+            styled("\u2190\u2191\u2192/\u2191\u2193 navigate  \u21b5 select  Esc cancel", fg="#555555")
+        )
+
+        return make_section(lines=lines)
+
+    def _render_advise(self) -> str:
+        """Render advice-text input mode."""
+        lines: list[str] = []
+        lines.append(
+            styled("Enter advice (\u21b5 confirm, Esc back):", fg="#cad2d9", bold=True)
+        )
+        buf = self._advice_buffer
+        cursor = styled("\u258c", fg="#FFFFFF")  # full block cursor
+        if buf:
+            lines.append(styled(escape_html(buf) + cursor, fg="#FFFFFF"))
+        else:
+            lines.append(cursor)
+        return make_section(lines=lines)
+
+    def render(self) -> str:
+        if self._mode == "advise":
+            return self._render_advise()
+        return self._render_navigate()
+
+    # ------------------------------------------------------------------
+    # Key handling
+    # ------------------------------------------------------------------
+
+    def _safe_invalidate(self, event: object) -> None:
+        """Invalidate the prompt_toolkit app if available."""
+        try:
+            event.app.invalidate()  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+    def _handle_navigate_key(self, event: object) -> bool:
+        """Handle key events in option-navigation mode."""
+        name = self._key_name(event)
+
+        if name in ("up", "left"):
+            if self._selected_index > 0:
+                self._selected_index -= 1
+                self._safe_invalidate(event)
+            return True
+
+        if name in ("down", "right"):
+            if self._selected_index < len(self._options) - 1:
+                self._selected_index += 1
+                self._safe_invalidate(event)
+            return True
+
+        if name == "enter":
+            selected_value = self._options[self._selected_index].get("value")
+            if selected_value == "accept_all_edits":
+                if self._cycle_approve_mode:
+                    self._cycle_approve_mode()
+                self.finish(("accept", None))
+            elif selected_value == "advise":
+                self._mode = "advise"
+                self._advice_buffer = ""
+                self._safe_invalidate(event)
+            else:
+                self.finish((selected_value, None))
+            return True
+
+        if name == "escape":
+            self.finish(("cancel", None))
+            return True
+
+        # Quick-select by first letter of each option (case-insensitive).
+        data = self._key_data(event)
+        if data and len(data) == 1:
+            letter = data.lower()
+            for idx, opt in enumerate(self._options):
+                opt_text = opt.get("text", "")
+                if opt_text.lower().startswith(letter):
+                    self._selected_index = idx
+                    self._safe_invalidate(event)
+                    break
+            return True
+
+        return True  # consume anything else too while navigating
+
+    def _handle_advise_key(self, event: object) -> bool:
+        """Handle key events in advice-text input mode."""
+        name = self._key_name(event)
+
+        if name == "escape":
+            self._mode = "navigate"
+            self._advice_buffer = ""
+            self._safe_invalidate(event)
+            return True
+
+        if name == "enter":
+            advice = self._advice_buffer.strip()
+            if not advice:
+                self.finish(("cancel", None))
+            else:
+                self.finish(("advise", advice))
+            return True
+
+        if name == "backspace":
+            self._advice_buffer = self._advice_buffer[:-1]
+            self._safe_invalidate(event)
+            return True
+
+        # Printable characters
+        data = self._key_data(event)
+        if data and len(data) == 1:
+            self._advice_buffer += data
+            self._safe_invalidate(event)
+            return True
+
+        return True
+
+    def handle_key(self, event: object) -> bool:
+        if self._mode == "advise":
+            return self._handle_advise_key(event)
+        return self._handle_navigate_key(event)
+
+    # ------------------------------------------------------------------
+    # Key extraction helpers (duck-type prompt_toolkit events)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_key_name(name: str) -> str:
+        """Normalize key names with platform-dependent variants.
+
+        Some terminals send Control-M for Enter, Control-H for Backspace,
+        etc.  This maps those variants to the canonical names used by
+        the navigate/advise key handlers.
+        """
+        name = name.lower()
+        if name in ("c-m", "\r", "\n"):
+            return "enter"
+        if name in ("c-h",):
+            return "backspace"
+        if name in ("c-i", "\t"):
+            return "tab"
+        if name in ("space",):
+            return " "
+        if name in ("delete", "c-d"):
+            return "delete"
+        return name
+
+    @staticmethod
+    def _key_name(event: object) -> Optional[str]:
+        """Extract a normalized key name from a prompt_toolkit KeyPressEvent.
+
+        Inspects the last key press in the sequence (``key_sequence[-1]``).
+        Prefers ``Keys`` enum ``.name``, falling back to ``.data`` for
+        printable characters when no enum name is available.
+        """
+        try:
+            seq = event.key_sequence  # type: ignore[union-attr]
+            if seq:
+                press = seq[-1]
+                # Prefer the Keys enum name if present.
+                key = getattr(press, "key", None)
+                name = getattr(key, "name", None) if key is not None else None
+                if not name:
+                    # Fall back to printable data on the KeyPress itself.
+                    name = getattr(press, "data", None)
+                return _ToolApprovalInteraction._normalize_key_name(name) if name else None
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _key_data(event: object) -> Optional[str]:
+        """Extract printable character data from a prompt_toolkit KeyPressEvent.
+
+        ``.data`` lives on the ``KeyPress`` object (not on ``.key``).
+        """
+        try:
+            seq = event.key_sequence  # type: ignore[union-attr]
+            if seq:
+                press = seq[-1]
+                data = getattr(press, "data", None)
+                return data if data else None
+        except Exception:
+            pass
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Public compatibility wrapper
+# ---------------------------------------------------------------------------
 
 class ToolConfirmationPanel:
-    """Interactive panel for tool execution confirmation with arrow key navigation."""
+    """Interactive panel for tool execution confirmation — toolbar-hosted.
 
-    # Public constants
-    SUMMARY_DISPLAY_DELAY = 0.5  # Seconds to show summary before auto-exit
+    Public API is unchanged: construct with tool info, call ``run()``,
+    receive ``(action, guidance)``.  Internally delegates to a
+    ``_ToolApprovalInteraction`` run via ``run_toolbar_interaction()``.
+    """
+
+    # Public constants (kept for backward compatibility)
+    SUMMARY_DISPLAY_DELAY = 0.5  # Retained for API compat; no longer used
     CURSOR = "> "
     STANDARD_OPTIONS = [
         {"value": "accept", "text": "Accept"},
@@ -32,206 +313,39 @@ class ToolConfirmationPanel:
         {"value": "cancel", "text": "Cancel"},
     ]
 
-    def __init__(self, tool_command: str, reason: Optional[str] = None, is_edit_tool: bool = False, cycle_approve_mode=None, chat_manager=None):
-        """Initialize the tool confirmation panel.
-
-        Args:
-            tool_command: Command/tool being executed
-            reason: Optional reason/details about the tool execution
-            is_edit_tool: Whether this is an edit tool (shows extra toggle option)
-            cycle_approve_mode: Optional callback to cycle approve_mode
-            chat_manager: Optional ChatManager for admin interrupt polling
-        """
+    def __init__(
+        self,
+        tool_command: str,
+        reason: Optional[str] = None,
+        is_edit_tool: bool = False,
+        cycle_approve_mode=None,
+        chat_manager=None,
+    ) -> None:
         self.tool_command = tool_command
         self.reason = reason
         self.is_edit_tool = is_edit_tool
         self.cycle_approve_mode = cycle_approve_mode
         self._chat_manager = chat_manager
-        self.selected_index = 0
-        self._showing_summary = False
-        self._selected_value = None
-        # Use appropriate options based on tool type
         self._options = self.EDIT_OPTIONS if is_edit_tool else self.STANDARD_OPTIONS
 
-    def _append_field(self, lines: list[str], label: str, value: object, *, formatted: bool = False) -> None:
-        """Append a field to the panel, escaping untrusted values by default."""
-        value_text = str(value)
-        if not formatted:
-            value_text = escape(value_text)
-        value_lines = value_text.splitlines() or [""]
-        lines.append(f"<b>{escape(label)}:</b> {value_lines[0]}")
-        for continuation in value_lines[1:]:
-            lines.append(f"    {continuation}")
-
-    def _get_display_text(self) -> HTML:
-        """Get the formatted text to display.
-
-        Returns:
-            HTML formatted text with current selection state
-        """
-        lines = []
-
-        # Check if showing summary
-        if self._showing_summary:
-            # Find the option text for the selected value
-            selected_opt = next((opt for opt in self._options if opt.get("value") == self._selected_value), None)
-            selected_text = selected_opt.get("text", self._selected_value) if selected_opt else self._selected_value
-
-            lines.append("<b>Selection Summary</b>")
-            lines.append("")
-            self._append_field(lines, "Tool", self.tool_command)
-            lines.append(f'<style fg="gray">  Selected: {escape(str(selected_text))}</style>')
-            lines.append("")
-        else:
-            # Tool information
-            self._append_field(lines, "Tool", self.tool_command)
-            if self.reason:
-                self._append_field(lines, "Reason", self.reason)
-            lines.append("")
-
-            # Render options
-            for idx, opt in enumerate(self._options):
-                text = opt.get("text", "")
-
-                if idx == self.selected_index:
-                    # Selected option - show cursor and highlight in bold white
-                    lines.append(f'<style fg="white" bold="true">{self.CURSOR}{text}</style>')
-                else:
-                    # Unselected option - dark grey
-                    lines.append(f'<style fg="gray">  {text}</style>')
-
-        return HTML("\n".join(lines))
-
-    def _exit_with_summary(self, event, result: str) -> None:
-        """Show summary screen and exit application after delay.
-
-        Args:
-            event: PromptToolkit event object
-            result: Result value to return when application exits
-        """
-        if self._showing_summary:
-            return
-        self._showing_summary = True
-        self._selected_value = result
-        event.app.invalidate()
-        Timer(self.SUMMARY_DISPLAY_DELAY, lambda: event.app.exit(result=result)).start()
-
-    def _create_key_bindings(self) -> KeyBindings:
-        """Create key bindings for navigation and selection.
-
-        Returns:
-            KeyBindings object with Up/Down/Enter/Esc handlers
-        """
-        bindings = KeyBindings()
-
-        @bindings.add(Keys.Up)
-        def move_up(event):
-            """Move selection up."""
-            if self.selected_index > 0:
-                self.selected_index -= 1
-            event.app.invalidate()
-
-        @bindings.add(Keys.Down)
-        def move_down(event):
-            """Move selection down."""
-            if self.selected_index < len(self._options) - 1:
-                self.selected_index += 1
-            event.app.invalidate()
-
-        @bindings.add(Keys.Enter)
-        def select(event):
-            """Confirm selection."""
-            selected_value = self._options[self.selected_index].get("value")
-            self._selected_value = selected_value
-
-            # Handle accept_all_edits option
-            if selected_value == "accept_all_edits":
-                # Call the callback to cycle approve_mode
-                if self.cycle_approve_mode:
-                    self.cycle_approve_mode()
-                # Return "accept" so the current edit proceeds
-                self._exit_with_summary(event, "accept")
-            else:
-                # Show summary then auto-exit
-                self._exit_with_summary(event, selected_value)
-
-        @bindings.add(Keys.Escape)
-        def cancel(event):
-            """Cancel selection."""
-            self._exit_with_summary(event, "cancel")
-
-        return bindings
-
-    def _create_layout(self) -> Layout:
-        """Create the panel layout.
-
-        Returns:
-            Layout object configured for the confirmation panel
-        """
-        def get_content():
-            return self._get_display_text()
-
-        content_control = FormattedTextControl(get_content)
-
-        root_container = HSplit([
-            Window(content=content_control, height=None, width=D(min=1), wrap_lines=True),
-        ])
-
-        return Layout(root_container)
-
-    def _handle_result(self, result: str) -> Tuple[str, Optional[str]]:
-        """Handle the result from the confirmation panel.
-
-        Args:
-            result: The action selected by the user
-
-        Returns:
-            Tuple of (action, guidance_text):
-                - action: "accept", "advise", "accept_all_edits", or "cancel"
-                - guidance_text: User's advice if action is "advise", None otherwise
-        """
-        # Handle advise input separately
-        if result == "advise":
-            from prompt_toolkit import PromptSession
-            from prompt_toolkit.formatted_text import HTML
-
-            guidance_session = PromptSession()
-            guidance = guidance_session.prompt(HTML("<b>Enter your advice: </b>")).strip()
-            if not guidance:
-                # Empty advise treated as cancel
-                return ("cancel", None)
-            return ("advise", guidance)
-
-        return (result, None)
-
     def run(self) -> Tuple[str, Optional[str]]:
-        """Display the confirmation panel and wait for user input.
+        """Display the confirmation interaction and wait for user input.
 
         Returns:
             Tuple of (action, guidance_text):
-                - action: "accept", "advise", "accept_all_edits", or "cancel"
+                - action: "accept", "advise", or "cancel"
                 - guidance_text: User's advice if action is "advise", None otherwise
         """
-        # Create and run the application
-        bindings = self._create_key_bindings()
-        layout = self._create_layout()
-
-        application = Application(
-            layout=layout,
-            key_bindings=bindings,
-            full_screen=False,
-            mouse_support=False,
+        interaction = _ToolApprovalInteraction(
+            tool_command=self.tool_command,
+            reason=self.reason,
+            options=list(self._options),  # defensive copy
+            cycle_approve_mode=self.cycle_approve_mode,
         )
-
-        result = self._run_application(application)
-        return self._handle_result(result)
-
-    def _run_application(self, application) -> str:
-        """Run the prompt_toolkit application, with optional swarm interrupt.
-
-        Uses _run_application_interruptible when chat_manager is provided,
-        so pending swarm approvals can interrupt the confirmation prompt.
-        Returns 130 on interrupt (treated as cancel by _handle_result).
-        """
-        from ui.prompt_interrupts import _run_application_interruptible
-        return _run_application_interruptible(application, self._chat_manager)
+        result = run_toolbar_interaction(
+            interaction, chat_manager=self._chat_manager
+        )
+        # result is None when cancelled / interrupted / timed out
+        if result is None:
+            return ("cancel", None)
+        return result
