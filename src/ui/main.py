@@ -47,7 +47,7 @@ from ui.toolbar_interactions import (
     BOUNDARY_RESOLVED_SENTINEL,
     COMMAND_CONFIRM_SENTINEL,
 )
-from core.agentic import agentic_answer
+from core.agentic import agentic_answer, AgentTurnCancelled
 from utils.settings import MonokaiDarkBGStyle, left_align_headings, swarm_settings
 from utils.paths import RG_EXE_PATH
 from utils.image_clipboard import read_clipboard_image, read_image_file
@@ -231,6 +231,12 @@ def _run_agent_in_thread(chat_manager, user_content, console, safe_console,
             thinking_indicator=None,  # No Rich spinner — toolbar handles it
         )
         chat_manager._update_context_tokens()
+    except AgentTurnCancelled:
+        # Ctrl+C was pressed — silently discard the late response.
+        # The cancel flag was set by _handle_ctrl_c_bg_prompt; the agent
+        # thread caught it at a boundary check.  Don't print anything —
+        # the user already has their prompt back.
+        pass
     except KeyboardInterrupt:
         safe_console.print("\n[yellow]Response interrupted.[/yellow]")
     except BoneAgentError as e:
@@ -309,7 +315,6 @@ def _resume_orchestrator_with_live_toolbar(
     )
     _stop_progress_spinner(chat_manager)
     safe_console.set_app(None)
-    agent_thread.join(timeout=5.0)
     return raw_input, result_holder
 
 
@@ -346,18 +351,17 @@ def _create_agent_done_inputhook(completion_event, on_complete=None):
 # ── Helpers: background-prompt cleanup ────────────────────────────
 
 def _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread=None):
-    """Standard cleanup after a background-thread prompt completes normally.
+    """Standard cleanup after a background-thread prompt completes.
 
     Stops the toolbar spinner, detaches the PTK app from *safe_console*,
-    unblocks input, drains buffered keystrokes, and optionally joins the
-    agent thread.
+    unblocks input, and drains buffered keystrokes.  The agent thread is
+    *not* joined — it is a daemon thread that will self-clean once the
+    cancel flag propagates and AgentTurnCancelled is raised.
     """
     _stop_progress_spinner(chat_manager)
     safe_console.set_app(None)
     INPUT_BLOCKED['blocked'] = False
     _drain_stdin(session)
-    if agent_thread is not None:
-        agent_thread.join(timeout=5.0)
 
 
 def _handle_ctrl_c_bg_prompt(chat_manager, session, safe_console,
@@ -699,7 +703,6 @@ def main():
                         safe_console.set_app(None)
                         INPUT_BLOCKED['blocked'] = False
                         _drain_stdin(session)
-                        agent_thread.join(timeout=5.0)
                     # Else: non-tools path.  Auto-turns need tools to process
                     # approvals and completions; skip with a warning if disabled.
                     else:

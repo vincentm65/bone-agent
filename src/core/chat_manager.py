@@ -163,8 +163,13 @@ class ChatManager:
         self._agent_cancel_event.set()
 
     def clear_agent_cancel(self) -> None:
-        """Clear the cancellation flag (call before starting a new agent turn)."""
-        self._agent_cancel_event.clear()
+        """Clear the cancellation flag (call before starting a new agent turn).
+
+        Replaces the internal event with a fresh one so that any
+        orchestrator still holding a reference to the old (set) event
+        continues to see the cancel signal.
+        """
+        self._agent_cancel_event = threading.Event()
 
     def is_agent_cancel_requested(self) -> bool:
         """Return True if cancellation has been requested for the agent turn."""

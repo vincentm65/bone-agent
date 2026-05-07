@@ -228,6 +228,11 @@ class AgenticOrchestrator:
         self.tool_calls_count = 0
         self.empty_response_count = 0
         self.gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
+        # Snapshot the cancel event for this turn.  The chat_manager's
+        # event can be cleared when a new turn starts (Ctrl+C → new
+        # message), but this orchestrator keeps its reference to the
+        # already-set event so it still sees the cancel signal.
+        self._cancel_event = chat_manager.get_agent_cancel_event()
         # For parallel execution: temporary console override
         self._parallel_context = {}
         # Suspension state for tool approval/selection handoff to main prompt
@@ -245,6 +250,15 @@ class AgenticOrchestrator:
         except Exception as e:
             logger.warning("Failed to initialize memory system: %s", e)
 
+
+    def _cancel_requested(self) -> bool:
+        """Check if this turn's cancel event has been set.
+
+        Uses the event snapshot taken at construction time so that
+        ``clear_agent_cancel()`` on chat_manager (for a new turn) does
+        not revive a cancelled turn.
+        """
+        return self._cancel_event.is_set()
 
     def _get_console(self):
         """Get the console for output, respecting parallel execution context.
@@ -321,7 +335,7 @@ class AgenticOrchestrator:
 
         try:
             while True:
-                if self.chat_manager.is_agent_cancel_requested():
+                if self._cancel_requested():
                     raise AgentTurnCancelled()
 
                 # Decrement plugin TTLs after previous iteration's tool execution.
@@ -362,7 +376,7 @@ class AgenticOrchestrator:
                 )
                 if response is None:
                     return
-                if self.chat_manager.is_agent_cancel_requested():
+                if self._cancel_requested():
                     raise AgentTurnCancelled()
 
                 # Auto-compact if over token threshold (applies to both main agent and subagent)
@@ -414,7 +428,7 @@ class AgenticOrchestrator:
         Returns:
             Response dict from LLM, or None if error occurred
         """
-        if self.chat_manager.is_agent_cancel_requested():
+        if self._cancel_requested():
             raise AgentTurnCancelled()
 
         # Pre-send guard: ensure context fits before the LLM call
@@ -440,7 +454,7 @@ class AgenticOrchestrator:
                 response = self.chat_manager.client.chat_completion(
                     self.chat_manager.messages, stream=False, tools=tools
                 )
-                if self.chat_manager.is_agent_cancel_requested():
+                if self._cancel_requested():
                     raise AgentTurnCancelled()
             except LLMError as e:
                 last_error = e
@@ -753,6 +767,12 @@ class AgenticOrchestrator:
         end_loop = False
 
         for i, tool_call in enumerate(tool_calls):
+            # Check for Ctrl+C cancellation between tool executions.
+            # Without this, a multi-tool batch blocks cancellation until
+            # every tool finishes — which can be seconds or minutes.
+            if self._cancel_requested():
+                raise AgentTurnCancelled()
+
             tool_id = tool_call["id"]
             try:
                 should_exit, tool_result = self._process_single_tool_call(
@@ -1906,7 +1926,7 @@ class AgenticOrchestrator:
 
         try:
             while True:
-                if self.chat_manager.is_agent_cancel_requested():
+                if self._cancel_requested():
                     raise AgentTurnCancelled()
 
                 evicted = ToolRegistry.decrement_plugin_ttls()
@@ -1945,7 +1965,7 @@ class AgenticOrchestrator:
                 )
                 if response is None:
                     return "done"
-                if self.chat_manager.is_agent_cancel_requested():
+                if self._cancel_requested():
                     raise AgentTurnCancelled()
 
                 self.chat_manager.maybe_auto_compact()
