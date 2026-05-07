@@ -99,15 +99,19 @@ def get_bottom_toolbar_text(chat_manager):
     Returns:
         HTML formatted toolbar text
     """
-    # Active interaction: render interaction content + full normal status.
+    # Active interaction: status bar on top, separator, interaction content below.
     active_render = render_active_interaction(chat_manager)
     if active_render is not None:
-        return HTML(_join_toolbar_sections_with_gap(active_render, _get_normal_status_text(chat_manager, include_progress=False)))
+        status = _get_normal_status_text(chat_manager, include_progress=False)
+        sep = _separator_line(_toolbar_width())
+        return HTML(_join_toolbar_sections(status, sep, active_render))
 
-    # Pending interaction: render prompt + full normal status.
+    # Pending interaction: status bar on top, separator, interaction prompt below.
     pending_render = render_pending_interaction(chat_manager)
     if pending_render is not None:
-        return HTML(_join_toolbar_sections(pending_render, _get_normal_status_text(chat_manager, include_progress=False)))
+        status = _get_normal_status_text(chat_manager, include_progress=False)
+        sep = _separator_line(_toolbar_width())
+        return HTML(_join_toolbar_sections(status, sep, pending_render))
 
     # No interaction: normal status only.
     return HTML(_get_normal_status_text(chat_manager))
