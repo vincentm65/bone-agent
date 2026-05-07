@@ -450,8 +450,10 @@ def run_sub_agent(
 
         if billed_limit_exceeded:
             prefix = (
-                "WARNING: Sub-agent billed token limit reached. "
-                "Returning current findings early to prevent runaway execution."
+                f"Sub-agent hit the cumulative token budget "
+                f"({tt.conv_total_tokens:,} / {sub_agent_settings.billed_hard_limit_tokens:,} tokens burned). "
+                "The findings below are partial — the sub-agent was stopped mid-task. "
+                "Review what it found so far and decide whether to continue with a follow-up query."
             )
             result = f"{prefix}\n\n{final_content}" if final_content else prefix
         else:
@@ -477,4 +479,6 @@ def run_sub_agent(
         "hard_limit_tokens": _effective_hard_limit_tokens,
         "context_tokens": tt.current_context_tokens,
         "billed_limit_exceeded": billed_limit_exceeded,
+        "billed_hard_limit_tokens": sub_agent_settings.billed_hard_limit_tokens,
+        "billed_total_tokens": tt.conv_total_tokens,
     }

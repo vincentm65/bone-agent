@@ -182,6 +182,10 @@ def review_changes(
         if sub_agent_data.get('hard_limit_exceeded'):
             return {"display": raw_result, "history": raw_result}
 
+        # If billed limit was exceeded, return partial results without injection
+        if sub_agent_data.get('billed_limit_exceeded'):
+            return {"display": raw_result, "history": raw_result}
+
         # Always inject file contents from citations into the history version
         injected_result = inject_file_contents(
             raw_result, repo_root, gitignore_spec, console

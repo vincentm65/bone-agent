@@ -180,6 +180,19 @@ def sub_agent(
             console.file.flush()
             return raw_result
 
+        # If billed limit was exceeded, show warning and return partial results
+        if sub_agent_data.get('billed_limit_exceeded'):
+            panel.cancel()
+            billed_total = sub_agent_data.get('billed_total_tokens', 0)
+            billed_limit = sub_agent_data.get('billed_hard_limit_tokens', 0)
+            console.print(
+                f"[dim yellow]╰─ token budget exhausted: {billed_total:,} / {billed_limit:,} tokens burned[/dim yellow]",
+                highlight=False,
+            )
+            console.file.flush()
+            # Skip file injection — partial results should go back as-is
+            return raw_result
+
         # Parse and inject file contents
         injected_result = inject_file_contents(
             raw_result, repo_root, gitignore_spec, console
