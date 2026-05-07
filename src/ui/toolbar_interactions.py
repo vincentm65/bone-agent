@@ -382,8 +382,6 @@ class ToolApprovalPending(ToolbarInteraction):
                 reason_display = reason_display[:87] + "..."
             lines.append(styled(escape_html(reason_display), fg="#888888"))
 
-        lines.append("")
-
         option_texts: list[str] = []
         for idx, opt in enumerate(self._options):
             text = opt.get("text", "")
@@ -394,10 +392,6 @@ class ToolApprovalPending(ToolbarInteraction):
             else:
                 option_texts.append(styled(f"  {text}", fg="#6a737d"))
         lines.append("   ".join(option_texts))
-
-        lines.append(
-            styled("\u2190\u2191\u2192/\u2191\u2193 navigate  \u21b5 select  Esc cancel", fg="#555555")
-        )
 
         return make_section(lines=lines)
 
@@ -440,7 +434,7 @@ class ToolApprovalPending(ToolbarInteraction):
             selected_value = self._options[self._selected_index].get("value")
             if selected_value == "accept_all_edits":
                 if self._cycle_approve_mode:
-                    self._cycle_approve_mode()
+                    self._cycle_approve_mode("accept_edits")
                 self._resolve(("accept", None))
             elif selected_value == "advise":
                 self._mode = "advise"

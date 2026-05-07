@@ -6,6 +6,7 @@ import sys
 import time
 import random
 import threading
+import asyncio
 import warnings
 import atexit
 from pathlib import Path
@@ -24,9 +25,12 @@ from rich.panel import Panel
 from rich.theme import Theme
 from rich.text import Text
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import in_terminal, run_in_terminal
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.styles import Style
+
+from ui.safe_console import SafeConsole
 
 from llm import config
 from llm.config import TOOLS_ENABLED
@@ -37,6 +41,7 @@ from ui.prompt_utils import get_bottom_toolbar_text, setup_common_bindings, TOOL
 from ui.toolbar_interactions import (
     set_active_interaction,
     clear_active_interaction,
+    get_active_interaction,
     patch_for_active_prompt,
     SETTING_RESOLVED_SENTINEL,
     BOUNDARY_RESOLVED_SENTINEL,
@@ -84,6 +89,10 @@ from ui.thinking import ThinkingIndicator
 
 # Block input during thinking/agentic processing (prevents key presses from being queued)
 INPUT_BLOCKED = {'blocked': False}
+
+# Timer for advancing toolbar spinner frames during agent work
+_spinner_timer = None  # threading.Timer instance
+SPINNER_REFRESH_INTERVAL = 0.1
 
 
 def check_double_ctrl_c() -> bool:
@@ -137,6 +146,253 @@ def _drain_stdin(session):
 from core.swarm_auto_turn import drain_inbox_to_prompts
 
 
+# ── Helper: toolbar spinner management ────────────────────────────
+
+def _start_progress_spinner(chat_manager, message=""):
+    """Start toolbar spinner and frame-advance timer."""
+    chat_manager.progress.start_spinner(message)
+    _schedule_spinner_advance(chat_manager)
+
+
+def _schedule_spinner_advance(chat_manager):
+    """Schedule next spinner frame advance."""
+    global _spinner_timer
+    if chat_manager.progress.spinner_active or chat_manager.progress.subagent_active:
+        chat_manager.progress.advance_spinner()
+        chat_manager.invalidate_toolbar()
+        _spinner_timer = threading.Timer(SPINNER_REFRESH_INTERVAL, _schedule_spinner_advance, args=[chat_manager])
+        _spinner_timer.daemon = True
+        _spinner_timer.start()
+
+
+def _stop_progress_spinner(chat_manager):
+    """Stop toolbar spinner and cancel timer."""
+    global _spinner_timer
+    if _spinner_timer:
+        _spinner_timer.cancel()
+        _spinner_timer = None
+    chat_manager.progress.stop_spinner()
+    chat_manager.invalidate_toolbar()
+
+
+async def _safe_print_in_terminal(app, console, *args, **kwargs):
+    """Erase the live prompt, print above it, then repaint the toolbar."""
+    async with in_terminal(render_cli_done=False):
+        try:
+            console.print(*args, **kwargs)
+        finally:
+            console.file.flush()
+            app.invalidate()
+
+
+def _safe_print(console, session, *args, **kwargs):
+    """Print through PTK's terminal-yield API to avoid toolbar artifacts."""
+    app = getattr(session, 'app', None)
+    if app and app.is_running:
+        loop = getattr(app, "loop", None)
+        if loop and loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is loop:
+                future = run_in_terminal(lambda: console.print(*args, **kwargs))
+                future.add_done_callback(lambda _: app.invalidate())
+            else:
+                future = asyncio.run_coroutine_threadsafe(
+                    _safe_print_in_terminal(app, console, *args, **kwargs),
+                    loop,
+                )
+                future.result()
+        else:
+            future = run_in_terminal(lambda: console.print(*args, **kwargs))
+            if hasattr(future, "result"):
+                future.result()
+            app.invalidate()
+    else:
+        console.print(*args, **kwargs)
+
+
+# ── Helper: agent-in-thread wrapper ───────────────────────────────
+
+def _run_agent_in_thread(chat_manager, user_content, console, safe_console,
+                         cwd, rg_path, debug, completion_event, result_holder):
+    """Run agentic_answer in a background thread.
+
+    All Rich output goes through *safe_console* (which routes via PTK's
+    ``run_in_terminal()``), keeping PTK alive for toolbar rendering.
+    """
+    try:
+        chat_manager.clear_agent_cancel()
+        agentic_answer(
+            chat_manager, user_content, safe_console,
+            cwd, rg_path, debug,
+            thinking_indicator=None,  # No Rich spinner — toolbar handles it
+        )
+        chat_manager._update_context_tokens()
+    except KeyboardInterrupt:
+        safe_console.print("\n[yellow]Response interrupted.[/yellow]")
+    except BoneAgentError as e:
+        safe_console.print(f"Error: {e}", style="red", markup=False)
+        if hasattr(e, 'details') and e.details:
+            safe_console.print(f"Details: {e.details}", style="dim", markup=False)
+    except Exception as e:
+        safe_console.print(f"[red]Error during agent work: {e}[/red]", markup=False)
+    finally:
+        result_holder['done'] = True
+        completion_event.set()
+
+
+def _run_resume_in_thread(chat_manager, resume_method_name, completion_event, result_holder):
+    """Resume a suspended orchestrator while the PTK prompt stays alive."""
+    try:
+        orchestrator = getattr(chat_manager, '_agentic_orchestrator', None)
+        if orchestrator is None:
+            result_holder['result'] = "done"
+            return
+        resume_method = getattr(orchestrator, resume_method_name)
+        result_holder['result'] = resume_method(None)
+        try:
+            chat_manager._update_context_tokens()
+        except Exception:
+            pass
+    except KeyboardInterrupt:
+        result_holder['interrupted'] = True
+    except BoneAgentError as e:
+        result_holder['error'] = e
+        try:
+            console = getattr(getattr(chat_manager, '_agentic_orchestrator', None), 'console', None)
+            if console:
+                console.print(f"Error: {e}", style="red", markup=False)
+                if hasattr(e, 'details') and e.details:
+                    console.print(f"Details: {e.details}", style="dim", markup=False)
+        except Exception:
+            pass
+    except Exception as e:
+        result_holder['error'] = e
+        try:
+            console = getattr(getattr(chat_manager, '_agentic_orchestrator', None), 'console', None)
+            if console:
+                console.print(f"[red]Error during agent work: {e}[/red]", markup=False)
+        except Exception:
+            pass
+    finally:
+        result_holder['done'] = True
+        completion_event.set()
+
+
+def _resume_orchestrator_with_live_toolbar(
+    chat_manager,
+    session,
+    safe_console,
+    resume_method_name,
+):
+    """Run a suspended-agent resume with the status toolbar still visible."""
+    completion_event = threading.Event()
+    result_holder = {'done': False}
+    safe_console.set_app(session.app)
+    _start_progress_spinner(chat_manager, "Thinking ...")
+    agent_thread = threading.Thread(
+        target=_run_resume_in_thread,
+        args=(chat_manager, resume_method_name, completion_event, result_holder),
+        daemon=True,
+    )
+    agent_thread.start()
+    raw_input = session.prompt(
+        lambda: "",
+        bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+        inputhook=_create_agent_done_inputhook(
+            completion_event,
+            on_complete=lambda: _stop_progress_spinner(chat_manager),
+        ),
+    )
+    _stop_progress_spinner(chat_manager)
+    safe_console.set_app(None)
+    agent_thread.join(timeout=5.0)
+    return raw_input, result_holder
+
+
+# ── Helper: inputhook for agent-done waiting ──────────────────────
+
+def _create_agent_done_inputhook(completion_event, on_complete=None):
+    """Inputhook that exits the prompt when agent work completes.
+
+    Polls *completion_event* every 50ms.  When set, calls *on_complete*
+    (if provided) **before** exiting the prompt, then exits with sentinel
+    value ``999`` which the main loop handles to continue.
+
+    The *on_complete* callable (e.g. ``_stop_progress_spinner``) runs while
+    the PTK app is still alive so toolbar invalidation can repaint and
+    clear the spinner line.
+    """
+    def inputhook(context):
+        while True:
+            if completion_event.is_set():
+                if on_complete is not None:
+                    try:
+                        on_complete()
+                    except Exception:
+                        pass
+                from prompt_toolkit.application import get_app
+                get_app().exit(result=999)
+                return
+            if context.input_is_ready():
+                return
+            time.sleep(0.05)
+    return inputhook
+
+
+# ── Helpers: background-prompt cleanup ────────────────────────────
+
+def _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread=None):
+    """Standard cleanup after a background-thread prompt completes normally.
+
+    Stops the toolbar spinner, detaches the PTK app from *safe_console*,
+    unblocks input, drains buffered keystrokes, and optionally joins the
+    agent thread.
+    """
+    _stop_progress_spinner(chat_manager)
+    safe_console.set_app(None)
+    INPUT_BLOCKED['blocked'] = False
+    _drain_stdin(session)
+    if agent_thread is not None:
+        agent_thread.join(timeout=5.0)
+
+
+def _handle_ctrl_c_bg_prompt(chat_manager, session, safe_console,
+                              agent_thread, completion_event,
+                              cancel_msg="Subagent cancelled.",
+                              idle_msg="Cancelled (Ctrl+C). Press Ctrl+C again to exit."):
+    """Handle KeyboardInterrupt during a background-thread prompt.
+
+    Two branches:
+
+    1. **Active subagent** — signal cancellation and join the thread.
+       The worker/subagent panel owns final state and the command-specific
+       cancel message; this helper only stops the spinner and invalidates.
+    2. **No subagent** — basic cleanup, then double-Ctrl-C check and
+       print *idle_msg*.
+
+    In both cases the caller should ``continue`` the main loop afterward.
+    """
+    chat_manager.request_agent_cancel()
+    if chat_manager.progress.get_subagent_summary()["active"]:
+        # Signal cancellation — the worker/subagent owns final panel state
+        # and prints the command-specific cancel message (e.g. "Ask cancelled.").
+        chat_manager.request_subagent_cancel()
+        chat_manager.progress.clear_subagent()
+        chat_manager.progress.clear_active_tool()
+        chat_manager.progress.stop_spinner()
+        chat_manager.invalidate_toolbar()
+        _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+        completion_event.set()
+    else:
+        _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+        if not check_double_ctrl_c():
+            console.print(f"\n[yellow]{idle_msg}[/yellow]")
+
+
 def main():
     """Main interactive chat loop."""
 
@@ -155,11 +411,8 @@ def main():
             pass
     
     chat_manager = ChatManager()
-    thinking_indicator = ThinkingIndicator(console)
-    # Safety net: ensure terminal mode is restored even on unhandled exceptions
-    def _safety_restore():
-        ThinkingIndicator._restore_terminal_mode(thinking_indicator._saved_termios)
-    atexit.register(_safety_restore)
+    thinking_indicator = ThinkingIndicator(console, chat_manager=chat_manager)
+    safe_console = SafeConsole(console)
     # Stop swarm server on process exit (best-effort cleanup)
     def _stop_swarm_server():
         try:
@@ -248,6 +501,11 @@ def main():
 
     def get_prompt(chat_manager):
         """Return colored prompt."""
+        if (
+            get_active_interaction(chat_manager) is not None
+            or getattr(chat_manager, "_pending_interaction", None) is not None
+        ):
+            return ANSI("")
         prompt_text = Text.assemble(
             (" > ", "white")
         )         
@@ -268,24 +526,26 @@ def main():
         pending_attachments.clear()
         event.app.invalidate()
 
-    @bindings.add('c-1')
-    def swarm_status_page_workers(event):
-        """Swarm status Workers page (Ctrl+1, blocked during thinking)."""
+    @bindings.add('c-s-left')
+    def swarm_status_page_previous(event):
+        """Swarm status previous page (Ctrl+Shift+Left)."""
         if INPUT_BLOCKED.get('blocked', False):
             return
         if not getattr(chat_manager, 'swarm_admin_mode', False):
             return
-        chat_manager.swarm_status_page = 0
+        page = getattr(chat_manager, 'swarm_status_page', 0)
+        chat_manager.swarm_status_page = max(0, page - 1)
         event.app.invalidate()
 
-    @bindings.add('c-2')
-    def swarm_status_page_plan(event):
-        """Swarm status Plan page (Ctrl+2, blocked during thinking)."""
+    @bindings.add('c-s-right')
+    def swarm_status_page_next(event):
+        """Swarm status next page (Ctrl+Shift+Right)."""
         if INPUT_BLOCKED.get('blocked', False):
             return
         if not getattr(chat_manager, 'swarm_admin_mode', False):
             return
-        chat_manager.swarm_status_page = 1
+        page = getattr(chat_manager, 'swarm_status_page', 0)
+        chat_manager.swarm_status_page = min(1, page + 1)
         event.app.invalidate()
 
     @bindings.add('c-v')
@@ -337,6 +597,13 @@ def main():
         return "\n".join(remaining_lines).strip()
 
     session = PromptSession(key_bindings=bindings, style=TOOLBAR_STYLE)
+
+    # Register PTK toolbar invalidation callback (called from background thread)
+    chat_manager._invalidate_toolbar = lambda: (
+        session.app.invalidate()
+        if session.app and session.app.is_running
+        else None
+    )
 
     handoff_to_worker = False
 
@@ -402,40 +669,52 @@ def main():
                     sys.stdout.write("\033[F\033[K")
                     sys.stdout.flush()
 
-                    thinking_indicator.start()
                     INPUT_BLOCKED['blocked'] = True
-                    try:
+                    if TOOLS_ENABLED:
+                        # Background thread + living PTK for toolbar progress
+                        completion_event = threading.Event()
+                        result_holder = {'done': False}
+                        safe_console.set_app(session.app)
+                        _start_progress_spinner(chat_manager, "Thinking ...")
                         console.print("─" * console.width, style="rgb(30,30,30)")
                         console.print()
-                        if TOOLS_ENABLED:
-                            try:
-                                agentic_answer(
-                                    chat_manager,
-                                    final_content,
-                                    console,
-                                    Path.cwd().resolve(),
-                                    RG_EXE_PATH,
-                                    DEBUG_MODE_CONTAINER['debug'],
-                                    thinking_indicator=thinking_indicator,
-                                )
-                                chat_manager._update_context_tokens()
-                            except KeyboardInterrupt:
-                                if not check_double_ctrl_c():
-                                    console.print("\n[yellow]Response interrupted (Ctrl+C). Press Ctrl+C again to exit.[/yellow]")
-                                console.print()
-                            except BoneAgentError as e:
-                                console.print(f"Error: {e}", style="red", markup=False)
-                                if hasattr(e, 'details') and e.details:
-                                    console.print(f"Details: {e.details}", style="dim", markup=False)
-                        # Else: non-tools path.  Auto-turns need tools to process
-                        # approvals and completions; skip with a warning if disabled.
-                        else:
-                            chat_manager.messages.append({"role": "user", "content": final_content})
-                            chat_manager.log_message({"role": "user", "content": final_content})
-                    finally:
-                        thinking_indicator.stop(reset=True)
+                        agent_thread = threading.Thread(
+                            target=_run_agent_in_thread,
+                            args=(chat_manager, final_content, console, safe_console,
+                                  Path.cwd().resolve(), RG_EXE_PATH,
+                                  DEBUG_MODE_CONTAINER['debug'],
+                                  completion_event, result_holder),
+                            daemon=True,
+                        )
+                        agent_thread.start()
+                        raw_input = session.prompt(
+                            lambda: "",
+                            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+                            inputhook=_create_agent_done_inputhook(
+                                completion_event,
+                                on_complete=lambda: _stop_progress_spinner(chat_manager),
+                            ),
+                        )
+                        _stop_progress_spinner(chat_manager)  # idempotent fallback
+                        safe_console.set_app(None)
                         INPUT_BLOCKED['blocked'] = False
                         _drain_stdin(session)
+                        agent_thread.join(timeout=5.0)
+                    # Else: non-tools path.  Auto-turns need tools to process
+                    # approvals and completions; skip with a warning if disabled.
+                    else:
+                        chat_manager.messages.append({"role": "user", "content": final_content})
+                        chat_manager.log_message({"role": "user", "content": final_content})
+                    continue
+
+                # Agent work completed sentinel (999).  Inputhook for the
+                # background-thread agent path exits with this value after
+                # the work finishes.  Normal flow: the local block in the
+                # TOOLS_ENABLED path handles cleanup and continues before
+                # reaching here.  This is a safety net for any code path
+                # that might leak the sentinel.
+                if isinstance(raw_input, int) and raw_input == 999:
+                    chat_manager.progress.clear_all()
                     continue
 
                 # Tool approval resolved via toolbar — resume the suspended
@@ -447,7 +726,12 @@ def main():
                 if raw_input == 131 and getattr(chat_manager, '_agentic_orchestrator', None) is not None:
                     INPUT_BLOCKED['blocked'] = True
                     try:
-                        chat_manager._agentic_orchestrator.resume_after_approval(thinking_indicator)
+                        _resume_orchestrator_with_live_toolbar(
+                            chat_manager,
+                            session,
+                            safe_console,
+                            "resume_after_approval",
+                        )
                     finally:
                         INPUT_BLOCKED['blocked'] = False
                         _drain_stdin(session)
@@ -460,7 +744,12 @@ def main():
                 if raw_input == 132 and getattr(chat_manager, '_agentic_orchestrator', None) is not None:
                     INPUT_BLOCKED['blocked'] = True
                     try:
-                        chat_manager._agentic_orchestrator.resume_after_selection(thinking_indicator)
+                        _resume_orchestrator_with_live_toolbar(
+                            chat_manager,
+                            session,
+                            safe_console,
+                            "resume_after_selection",
+                        )
                     finally:
                         INPUT_BLOCKED['blocked'] = False
                         _drain_stdin(session)
@@ -498,7 +787,12 @@ def main():
                 if raw_input == BOUNDARY_RESOLVED_SENTINEL and getattr(chat_manager, '_agentic_orchestrator', None) is not None:
                     INPUT_BLOCKED['blocked'] = True
                     try:
-                        chat_manager._agentic_orchestrator.resume_after_boundary(thinking_indicator)
+                        _resume_orchestrator_with_live_toolbar(
+                            chat_manager,
+                            session,
+                            safe_console,
+                            "resume_after_boundary",
+                        )
                     finally:
                         INPUT_BLOCKED['blocked'] = False
                         _drain_stdin(session)
@@ -548,7 +842,7 @@ def main():
                     continue
 
                 # Process commands
-                cmd_result, modified_input = process_command(chat_manager, user_input, console, DEBUG_MODE_CONTAINER, cron_scheduler)
+                cmd_result, modified_input, cmd_worker = process_command(chat_manager, user_input, console, DEBUG_MODE_CONTAINER, cron_scheduler)
                 if cmd_result == "exit":
                     break
                 elif cmd_result == "swarm_worker":
@@ -615,40 +909,91 @@ def main():
                         console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
                     continue
 
+                elif cmd_result == "subagent_run":
+                    # Slash command (/ask, /review) deferred sub-agent work.
+                    # Run the worker in a background thread while keeping a
+                    # minimal PTK prompt active so the toolbar can render
+                    # live subagent status (SubAgentPanel-driven).
+                    if prompt_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    if cmd_worker is None:
+                        continue
+                    INPUT_BLOCKED['blocked'] = True
+                    completion_event = threading.Event()
+                    safe_console.set_app(session.app)
+                    agent_thread = threading.Thread(
+                        target=cmd_worker,
+                        args=(console, safe_console, completion_event),
+                        daemon=True,
+                    )
+                    agent_thread.start()
+                    try:
+                        raw_input = session.prompt(
+                            lambda: "",
+                            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+                            inputhook=_create_agent_done_inputhook(
+                                completion_event,
+                                on_complete=lambda: _stop_progress_spinner(chat_manager),
+                            ),
+                        )
+                    except KeyboardInterrupt:
+                        _handle_ctrl_c_bg_prompt(
+                            chat_manager, session, safe_console,
+                            agent_thread, completion_event,
+                            cancel_msg="Subagent cancelled.",
+                            idle_msg="Cancelled (Ctrl+C). Press Ctrl+C again to exit.",
+                        )
+                        continue
+                    _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+                    continue
+
                 # Use modified input if provided (from /edit command)
                 final_input = modified_input if modified_input else user_input
                 final_content = build_message_content(final_input, prompt_attachments)
 
                 chat_manager.maybe_auto_compact(console)
 
-                thinking_indicator.start()
-                INPUT_BLOCKED['blocked'] = True
-                try:
+                if TOOLS_ENABLED:
+                    # Background thread + living PTK for toolbar progress
+                    completion_event = threading.Event()
+                    result_holder = {'done': False}
+                    safe_console.set_app(session.app)
+                    _start_progress_spinner(chat_manager, "Thinking ...")
                     console.print("─" * console.width, style="rgb(30,30,30)")
                     console.print()  # Extra newline after user input to separate from LLM response
-                    # Add user message
-                    if TOOLS_ENABLED:
-                        try:
-                            agentic_answer(
-                                chat_manager,
-                                final_content,
-                                console,
-                                Path.cwd().resolve(),
-                                RG_EXE_PATH,
-                                DEBUG_MODE_CONTAINER['debug'],
-                                thinking_indicator=thinking_indicator,
-                            )
-                            chat_manager._update_context_tokens()
-                        except KeyboardInterrupt:
-                            if not check_double_ctrl_c():
-                                console.print("\n[yellow]Response interrupted (Ctrl+C). Press Ctrl+C again to exit.[/yellow]")
-                            console.print()  # Extra spacing
-                        except BoneAgentError as e:
-                            # Handle all bone-agent custom exceptions gracefully
-                            console.print(f"Error: {e}", style="red", markup=False)
-                            if hasattr(e, 'details') and e.details:
-                                console.print(f"Details: {e.details}", style="dim", markup=False)
-                    else:
+                    agent_thread = threading.Thread(
+                        target=_run_agent_in_thread,
+                        args=(chat_manager, final_content, console, safe_console,
+                              Path.cwd().resolve(), RG_EXE_PATH,
+                              DEBUG_MODE_CONTAINER['debug'],
+                              completion_event, result_holder),
+                        daemon=True,
+                    )
+                    agent_thread.start()
+                    try:
+                        raw_input = session.prompt(
+                            lambda: "",
+                            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+                            inputhook=_create_agent_done_inputhook(
+                                completion_event,
+                                on_complete=lambda: _stop_progress_spinner(chat_manager),
+                            ),
+                        )
+                    except KeyboardInterrupt:
+                        _handle_ctrl_c_bg_prompt(
+                            chat_manager, session, safe_console,
+                            agent_thread, completion_event,
+                            cancel_msg="Subagent cancelled.",
+                            idle_msg="Response interrupted (Ctrl+C). Press Ctrl+C again to exit.",
+                        )
+                        continue
+                    _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+                else:
+                    thinking_indicator.start()
+                    INPUT_BLOCKED['blocked'] = True
+                    try:
+                        _safe_print(console, session, "─" * console.width, style="rgb(30,30,30)")
+                        _safe_print(console, session)  # Extra newline after user input to separate from LLM response
                         chat_manager.messages.append({"role": "user", "content": final_content})
                         chat_manager.log_message({"role": "user", "content": final_content})
 
@@ -657,7 +1002,7 @@ def main():
                                 chat_manager.messages, stream=True
                             )
                             if isinstance(stream, str):
-                                console.print(f"[red]Error: {stream}[/red]")
+                                _safe_print(console, session, f"[red]Error: {stream}[/red]")
                                 continue
 
                             try:
@@ -674,12 +1019,14 @@ def main():
 
                                 # Clear thinking indicator before printing response
                                 thinking_indicator.stop(reset=True)
+                                # Force toolbar to repaint without spinner before printing
+                                chat_manager.invalidate_toolbar()
                                 INPUT_BLOCKED['blocked'] = False
                                 _drain_stdin(session)
 
                                 if full_response.strip():
                                     md = Markdown(left_align_headings(full_response), code_theme=MonokaiDarkBGStyle, justify="left")
-                                    console.print(md)
+                                    _safe_print(console, session, md)
 
                                 chat_manager.messages.append(
                                     {"role": "assistant", "content": full_response}
@@ -698,18 +1045,18 @@ def main():
                             except KeyboardInterrupt:
                                 # Ctrl+C pressed during streaming
                                 if not check_double_ctrl_c():
-                                    console.print("\n[yellow]Response interrupted (Ctrl+C). Press Ctrl+C again to exit.[/yellow]")
+                                    _safe_print(console, session, "\n[yellow]Response interrupted (Ctrl+C). Press Ctrl+C again to exit.[/yellow]")
                                     # Save partial response
                                     if chunks:
                                         partial = "".join(chunks)
                                         if partial.strip():
                                             partial_with_note = partial + "\n\n*[Response interrupted]*"
                                             md = Markdown(left_align_headings(partial_with_note), code_theme=MonokaiDarkBGStyle, justify="left")
-                                            console.print(md)
+                                            _safe_print(console, session, md)
                                             chat_manager.messages.append(
                                                 {"role": "assistant", "content": partial}
                                             )
-                                console.print()  # Extra spacing
+                                _safe_print(console, session)  # Extra spacing
                             finally:
                                 # Ensure HTTP connection is closed
                                 if hasattr(stream, 'close'):
@@ -717,15 +1064,15 @@ def main():
 
                         except BoneAgentError as e:
                             # Handle all bone-agent custom exceptions gracefully
-                            console.print(f"Error: {e}", style="red", markup=False)
+                            _safe_print(console, session, f"Error: {e}", style="red", markup=False)
                             if hasattr(e, 'details') and e.details:
-                                console.print(f"Details: {e.details}", style="dim", markup=False)
+                                _safe_print(console, session, f"Details: {e.details}", style="dim", markup=False)
                         except Exception as e:
-                            console.print(f"[red]Error during generation: {e}[/red]", markup=False)
-                finally:
-                    thinking_indicator.stop(reset=True)
-                    INPUT_BLOCKED['blocked'] = False
-                    _drain_stdin(session)
+                            _safe_print(console, session, f"[red]Error during generation: {e}[/red]", markup=False)
+                    finally:
+                        thinking_indicator.stop(reset=True)
+                        INPUT_BLOCKED['blocked'] = False
+                        _drain_stdin(session)
 
             except KeyboardInterrupt:
                 # Ctrl+C pressed while waiting for input

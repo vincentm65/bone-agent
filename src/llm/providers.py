@@ -18,6 +18,69 @@ class OpenAIHandler:
     Supports: OpenAI, OpenRouter, GLM, Gemini, Kimi, MiniMax
     """
 
+    def _normalize_tool_messages(self, messages: list) -> list:
+        """Return an OpenAI-compatible message sequence for tool calls.
+
+        OpenAI-compatible APIs require tool result messages to immediately
+        follow the assistant message that declared their ``tool_calls``. Some
+        local history operations can leave stale/orphaned tool messages behind;
+        DeepSeek rejects those requests with a 400, so remove invalid fragments
+        at the provider boundary.
+        """
+        normalized = []
+        i = 0
+
+        while i < len(messages):
+            msg = messages[i]
+
+            if msg.get("role") == "tool":
+                # Orphaned tool result: there is no immediately preceding
+                # assistant(tool_calls) block in the request.
+                i += 1
+                continue
+
+            tool_calls = msg.get("tool_calls") if msg.get("role") == "assistant" else None
+            if not tool_calls:
+                normalized.append(msg)
+                i += 1
+                continue
+
+            expected_ids = {
+                tc.get("id")
+                for tc in tool_calls
+                if tc.get("id")
+            }
+            tool_results = []
+            seen_ids = set()
+            j = i + 1
+
+            while j < len(messages) and messages[j].get("role") == "tool":
+                tool_msg = messages[j]
+                tool_call_id = tool_msg.get("tool_call_id")
+                if tool_call_id in expected_ids and tool_call_id not in seen_ids:
+                    tool_results.append(tool_msg)
+                    seen_ids.add(tool_call_id)
+                j += 1
+
+            if expected_ids and seen_ids == expected_ids:
+                normalized.append(msg)
+                normalized.extend(tool_results)
+            else:
+                # Incomplete tool block. Keep any assistant text, but do not
+                # send dangling tool_calls or their tool results.
+                assistant_msg = dict(msg)
+                assistant_msg.pop("tool_calls", None)
+                content = assistant_msg.get("content")
+                if isinstance(content, str):
+                    if content.strip():
+                        normalized.append(assistant_msg)
+                elif content:
+                    normalized.append(assistant_msg)
+
+            i = j
+
+        return normalized
+
     def build_headers(self, config: Dict[str, Any]) -> Dict[str, str]:
         """Build request headers."""
         headers = {"Content-Type": "application/json"}
@@ -31,6 +94,7 @@ class OpenAIHandler:
                       tools: Optional[list] = None, stream: bool = True,
                       conversation_id: Optional[str] = None) -> Dict[str, Any]:
         """Build request payload."""
+        messages = self._normalize_tool_messages(messages)
         payload = {**config.get("payload", {}), "messages": messages, "stream": stream}
 
         # Ensure model is set from config if not in payload

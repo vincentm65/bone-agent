@@ -1,18 +1,20 @@
 """ThinkingIndicator — Rich spinner with rotating messages and elapsed time."""
 
-import os
 import random
-import sys
 import threading
 import time
+
+SPINNER_REFRESH_INTERVAL = 0.1
+
 
 class ThinkingIndicator:
     """Simple spinner wrapper that always cleans up."""
 
-    def __init__(self, console, message="Thinking ...", spinner="dots"):
+    def __init__(self, console, message="Thinking ...", spinner="dots", chat_manager=None):
         self.console = console
         self.message = message
         self.spinner = spinner
+        self.chat_manager = chat_manager
         self._last_word_change = 0
         self._word_change_interval = 15.0  # Change word every 15 seconds
         
@@ -123,7 +125,6 @@ class ThinkingIndicator:
         self._stop_timer = threading.Event()
         self._elapsed_before_pause = 0.0
         self._has_been_started = False
-        self._saved_termios = None
 
     def _select_random_word(self):
         """Select a random word from weighted word lists."""
@@ -146,36 +147,6 @@ class ThinkingIndicator:
         else:
             return f"{int(seconds)}s"
 
-    @staticmethod
-    def _set_raw_mode():
-        """Switch stdin to raw mode to prevent keystroke echoes during spinner."""
-        if os.name == 'nt':
-            return
-        try:
-            import termios
-            fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
-            new = old.copy()
-            # lflag: disable ECHO, ICANON (line buffering), IEXTEN
-            new[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)
-            # iflag: disable ICRNL (map CR to NL) so Enter doesn't produce newline
-            new[0] &= ~(termios.ICRNL)
-            termios.tcsetattr(fd, termios.TCSANOW, new)
-            return old
-        except Exception:
-            return None
-
-    @staticmethod
-    def _restore_terminal_mode(saved):
-        """Restore terminal mode from saved termios attributes."""
-        if os.name == 'nt' or saved is None:
-            return
-        try:
-            import termios
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, saved)
-        except Exception:
-            pass
-
     def start(self):
         # Select initial word
         self.message = self._select_random_word()
@@ -188,22 +159,19 @@ class ThinkingIndicator:
         
         self._start_time = time.time()
         self._stop_timer.clear()
-        
-        # Always recreate and restart status with new message
-        if self._status and self._active:
-            self._status.stop()
-        self._saved_termios = self._set_raw_mode()
-        self._status = self.console.status(self.message, spinner=self.spinner, spinner_style="#5F9EA0")
-        self._status.start()
         self._active = True
         
-        # Start background timer thread
+        # Update toolbar progress state
+        if self.chat_manager and hasattr(self.chat_manager, 'progress'):
+            self.chat_manager.progress.start_spinner(self.message)
+        
+        # Start background timer thread (for message rotation + toolbar invalidation)
         self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
         self._timer_thread.start()
     
     def _update_timer(self):
-        """Background thread: update status message with elapsed time."""
-        while not self._stop_timer.is_set() and self._status and self._active:
+        """Background thread: update progress state and rotate words."""
+        while not self._stop_timer.is_set() and self._active:
             # Calculate elapsed time including previous pauses
             elapsed = self._elapsed_before_pause + (time.time() - self._start_time)
 
@@ -212,15 +180,13 @@ class ThinkingIndicator:
                 self.message = self._select_random_word()
                 self._last_word_change = elapsed
 
-            # Format elapsed time (e.g., "Thinking ... (1s)" or "Thinking ... (1m 30s)")
-            time_str = f"({self._format_time(elapsed)})"
-            updated_message = f"{self.message} {time_str}"
-
-            # Update the status message
-            if self._status:
-                self._status.update(updated_message)
+            # Update progress state
+            if self.chat_manager and hasattr(self.chat_manager, 'progress'):
+                self.chat_manager.progress.advance_spinner()
+                self.chat_manager.progress.spinner_message = self.message
+                self.chat_manager.invalidate_toolbar()
             
-            self._stop_timer.wait(0.1)  # Update every 100ms
+            self._stop_timer.wait(SPINNER_REFRESH_INTERVAL)
 
     def stop(self, reset=False):
         """Stop the thinking indicator.
@@ -234,22 +200,15 @@ class ThinkingIndicator:
             elapsed_time = self._elapsed_before_pause + (time.time() - self._start_time)
             self._elapsed_before_pause = elapsed_time
         
-        # Stop timer thread first (close race window before stopping status)
         self._active = False
         self._stop_timer.set()
         if self._timer_thread:
             self._timer_thread.join(timeout=0.5)
         
-        if self._status:
-            self._status.stop()
-            self._status = None
+        # Clear toolbar progress state
+        if self.chat_manager and hasattr(self.chat_manager, 'progress'):
+            self.chat_manager.progress.stop_spinner()
         
-        # Restore terminal mode (must happen after status.stop() so Rich
-        # cursor cleanup runs in raw mode, then we hand control back to ptk)
-        self._restore_terminal_mode(self._saved_termios)
-        self._saved_termios = None
-        
-        # Reset state for next use cycle
         if reset:
             self._has_been_started = False
             self._elapsed_before_pause = 0.0
@@ -263,5 +222,3 @@ class ThinkingIndicator:
     def resume(self):
         # Resume with timer continuing from accumulated time
         self.start()
-
-

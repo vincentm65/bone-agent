@@ -530,14 +530,15 @@ class SwarmWorkerRunner:
 
     def _handle_create_file(self, arguments: dict, context: dict) -> str:
         """Create worker files only inside the current task write scope."""
-        from tools.create_file import create_file
+        from tools.helpers.base import ToolRegistry
 
         path_str = arguments.get("path_str", "")
         scope_error = _validate_worker_write_scope(path_str, self.repo_root, self._write_scope)
         if scope_error:
             return scope_error
 
-        return create_file.execute(arguments, context)
+        tool_def = ToolRegistry.get("create_file")
+        return tool_def.execute(arguments, context)
 
     @property
     def orchestrator(self) -> Any:
@@ -659,7 +660,9 @@ class SwarmWorkerRunner:
         finally:
             thinking_indicator.stop(reset=True)
 
-        # Extract final response
+        # Extract final response. Context was cleared before the try block so
+        # this can only return content from the current task run — no stale
+        # messages from previous tasks leak through.
         final_content = ""
         for msg in reversed(self.chat_manager.messages):
             if msg.get("role") == "assistant" and msg.get("content"):
@@ -669,6 +672,12 @@ class SwarmWorkerRunner:
         if not final_content:
             final_content = "Task completed with no output."
 
+        # Status remains "done" even on KeyboardInterrupt because:
+        #   - The server passes status through to the admin LLM inbox unchanged.
+        #   - The user_intervened flag already distinguishes normal completion
+        #     from manual interruption.
+        #   - The server uses "interrupted" only for unexpected disconnects
+        #     (_cleanup_worker), which is a different semantic.
         return {
             "task_id": self._task_id,
             "summary": final_content,
@@ -768,7 +777,7 @@ class SwarmWorkerRunner:
         """Execute a local slash command."""
         from ui.commands import process_command
         debug_mode = {"debug": False}
-        status, _ = process_command(self.chat_manager, command, self.console, debug_mode)
+        status, _, _ = process_command(self.chat_manager, command, self.console, debug_mode)
         if status == "exit":
             self._running = False
 
@@ -818,18 +827,24 @@ class SwarmWorkerRunner:
             pass
 
     def _local_input_loop(self) -> None:
-        """Convert local prompt input into inbox items without owning task execution."""
+        """Convert local prompt input into inbox items without owning task execution.
+
+        Ctrl-C at idle prompt: first press warns, second press within 2 seconds
+        exits the worker (matching the user preference that Ctrl-C exits).
+        """
         idle_notice_shown = False
+        last_ctrl_c_time: float = 0.0
         while not self._local_input_stop.is_set():
             if not self._running:
                 break
             if self._busy.is_set() or self._admin_work_pending.is_set():
                 idle_notice_shown = False
+                last_ctrl_c_time = 0.0
                 time.sleep(0.05)
                 continue
 
             if not idle_notice_shown:
-                self.console.print("[dim]Worker ready. Waiting for admin tasks. Use /exit to leave.[/dim]")
+                self.console.print("[dim]Worker ready. Waiting for admin tasks. Press Ctrl+C twice to exit, or /exit.[/dim]")
                 idle_notice_shown = True
 
             try:
@@ -838,7 +853,15 @@ class SwarmWorkerRunner:
             except EOFError:
                 continue
             except KeyboardInterrupt:
-                self.console.print("[dim]Use /exit to stop this worker.[/dim]")
+                now = time.monotonic()
+                if last_ctrl_c_time and (now - last_ctrl_c_time) < 2.0:
+                    # Double Ctrl-C — exit worker
+                    self._running = False
+                    self._local_input_stop.set()
+                    self.console.print("[dim]Exiting worker (double Ctrl+C).[/dim]")
+                    break
+                last_ctrl_c_time = now
+                self.console.print("[dim]Ctrl+C again within 2s to exit, or /exit.[/dim]")
                 continue
             finally:
                 self._local_prompt_active.clear()

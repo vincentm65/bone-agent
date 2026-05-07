@@ -99,11 +99,6 @@ class _ToolApprovalInteraction(ToolbarInteraction):
                 option_texts.append(styled(f"  {text}", fg="#6a737d"))
         lines.append("   ".join(option_texts))
 
-        # Controls hint
-        lines.append(
-            styled("\u2190\u2191\u2192/\u2191\u2193 navigate  \u21b5 select  Esc cancel", fg="#555555")
-        )
-
         return make_section(lines=lines)
 
     def _render_advise(self) -> str:
@@ -156,7 +151,7 @@ class _ToolApprovalInteraction(ToolbarInteraction):
             selected_value = self._options[self._selected_index].get("value")
             if selected_value == "accept_all_edits":
                 if self._cycle_approve_mode:
-                    self._cycle_approve_mode()
+                    self._cycle_approve_mode("accept_edits")
                 self.finish(("accept", None))
             elif selected_value == "advise":
                 self._mode = "advise"

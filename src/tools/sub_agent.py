@@ -47,6 +47,10 @@ class SimplePanelUpdater:
         """Display error message."""
         self.console.print(f"[red]Sub-Agent Error: {message}[/red]")
 
+    def cancel(self):
+        """No-op cancellation for simple panel (no live display to clear)."""
+        pass
+
 
 @tool(
     name="sub_agent",
@@ -95,6 +99,9 @@ def sub_agent(
         # If running in sequential mode, create a simple panel updater
         panel_updater = SimplePanelUpdater(console)
 
+    # Clear any stale cancellation flag before starting a new sub-agent
+    chat_manager.clear_subagent_cancel()
+
     # Use panel for streaming tool output
     with panel_updater as panel:
         sub_agent_data = run_sub_agent(
@@ -103,11 +110,38 @@ def sub_agent(
             rg_exe_path=rg_exe_path,
             console=console,
             panel_updater=panel,
+            cancel_event=chat_manager.get_subagent_cancel_event(),
         )
+
+        # Check for cancellation first (before error, to avoid error display)
+        if sub_agent_data.get('cancelled'):
+            usage = sub_agent_data.get('usage', {})
+            if usage:
+                chat_manager.token_tracker.add_usage(usage, model_name=sub_agent_data.get("model", ""))
+            panel.cancel()
+            return "exit_code=130\nSubagent cancelled by user."
+
+        # Check for preflight context overflow (initial context exceeds hard limit)
+        if sub_agent_data.get('preflight_overflow'):
+            tokens = sub_agent_data.get('preflight_tokens', 0)
+            limit = sub_agent_data.get('hard_limit', 0)
+            panel.cancel()
+            msg = (
+                f"Subagent cannot start: initial context ({tokens:,} tokens) "
+                f"exceeds hard limit ({limit:,} tokens). "
+                "Try compacting the main session (/compact), clearing context (/clear), "
+                "or reducing the amount of injected context."
+            )
+            console.print(f"[dim red]╰─ preflight overflow: {tokens:,} / {limit:,} tokens[/dim red]", highlight=False)
+            console.file.flush()
+            return f"exit_code=1\n{msg}"
 
         # Check for errors
         if sub_agent_data.get('error'):
             panel.set_error(sub_agent_data['error'])
+            error_summary = f"[red]✗ subagent error[/red]"
+            console.print(error_summary, highlight=False)
+            console.file.flush()
             return f"exit_code=1\n{sub_agent_data['error']}"
 
         # Track usage
@@ -121,11 +155,29 @@ def sub_agent(
                 'context_tokens': usage.get('context_tokens', 0),
             })
 
+            # Print completion summary in chat
+            total_tools = panel.total_tool_calls
+            total_tok = usage.get('total_tokens', 0)
+            summary_parts = [f"{total_tools} tools"]
+            if total_tok:
+                summary_parts.append(f"{total_tok:,} tokens")
+            summary_line = f"[green]✓[/green] subagent done: [dim]{' | '.join(summary_parts)}[/dim]"
+            console.print(summary_line, highlight=False)
+            console.file.flush()
+
         # Display sub-agent result summary (used for context)
         raw_result = sub_agent_data.get('result', '')
 
-        # If hard limit was exceeded, skip injection and return raw dump
+        # If hard limit was exceeded, clear toolbar and return context dump
         if sub_agent_data.get('hard_limit_exceeded'):
+            panel.cancel()
+            tokens = sub_agent_data.get('context_tokens', 0)
+            limit = sub_agent_data.get('hard_limit_tokens', 0)
+            console.print(
+                f"[dim red]╰─ hard limit overflow: {tokens:,} / {limit:,} tokens[/dim red]",
+                highlight=False,
+            )
+            console.file.flush()
             return raw_result
 
         # Parse and inject file contents
@@ -134,6 +186,5 @@ def sub_agent(
         )
 
         return injected_result
-
 
 

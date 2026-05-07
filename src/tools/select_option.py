@@ -527,8 +527,12 @@ def select_option(
         if result is None:
             return "exit_code=1\nUser canceled selection"
 
+        console = (context or {}).get("console")
+
         # Return the selected values (single string for 1 question, comma-separated for multiple)
         if isinstance(result, str):
+            if console:
+                console.print(f"[dim]Selected: {result}[/dim]", highlight=False)
             return f"exit_code=0\n{result}"
         else:
             # Result is a list (multi-question mode or multi-select)
@@ -539,7 +543,10 @@ def select_option(
                     formatted.append(', '.join(str(v) for v in r))
                 else:
                     formatted.append(str(r))
-            return f"exit_code=0\n{', '.join(formatted)}"
+            selected_text = ', '.join(formatted)
+            if console:
+                console.print(f"[dim]Selected: {selected_text}[/dim]", highlight=False)
+            return f"exit_code=0\n{selected_text}"
 
     except Exception as e:
         return f"exit_code=1\nError displaying selection panel: {str(e)}"

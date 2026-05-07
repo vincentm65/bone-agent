@@ -37,6 +37,11 @@ def _print_or_append(text, console, panel_updater, markup=True):
         markup: If True, parse Rich markup (only used for console)
     """
     if panel_updater:
+        # Panels that own their scrollback (e.g. SubAgentPanel) already
+        # recorded the compact tool-call message via add_tool_call().
+        # Skip the plain handler summary to avoid duplicate output.
+        if getattr(panel_updater, "handles_own_scrollback", False):
+            return
         panel_updater.append(text)
     else:
         console.print(text, markup=markup)

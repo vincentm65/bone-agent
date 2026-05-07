@@ -9,8 +9,8 @@ from llm import config
 
 from core.config_manager import ConfigManager as ConfigManagerClass
 from ui.displays import show_help_table, show_cron_help_table, show_skills_help_table
+from ui.sub_agent_panel import SubAgentPanel
 from ui.banner import display_startup_banner
-from core.agentic import SubAgentPanel
 from ui.setting_selector import SettingSelector, SettingCategory, SettingOption
 
 from utils.settings import MonokaiDarkBGStyle, context_settings, get_local_model_server_settings, left_align_headings, tool_settings, swarm_settings
@@ -55,8 +55,9 @@ def _setting_selector_handoff(chat_manager, selector, continuation):
 class CommandResult:
     """Standardized command return type."""
     status: str  # "exit", "handled", "continue", "swarm_worker", "setting_selector",
-                 # "confirm_input", or "text_input"
+                 # "confirm_input", "text_input", "subagent_run"
     replacement_input: Optional[str] = None  # For /edit command or command payload
+    worker: Optional[object] = None  # Callable(console, safe_console, completion_event) for subagent_run
 
 
 def _confirm_handoff(chat_manager, prompt, continuation):
@@ -1479,32 +1480,158 @@ def _build_ask_context(chat_manager, num_turns):
     )
 
 
+def _forward_subagent_usage(chat_manager, sub_result):
+    """Forward usage from a sub-agent result into the main chat manager's tracker."""
+    usage = sub_result.get("usage", {})
+    if usage:
+        chat_manager.token_tracker.add_usage(usage, model_name=sub_result.get("model", ""))
+
+
+def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
+    """Run the /review sub-agent and handle display/history injection.
+
+    This is the direct-callable worker for tests and background threads.
+    It creates a SubAgentPanel, runs the sub-agent, handles special
+    results, displays the output, and injects into chat history.
+
+    Args:
+        chat_manager: ChatManager instance
+        console: Rich console (or SafeConsole) for output
+        query: Review prompt string
+        diff_output: Git diff output to use as initial_context
+        user_intent: Optional user intent string
+
+    Returns:
+        The sub_result dict from ``run_sub_agent``.
+    """
+    from core.sub_agent import run_sub_agent
+    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
+
+    panel = SubAgentPanel(query, chat_manager)
+
+    # Clear stale cancellation flag and obtain cancel event for this run
+    chat_manager.clear_subagent_cancel()
+
+    try:
+        sub_result = run_sub_agent(
+            task_query=query,
+            repo_root=Path.cwd().resolve(),
+            rg_exe_path=str(_RG_EXE_PATH),
+            console=console,
+            panel_updater=panel,
+            sub_agent_type="review",
+            initial_context=diff_output,
+            cancel_event=chat_manager.get_subagent_cancel_event(),
+        )
+    except Exception as e:
+        panel.set_error(str(e))
+        console.print("Sub-agent failed: ", style="red", highlight=False)
+        console.print(str(e), highlight=False, markup=False)
+        sub_result = {"error": str(e)}
+
+    # Forward usage
+    _forward_subagent_usage(chat_manager, sub_result)
+
+    # ── Handle special results ───────────────────────────────────
+    if sub_result.get("cancelled"):
+        panel.cancel()
+        console.print("[dim]Review cancelled.[/dim]", highlight=False)
+    elif sub_result.get("preflight_overflow"):
+        panel.cancel()
+        tokens = sub_result.get("preflight_tokens", 0)
+        limit = sub_result.get("hard_limit", 0)
+        console.print(
+            f"Review cannot start: initial context ({tokens:,} tokens) "
+            f"exceeds hard limit ({limit:,} tokens).",
+            highlight=False,
+            markup=False,
+        )
+    elif sub_result.get("hard_limit_exceeded"):
+        ctx_tokens = sub_result.get("context_tokens", 0)
+        hard_limit = sub_result.get("hard_limit_tokens", 0)
+        console.print(
+            f"Review stopped: context ({ctx_tokens:,} tokens) "
+            f"reached hard limit ({hard_limit:,} tokens).",
+            highlight=False,
+            markup=False,
+        )
+    elif sub_result.get("error"):
+        panel.set_error(sub_result["error"])
+        console.print("Sub-agent error: ", style="red", highlight=False)
+        console.print(sub_result["error"], highlight=False, markup=False)
+    else:
+        panel.set_complete(sub_result.get("usage", {}))
+
+    result_text = sub_result.get("result", "")
+
+    # Only display/inject for successful results — excludes cancelled,
+    # preflight_overflow, hard_limit_exceeded, and error.
+    is_success = not (
+        sub_result.get("cancelled")
+        or sub_result.get("preflight_overflow")
+        or sub_result.get("hard_limit_exceeded")
+        or sub_result.get("error")
+    )
+
+    # ── Display result ───────────────────────────────────────────
+    if result_text and is_success:
+        console.print()
+        md = Markdown(left_align_headings(result_text), code_theme=MonokaiDarkBGStyle, justify="left")
+        console.print(md)
+        console.print()
+
+    # ── Inject into chat history (citation-expanded) ─────────────
+    if result_text and is_success:
+        from utils.citation_parser import inject_file_contents
+
+        repo_root = Path.cwd().resolve()
+        gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
+        history_text = inject_file_contents(
+            result_text, repo_root, gitignore_spec, console
+        )
+
+        review_cmd = "/review"
+        if user_intent:
+            review_cmd += f"\n\nUser intent: {user_intent}"
+        chat_manager.messages.append({
+            "role": "user",
+            "content": review_cmd,
+        })
+        chat_manager.messages.append({
+            "role": "assistant",
+            "content": history_text,
+        })
+
+        # Update context token tracker so compaction timing stays accurate
+        injected_tokens = chat_manager.token_tracker.estimate_tokens(
+            f"{review_cmd}\n\n{history_text}"
+        )
+        chat_manager.token_tracker.current_context_tokens += injected_tokens
+
+    return sub_result
+
+
 def _handle_review(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle review command - run code review on git changes."""
-    import subprocess
-    import os
-    import sys
+    """Handle review command - run code review on git changes via sub-agent.
 
-    from tools.review_sub_agent import review_changes
+    Pre-work (parse args, run git diff) happens synchronously in the handler.
+    The sub-agent run is deferred to a background worker so the PTK toolbar
+    can render live subagent status.
 
-    # Parse args: separate git diff flags from user intent
-    # Format: /r [git-args] [-- intent description]
-    # Examples:
-    #   /r --staged
-    #   /r I wanted to reduce the system prompt length
-    #   /r --staged -- I was refactoring the auth module
+    Returns CommandResult(status="subagent_run", worker=...) on success,
+    or CommandResult(status="handled") for early exits (usage, git errors).
+    """
+    # ── Parse args: separate git diff flags from user intent ─────
     user_intent = None
     git_args = ""
 
     if args and args.strip():
         raw_args = args.strip()
-        # Explicit delimiter: " -- " splits git args from intent
         if " -- " in raw_args:
             parts = raw_args.split(" -- ", 1)
             git_args = parts[0].strip()
             user_intent = parts[1].strip()
         else:
-            # Heuristic: tokens starting with '-' are git flags, rest is intent
             tokens = raw_args.split()
             git_tokens = []
             intent_tokens = []
@@ -1519,11 +1646,9 @@ def _handle_review(chat_manager, console, debug_mode_container, args, cron_sched
             if intent_tokens:
                 user_intent = " ".join(intent_tokens)
 
-    # Build git diff argument list (no shell=True to prevent command injection)
+    # ── Build and validate git diff command ──────────────────────
     git_argv = ["git", "diff"] + git_args.split()
 
-    # Reject shell metacharacters as defense-in-depth
-    import re
     dangerous = re.compile(r'[;&|`$(){}<>!]')
     for arg in git_argv[2:]:
         if dangerous.search(arg):
@@ -1545,8 +1670,8 @@ def _handle_review(chat_manager, console, debug_mode_container, args, cron_sched
     )
 
     if result.returncode != 0:
-        console.print(f"[red]git diff failed:[/red]")
-        console.print(f"[dim]{result.stderr.strip()}[/dim]")
+        console.print("[red]git diff failed:[/red]")
+        console.print(result.stderr.strip(), highlight=False, markup=False)
         return CommandResult(status="handled")
 
     diff_output = result.stdout.strip()
@@ -1554,66 +1679,232 @@ def _handle_review(chat_manager, console, debug_mode_container, args, cron_sched
         console.print("[yellow]No changes to review.[/yellow]")
         return CommandResult(status="handled")
 
-    # Count changed files for summary
     file_count = diff_output.count("diff --git ")
     console.print(f"[dim]Reviewing {file_count} changed file(s)...[/dim]")
     console.print()
 
-    # Compute paths from the active working directory
-    from pathlib import Path
-    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
-    repo_root = Path.cwd().resolve()
-    rg_exe_path = str(_RG_EXE_PATH)
-
-    # Create a live panel for the review sub-agent
-    panel = SubAgentPanel("Reviewing git diff", console)
-
-    # Run the review
-    review_result = review_changes(
-        diff_output=diff_output,
-        repo_root=repo_root,
-        rg_exe_path=rg_exe_path,
-        console=console,
-        chat_manager=chat_manager,
-        panel_updater=panel,
-        user_intent=user_intent,
+    # ── Build review prompt ──────────────────────────────────────
+    query = (
+        "Review this git diff for correctness, bugs, regressions, missed tests, "
+        "and risky changes. Prioritize actionable findings with file/line references."
     )
+    if user_intent:
+        query += f"\n\nUser intent: {user_intent}"
 
-    display_text = review_result["display"]
-    history_text = review_result["history"]
+    # ── Build worker closure for main-loop background execution ──
+    def _review_worker(_console, safe_console, completion_event):
+        try:
+            _run_review_worker(
+                chat_manager,
+                safe_console or _console,
+                query,
+                diff_output,
+                user_intent,
+            )
+        finally:
+            completion_event.set()
 
-    # Display clean result as rendered Markdown (no injected file contents)
-    if display_text:
+    return CommandResult(status="subagent_run", worker=_review_worker)
+
+
+def _run_ask_worker(
+    chat_manager,
+    console,
+    args,
+    continuation=None,
+):
+    """Run the /ask sub-agent and optionally invoke *continuation* on completion.
+
+    This function handles the full sub-agent lifecycle: building context,
+    running the sub-agent via ``run_sub_agent``, handling cancellation /
+    overflow / error states, and forwarding usage to the main chat manager.
+
+    If *continuation* is provided, it is called with the sub-result dict
+    after the sub-agent completes (successfully or not). The continuation
+    is responsible for displaying the result, injecting into history,
+    and any other post-run bookkeeping.
+
+    Args:
+        chat_manager: ChatManager instance
+        console: Rich console for output
+        args: Raw argument string passed to /ask
+        continuation: Optional callable(sub_result) for post-run handling
+
+    Returns:
+        The sub_result dict from ``run_sub_agent``.
+    """
+    from core.sub_agent import run_sub_agent
+    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
+
+    # ── Parse flags ──────────────────────────────────────────────
+    carry_context = False
+    display_only = False
+    num_turns = None
+    query_parts = []
+
+    if args and args.strip():
+        tokens = args.strip().split()
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token == "-c":
+                carry_context = True
+                if i + 1 < len(tokens) and tokens[i + 1].lstrip("+-").isdigit():
+                    i += 1
+                    num_turns = int(tokens[i])
+                    if num_turns <= 0:
+                        console.print("[red]Error: -c count must be a positive number[/red]")
+                        return {"error": "invalid -c count"}
+            elif token == "-f":
+                display_only = True
+            elif token.startswith("-"):
+                flag_chars = token[1:]
+                if flag_chars and all(ch in "cf" for ch in flag_chars):
+                    if "c" in flag_chars:
+                        carry_context = True
+                        if i + 1 < len(tokens) and tokens[i + 1].lstrip("+-").isdigit():
+                            i += 1
+                            num_turns = int(tokens[i])
+                            if num_turns <= 0:
+                                console.print("[red]Error: -c count must be a positive number[/red]")
+                                return {"error": "invalid -c count"}
+                    if "f" in flag_chars:
+                        display_only = True
+                else:
+                    query_parts.append(token)
+            else:
+                query_parts.append(token)
+            i += 1
+
+    query = " ".join(query_parts).strip()
+
+    if not query:
+        console.print("[yellow]Usage: /ask [-c [N]] [-f] <query>[/yellow]")
+        console.print("[dim]  -c N   Carry last N user turns as context[/dim]")
+        console.print("[dim]  -c     Carry all chat history as context[/dim]")
+        console.print("[dim]  -f     Display only, don't save to history[/dim]")
+        console.print("[dim]Alias: /a[/dim]")
+        return {"error": "no query provided"}
+
+    # ── Build context ────────────────────────────────────────────
+    if carry_context:
+        context_str = _build_ask_context(chat_manager, num_turns)
+        if not context_str:
+            console.print("[yellow]No chat context available to carry.[/yellow]")
+            console.print("[dim]Falling back to fresh context.[/dim]")
+            context_str = None
+    else:
+        context_str = None
+
+    # ── Build context descriptor for history ─────────────────────
+    if carry_context:
+        context_desc = "all history" if num_turns is None else f"last {num_turns} turns"
+    else:
+        context_desc = None
+
+    # ── Run sub-agent ────────────────────────────────────────────
+    panel = SubAgentPanel(query, chat_manager)
+
+    # Clear stale cancellation flag and obtain cancel event for this run
+    chat_manager.clear_subagent_cancel()
+
+    try:
+        sub_result = run_sub_agent(
+            task_query=query,
+            repo_root=Path.cwd().resolve(),
+            rg_exe_path=str(_RG_EXE_PATH),
+            console=console,
+            panel_updater=panel,
+            sub_agent_type="ask",
+            initial_context=context_str,
+            cancel_event=chat_manager.get_subagent_cancel_event(),
+        )
+    except Exception as e:
+        panel.set_error(str(e))
+        console.print("Sub-agent failed: ", style="red", highlight=False)
+        console.print(str(e), highlight=False, markup=False)
+        sub_result = {"error": str(e)}
+
+    # Forward usage
+    _forward_subagent_usage(chat_manager, sub_result)
+
+    # ── Handle special results ───────────────────────────────────
+    if sub_result.get("cancelled"):
+        panel.cancel()
+        console.print("[dim]Ask cancelled.[/dim]", highlight=False)
+    elif sub_result.get("preflight_overflow"):
+        panel.cancel()
+        tokens = sub_result.get("preflight_tokens", 0)
+        limit = sub_result.get("hard_limit", 0)
+        console.print(
+            f"Ask cannot start: initial context ({tokens:,} tokens) "
+            f"exceeds hard limit ({limit:,} tokens).",
+            highlight=False,
+            markup=False,
+        )
+    elif sub_result.get("hard_limit_exceeded"):
+        ctx_tokens = sub_result.get("context_tokens", 0)
+        hard_limit = sub_result.get("hard_limit_tokens", 0)
+        console.print(
+            f"Ask stopped: context ({ctx_tokens:,} tokens) "
+            f"reached hard limit ({hard_limit:,} tokens).",
+            highlight=False,
+            markup=False,
+        )
+    elif sub_result.get("error"):
+        panel.set_error(sub_result["error"])
+        console.print("Sub-agent error: ", style="red", highlight=False)
+        console.print(sub_result["error"], highlight=False, markup=False)
+    else:
+        panel.set_complete(sub_result.get("usage", {}))
+
+    # ── Display result ───────────────────────────────────────────
+    result_text = sub_result.get("result", "")
+    # Only display/inject for successful results (not cancel, overflow, hard-limit, error)
+    is_success = not (
+        sub_result.get("cancelled")
+        or sub_result.get("preflight_overflow")
+        or sub_result.get("hard_limit_exceeded")
+        or sub_result.get("error")
+    )
+    if result_text and is_success:
+        from rich.markdown import Markdown
+        from utils.settings import MonokaiDarkBGStyle, left_align_headings
         console.print()
-        md = Markdown(left_align_headings(display_text), code_theme=MonokaiDarkBGStyle, justify="left")
+        md = Markdown(
+            left_align_headings(result_text),
+            code_theme=MonokaiDarkBGStyle,
+            justify="left",
+        )
         console.print(md)
         console.print()
 
-    # Inject review (with file contents) into chat history for follow-up context
-    if history_text:
-        review_cmd = "/review"
-        if user_intent:
-            review_cmd += f"\n\nUser intent: {user_intent}"
+    # ── Inject into history (unless -f or non-success) ───────────
+    if not display_only and result_text and is_success:
+        context_note = f" (with {context_desc} context)" if context_desc else ""
         chat_manager.messages.append({
             "role": "user",
-            "content": review_cmd
+            "content": f"/ask{context_note}: {query}",
         })
         chat_manager.messages.append({
             "role": "assistant",
-            "content": f"Here is the code review of the current git diff:\n\n{history_text}"
+            "content": result_text,
         })
 
-        # Update context token tracker so compaction timing stays accurate
         injected_tokens = chat_manager.token_tracker.estimate_tokens(
-            f"{review_cmd}\n\n{history_text}"
+            f"/ask{context_note}: {query}\n\n{result_text}"
         )
         chat_manager.token_tracker.current_context_tokens += injected_tokens
 
-    return CommandResult(status="handled")
+    # ── Invoke continuation if provided ──────────────────────────
+    if continuation is not None:
+        continuation(sub_result)
+
+    return sub_result
 
 
 def _handle_ask(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle /ask command - invoke sub-agent with an arbitrary query.
+    """Handle /ask command — run sub-agent with subagent-status continuation.
 
     Usage:
         /ask <query>          Fresh sub-agent, result in history
@@ -1625,12 +1916,9 @@ def _handle_ask(chat_manager, console, debug_mode_container, args, cron_schedule
 
     Alias: /a
     """
-    from core.sub_agent import run_sub_agent
-    from core.agentic import SubAgentPanel
-    from rich.markdown import Markdown
-    from utils.settings import MonokaiDarkBGStyle, left_align_headings
-
-    # ── Parse flags ──────────────────────────────────────────────
+    # Build the post-run continuation (display + history injection).
+    # This is stored on chat_manager so the main loop can invoke it
+    # after the background thread completes the sub-agent run.
     carry_context = False
     display_only = False
     num_turns = None
@@ -1652,7 +1940,6 @@ def _handle_ask(chat_manager, console, debug_mode_container, args, cron_schedule
             elif token == "-f":
                 display_only = True
             elif token.startswith("-"):
-                # Check for combined flags: -cf, -fc
                 flag_chars = token[1:]
                 if flag_chars and all(ch in "cf" for ch in flag_chars):
                     if "c" in flag_chars:
@@ -1666,7 +1953,6 @@ def _handle_ask(chat_manager, console, debug_mode_container, args, cron_schedule
                     if "f" in flag_chars:
                         display_only = True
                 else:
-                    # Unknown flag — treat as query (user might have typed a hyphenated word)
                     query_parts.append(token)
             else:
                 query_parts.append(token)
@@ -1682,87 +1968,26 @@ def _handle_ask(chat_manager, console, debug_mode_container, args, cron_schedule
         console.print("[dim]Alias: /a[/dim]")
         return CommandResult(status="handled")
 
-    # ── Build context ────────────────────────────────────────────
-    if carry_context:
-        context_str = _build_ask_context(chat_manager, num_turns)
-        if not context_str:
-            console.print("[yellow]No chat context available to carry.[/yellow]")
-            console.print("[dim]Falling back to fresh context.[/dim]")
-            context_str = None
-    else:
-        context_str = None
-
-    # ── Run sub-agent ────────────────────────────────────────────
-    from pathlib import Path
-    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
-
+    # Resolve context descriptor for history
     if carry_context:
         context_desc = "all history" if num_turns is None else f"last {num_turns} turns"
     else:
-        context_desc = "fresh"
+        context_desc = None
 
-    panel = SubAgentPanel(query, console)
+    # No continuation needed - _run_ask_worker handles display and injection
 
-    try:
-        with panel:
-            sub_result = run_sub_agent(
-                task_query=query,
-                repo_root=Path.cwd().resolve(),
-                rg_exe_path=str(_RG_EXE_PATH),
-                console=console,
-                panel_updater=panel,
-                sub_agent_type="ask",
-                initial_context=context_str,
+    # Build worker closure for main-loop background execution
+    def _ask_worker(_console, safe_console, completion_event):
+        try:
+            _run_ask_worker(
+                chat_manager,
+                safe_console or _console,
+                args,
             )
+        finally:
+            completion_event.set()
 
-            if sub_result.get("error"):
-                panel.set_error(sub_result["error"])
-                console.print(f"[red]Sub-agent error: {sub_result['error']}[/red]")
-                return CommandResult(status="handled")
-
-            panel.set_complete(sub_result.get("usage", {}))
-    except Exception as e:
-        panel.set_error(str(e))
-        console.print(f"[red]Sub-agent failed: {e}[/red]")
-        return CommandResult(status="handled")
-
-    # Track sub-agent usage in main chat_manager
-    usage = sub_result.get("usage", {})
-    if usage:
-        chat_manager.token_tracker.add_usage(usage, model_name=sub_result.get("model", ""))
-
-    result_text = sub_result.get("result", "")
-
-    # ── Display result ───────────────────────────────────────────
-    if result_text:
-        console.print()
-        md = Markdown(
-            left_align_headings(result_text),
-            code_theme=MonokaiDarkBGStyle,
-            justify="left",
-        )
-        console.print(md)
-        console.print()
-
-    # ── Inject into history (unless -f) ──────────────────────────
-    if not display_only and result_text:
-        context_note = f" (with {context_desc} context)" if carry_context else ""
-        chat_manager.messages.append({
-            "role": "user",
-            "content": f"/ask{context_note}: {query}",
-        })
-        chat_manager.messages.append({
-            "role": "assistant",
-            "content": result_text,
-        })
-
-        # Update context token tracker so compaction timing stays accurate
-        injected_tokens = chat_manager.token_tracker.estimate_tokens(
-            f"/ask{context_note}: {query}\n\n{result_text}"
-        )
-        chat_manager.token_tracker.current_context_tokens += injected_tokens
-
-    return CommandResult(status="handled")
+    return CommandResult(status="subagent_run", worker=_ask_worker)
 
 
 # ============================================
@@ -3768,9 +3993,10 @@ def process_command(chat_manager, user_input, console, debug_mode_container, cro
         cron_scheduler: Optional CronScheduler instance for immediate reload
 
     Returns:
-        tuple: (status, replacement_content)
-            status: "exit" | "handled" | None
+        tuple: (status, replacement_content, worker)
+            status: "exit" | "handled" | "subagent_run" | None
             replacement_content: str to replace user_input, or None
+            worker: Callable for "subagent_run", or None
     """
     # Parse command and arguments
     parts = user_input.split(maxsplit=1)
@@ -3782,17 +4008,17 @@ def process_command(chat_manager, user_input, console, debug_mode_container, cro
         shell_cmd = user_input[1:].strip()
         if shell_cmd:
             result = _handle_shell_command(console, shell_cmd)
-            return (result.status, result.replacement_input)
-        return ("handled", None)
+            return (result.status, result.replacement_input, None)
+        return ("handled", None, None)
 
     # Look up handler in registry
     handler = _COMMAND_HANDLERS.get(cmd)
     if handler:
         result = handler(chat_manager, console, debug_mode_container, args, cron_scheduler)
-        return (result.status, result.replacement_input)
+        return (result.status, result.replacement_input, getattr(result, 'worker', None))
     elif cmd.startswith('/'):
         console.print(f"[red]Unknown command: {user_input}[/red]")
         console.print("[dim]Type [bold #5F9EA0]/help[/bold #5F9EA0] for available commands[/dim]")
-        return ("handled", None)
+        return ("handled", None, None)
 
-    return (None, None)
+    return (None, None, None)

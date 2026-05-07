@@ -23,6 +23,7 @@ from utils.logger import MarkdownConversationLogger
 from utils.user_message_logger import UserMessageLogger
 from utils.result_parsers import extract_exit_code, extract_metadata_from_result
 from utils.multimodal import content_text_for_logs
+from utils.terminal_sanitize import SanitizedMessageList
 
 # Token counting constants
 MESSAGE_OVERHEAD_TOKENS = 4  # Approximate tokens for JSON structure: braces, quotes, colons, commas
@@ -43,7 +44,7 @@ class ChatManager:
         self.client = LLMClient()
         self.conversation_id = str(uuid.uuid4())
         self.client.conversation_id = self.conversation_id
-        self.messages = []
+        self.messages = SanitizedMessageList()
         self.server_process: Optional[subprocess.Popen] = None
         self._log_file: Optional[IO] = None  # Track llama_server log file handle
         self.approve_mode = "safe"
@@ -91,8 +92,23 @@ class ChatManager:
         self._swarm_inbox_poller_thread: threading.Thread | None = None
         self._swarm_inbox_poller_stop: threading.Event = threading.Event()
 
+        # Subagent cancellation: thread-safe event set by the UI on Ctrl+C
+        # and polled by run_sub_agent between iterations.
+        self._subagent_cancel_event: threading.Event = threading.Event()
+        # Agent turn cancellation: set by Ctrl+C while the background agent
+        # thread is running. The orchestrator polls this between phases and
+        # discards late LLM responses after in-flight HTTP calls complete.
+        self._agent_cancel_event: threading.Event = threading.Event()
+
         # Disable all compaction when True (used by sub-agents to preserve findings)
         self._compaction_disabled = False
+
+        # Transient progress state (spinner, subagent, active tool)
+        from ui.status_state import ProgressState
+        self.progress = ProgressState()
+
+        # PTK toolbar invalidation callback (set by main.py)
+        self._invalidate_toolbar = None  # callable that calls app.invalidate()
 
         # Conversation logging
         self.markdown_logger: Optional[MarkdownConversationLogger] = None
@@ -124,6 +140,42 @@ class ChatManager:
         """
         self._compaction_locked = locked
 
+    # -- Subagent cancellation API ----------------------------------------
+
+    def request_subagent_cancel(self) -> None:
+        """Signal that the active subagent should stop as soon as possible."""
+        self._subagent_cancel_event.set()
+
+    def clear_subagent_cancel(self) -> None:
+        """Clear the cancellation flag (call before starting a new subagent)."""
+        self._subagent_cancel_event.clear()
+
+    def is_subagent_cancel_requested(self) -> bool:
+        """Return True if cancellation has been requested."""
+        return self._subagent_cancel_event.is_set()
+
+    def get_subagent_cancel_event(self) -> threading.Event:
+        """Return the raw threading.Event for wait() or select-style use."""
+        return self._subagent_cancel_event
+
+    def request_agent_cancel(self) -> None:
+        """Signal that the active agent turn should stop as soon as possible."""
+        self._agent_cancel_event.set()
+
+    def clear_agent_cancel(self) -> None:
+        """Clear the cancellation flag (call before starting a new agent turn)."""
+        self._agent_cancel_event.clear()
+
+    def is_agent_cancel_requested(self) -> bool:
+        """Return True if cancellation has been requested for the agent turn."""
+        return self._agent_cancel_event.is_set()
+
+    def get_agent_cancel_event(self) -> threading.Event:
+        """Return the raw threading.Event for wait() or select-style use."""
+        return self._agent_cancel_event
+
+    # ---------------------------------------------------------------------
+
     def _init_messages(self, reset_totals: bool = True, reset_costs: bool = False):
         """Initialize message history with system prompt and agents.md as initial exchange.
 
@@ -141,7 +193,7 @@ class ChatManager:
         self.loaded_skills = set()
 
         # Start with system prompt only
-        self.messages = [{"role": "system", "content": self._build_system_prompt()}]
+        self.messages = SanitizedMessageList([{"role": "system", "content": self._build_system_prompt()}])
 
         # Add agents.md as initial user/assistant exchange (only if it exists in cwd)
         # Skip for swarm admin mode — admin orchestrates workers, doesn't need codebase map
@@ -943,7 +995,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                 # Keep this message as-is
                 new_messages.append(msg)
 
-        self.messages = new_messages
+        self.messages = SanitizedMessageList(new_messages)
         if not skip_token_update:
             self._update_context_tokens()
 
@@ -1078,7 +1130,7 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             "content": f"Previous conversation context (summarized):\n\n{summary_text}"
         }
 
-        self.messages = [self.messages[0]] + [summary_message] + messages_to_keep
+        self.messages = SanitizedMessageList([self.messages[0]] + [summary_message] + messages_to_keep)
 
         # Update token tracking accurately (include system prompt + messages + tools)
         self._update_context_tokens()
@@ -1572,19 +1624,25 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             self._log_file = None
         return None
 
-    def cycle_approve_mode(self) -> str:
-        """Cycle to next approval mode.
+    def cycle_approve_mode(self, mode: str | None = None) -> str:
+        """Cycle to next approval mode, or set to a specific mode.
+
+        Args:
+            mode: If provided, set this mode directly. Otherwise cycle.
 
         Returns:
             str: The new approval mode.
         """
         from llm.config import CYCLEABLE_APPROVE_MODES
         modes = CYCLEABLE_APPROVE_MODES
-        try:
-            next_index = (modes.index(self.approve_mode) + 1) % len(modes)
-        except ValueError:
-            next_index = 0
-        self.approve_mode = modes[next_index]
+        if mode is not None:
+            self.approve_mode = mode
+        else:
+            try:
+                next_index = (modes.index(self.approve_mode) + 1) % len(modes)
+            except ValueError:
+                next_index = 0
+            self.approve_mode = modes[next_index]
         return self.approve_mode
 
     def reset_session(self):
@@ -1642,6 +1700,17 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         if server and getattr(server, '_app', None):
             try:
                 server._app.invalidate()
+            except Exception:
+                pass
+
+    def invalidate_toolbar(self) -> None:
+        """Trigger a toolbar redraw if a PTK app is active.
+
+        Safe to call from any thread. No-ops if no app is connected.
+        """
+        if self._invalidate_toolbar:
+            try:
+                self._invalidate_toolbar()
             except Exception:
                 pass
 

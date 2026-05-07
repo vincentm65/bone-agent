@@ -174,7 +174,7 @@ def create_task_list(
     chat_manager.task_list_title = title or None
 
     # Trigger live toolbar redraw while prompt is open
-    chat_manager.request_ui_invalidation()
+    chat_manager.invalidate_toolbar()
 
     return _format_task_list(chat_manager.task_list, chat_manager.task_list_title)
 
@@ -247,7 +247,7 @@ def complete_task(
         task_list[tid]["completed"] = True
 
     # Trigger live toolbar redraw while prompt is open
-    chat_manager.request_ui_invalidation()
+    chat_manager.invalidate_toolbar()
 
     return _format_task_list(task_list, chat_manager.task_list_title)
 

@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from utils.terminal_sanitize import strip_terminal_control
+
 
 _PLACEHOLDER_RE = re.compile(r"\[Image #(\d+)\]")
 
@@ -31,6 +33,7 @@ def image_data_url(data: bytes, mime_type: str) -> str:
 
 def build_message_content(text: str, attachments: Iterable[ImageAttachment]) -> str | list[dict[str, Any]]:
     """Build text-only or OpenAI-style multimodal message content."""
+    text = strip_terminal_control(text)
     attachment_map = {attachment.index: attachment for attachment in attachments}
     if not attachment_map:
         return text
@@ -77,7 +80,7 @@ def build_message_content(text: str, attachments: Iterable[ImageAttachment]) -> 
 def content_text_for_logs(content: Any) -> str:
     """Return content text with image payloads redacted for logs/summaries."""
     if isinstance(content, str):
-        return content
+        return strip_terminal_control(content)
     if not isinstance(content, list):
         return str(content) if content is not None else ""
 
@@ -99,7 +102,7 @@ def content_text_for_logs(content: Any) -> str:
         else:
             parts.append(str(block))
 
-    return "".join(parts)
+    return strip_terminal_control("".join(parts))
 
 
 def has_image_content(messages: Iterable[dict[str, Any]]) -> bool:

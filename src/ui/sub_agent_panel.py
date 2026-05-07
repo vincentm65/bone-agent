@@ -1,273 +1,180 @@
-"""Live panel for streaming sub-agent tool output."""
+"""Toolbar-backed updater for sub-agent progress.
+
+Replaces the former Rich Live panel with lightweight state updates
+that write to the PTK toolbar via ProgressState.
+"""
 
 import logging
 import threading
-import time
-
-from rich.panel import Panel
-from rich.text import Text
-from rich.live import Live
 
 from core.tool_feedback import build_panel_tool_message
 
 logger = logging.getLogger(__name__)
 
+SPINNER_REFRESH_INTERVAL = 0.1
+
 
 class SubAgentPanel:
-    """Live panel for streaming sub-agent tool output.
+    """Lightweight sub-agent progress updater backed by the PTK toolbar.
 
-    Displays a Rich panel with animated spinner, tool call log, and
-    completion/error status for sub-agent invocations.
+    Writes sub-agent state (tool calls, token counts, completion/error)
+    to ``chat_manager.progress`` (a ProgressState instance) and triggers
+    toolbar invalidation.  No Rich Live display, no terminal mode management.
     """
 
-    _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    # Tells _print_or_append() in tool_feedback.py that add_tool_call()
+    # already recorded the compact user-visible message — skip the
+    # plain handler summary to avoid duplicate output.
+    handles_own_scrollback = True
 
-    def __init__(self, query, console):
-        """Initialize the sub-agent panel.
-
-        Args:
-            query: The task query for the sub-agent
-            console: Rich console for display
-        """
-        self.console = console
+    def __init__(self, query, chat_manager):
+        self.chat_manager = chat_manager
         self.query = query
-        self.tool_calls = []  # List of formatted Rich markup strings
         self.total_tool_calls = 0
-        self.token_info = None  # Live token info string, e.g. "32k / 45k"
-        self._live = None
-        self._spinner_index = 0
-        self._show_spinner = True
-        self._spinner_thread = None
-        self._stop_spinner = threading.Event()
-        self._saved_termios = None
-        self._suspended = False
+        self.tool_calls = []  # kept for backward-compat attribute access
+        self._stop_timer = threading.Event()
+        self._timer_thread = None
+        self._timer_stopped = False
+        self._subagent_finished = False
 
-    # ------------------------------------------------------------------
-    # Panel rendering
-    # ------------------------------------------------------------------
+        # Capture prior generic spinner state so we can restore it later
+        self._prev_spinner_active = chat_manager.progress.spinner_active
+        self._prev_spinner_message = chat_manager.progress.spinner_message
 
-    def _get_title(self):
-        """Get panel title with optional spinner and tool call counter."""
-        token_suffix = f" | {self.token_info}" if self.token_info else ""
-        if self._show_spinner:
-            spinner = self._SPINNER_FRAMES[self._spinner_index % len(self._SPINNER_FRAMES)]
-            return f"[#5F9EA0]{spinner} Sub-Agent ({self.total_tool_calls}){token_suffix}[/#5F9EA0]"
-        return f"[#5F9EA0]Sub-Agent ({self.total_tool_calls}){token_suffix}[/#5F9EA0]"
+        # Activate sub-agent state before clearing the generic spinner so the
+        # main toolbar scheduler never observes a gap with no active progress.
+        self.chat_manager.progress.start_subagent(query)
+        self.chat_manager.progress.stop_spinner()
+        self.chat_manager.invalidate_toolbar()
 
-    def _render_panel(self, title=None, border_style="#5F9EA0"):
-        """Render the current panel state.
+        # Start background refresh timer for toolbar spinner advancement
+        self._timer_thread = threading.Thread(target=self._refresh_loop, daemon=True)
+        self._timer_thread.start()
 
-        Args:
-            title: Optional title override. If None, uses _get_title().
-            border_style: Border style (default: "#5F9EA0")
+    def _refresh_loop(self):
+        """Periodically advance spinner and invalidate toolbar."""
+        while not self._stop_timer.is_set():
+            if self.chat_manager and hasattr(self.chat_manager, 'progress'):
+                self.chat_manager.progress.advance_spinner()
+                self.chat_manager.invalidate_toolbar()
+            self._stop_timer.wait(SPINNER_REFRESH_INTERVAL)
 
-        Returns:
-            Rich Panel object with current content and title
-        """
-        lines = [f"[bold #5F9EA0]Query:[/bold #5F9EA0] {self.query}", ""]
-
-        if self.tool_calls:
-            content = "\n".join(self.tool_calls)
-            lines.append(content)
-        else:
-            lines.append("[dim]No tools called yet[/dim]")
-
-        content = "\n".join(lines)
-        return Panel(
-            Text.from_markup(content, justify="left"),
-            title=title if title is not None else self._get_title(),
-            title_align="left",
-            border_style=border_style,
-            padding=(0, 1),
-        )
-
-    # ------------------------------------------------------------------
-    # Spinner animation
-    # ------------------------------------------------------------------
-
-    def _spin(self):
-        """Background thread: continuously increment spinner and update display."""
-        while not self._stop_spinner.is_set():
-            self._spinner_index += 1
-            if self._live:
-                self._live.update(self._render_panel())
-            time.sleep(0.1)  # 10 updates per second = smooth animation
-
-    # ------------------------------------------------------------------
-    # Terminal raw mode (suppress keystroke echoes during spinner)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _set_raw_mode():
-        """Switch stdin to raw mode to prevent keystroke echoes during spinner."""
-        import os
-        import sys
-        if os.name == 'nt':
+    def _stop_refresh_timer(self):
+        """Idempotently stop the background refresh timer thread."""
+        if self._timer_stopped:
             return
-        try:
-            import termios
-            fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
-            new = old.copy()
-            new[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)
-            new[0] &= ~(termios.ICRNL)
-            termios.tcsetattr(fd, termios.TCSANOW, new)
-            return old
-        except Exception:
-            return None
+        self._timer_stopped = True
+        self._stop_timer.set()
+        if self._timer_thread is not None:
+            self._timer_thread.join(timeout=0.5)
+            self._timer_thread = None
 
-    @staticmethod
-    def _restore_terminal_mode(saved):
-        """Restore terminal mode from saved termios attributes."""
-        import os
-        import sys
-        if saved is None:
-            return
-        try:
-            import os as _os
-            if _os.name == 'nt':
-                return
-        except Exception:
-            pass
-        try:
-            import termios
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, saved)
-        except Exception:
-            pass
+    def _restore_spinner(self):
+        """Restore the generic spinner if it was active before the subagent."""
+        if self._prev_spinner_active:
+            self.chat_manager.progress.start_spinner(self._prev_spinner_message)
 
     # ------------------------------------------------------------------
-    # Context manager (Live display lifecycle)
+    # Context manager protocol
     # ------------------------------------------------------------------
 
     def __enter__(self):
-        """Start Live display context.
-
-        Returns:
-            self for use in with statement
-        """
-        self._start_live()
         return self
 
-    def __exit__(self, *args):
-        """End Live display context."""
-        self._stop_live(*args)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stop_refresh_timer()
+        # If the caller never called set_complete/set_error/cancel (or we're
+        # exiting via exception), clean up subagent state and restore the
+        # prior generic spinner so the toolbar doesn't get stuck.
+        if not self._subagent_finished:
+            progress = self.chat_manager.progress
+            if progress.subagent_active or progress.subagent_done_state:
+                progress.clear_subagent()
+            self._restore_spinner()
+            self.chat_manager.invalidate_toolbar()
+        return False
 
-    def _start_live(self):
-        """Start the Rich Live display and spinner if not already active."""
-        if self._live:
-            return
+    # ------------------------------------------------------------------
+    # token_info property (backward compat)
+    # ------------------------------------------------------------------
 
-        self._stop_spinner.clear()
-        self._saved_termios = self._set_raw_mode()
-        panel = self._render_panel()
-        self._live = Live(panel, console=self.console, refresh_per_second=10)
-        self._live.__enter__()
+    @property
+    def token_info(self):
+        return self.chat_manager.progress.subagent_token_info
 
-        self._spinner_thread = threading.Thread(target=self._spin, daemon=True)
-        self._spinner_thread.start()
-
-    def _stop_live(self, *args, transient=False):
-        """Stop the Rich Live display and restore terminal mode."""
-        self._stop_spinner.set()
-        if self._spinner_thread:
-            self._spinner_thread.join(timeout=0.5)
-            self._spinner_thread = None
-        if self._live:
-            live = self._live
-            self._live = None
-            if transient:
-                live.transient = True
-            live.__exit__(*args)
-        self._restore_terminal_mode(self._saved_termios)
-        self._saved_termios = None
-
-    def suspend(self):
-        """Temporarily release terminal ownership for an interactive prompt."""
-        if not self._live:
-            return False
-        self._stop_live(None, None, None, transient=True)
-        self._suspended = True
-        return True
-
-    def resume(self):
-        """Resume the live panel after a temporary suspension."""
-        if not self._suspended:
-            return
-        self._suspended = False
-        if self._show_spinner:
-            self._start_live()
+    @token_info.setter
+    def token_info(self, value):
+        self.chat_manager.progress.update_subagent_tokens(value)
+        self.chat_manager.invalidate_toolbar()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def add_tool_call(self, tool_name, tool_result=None, command=None):
-        """Add a tool call message to the panel and refresh display.
-
-        Delegates formatting to core.tool_feedback.build_panel_tool_message
-        to avoid duplicating display logic.
-
-        Args:
-            tool_name: Name of the tool (e.g., "read_file", "rg")
-            tool_result: Optional tool result string (for detailed formatting)
-            command: Optional command string for context
-        """
+        """Add a tool call and update toolbar progress."""
         self.total_tool_calls += 1
         message = build_panel_tool_message(tool_name, tool_result, command)
         self.tool_calls.append(message)
-        # Keep only last 5 tool calls
         if len(self.tool_calls) > 5:
             self.tool_calls.pop(0)
-        if self._live:
-            self._live.update(self._render_panel())
+        summary = tool_name
+        if command:
+            summary = f"{tool_name}: {command[:30]}"
+        # Store the tool call line in the activity log
+        self.chat_manager.progress.update_subagent_tool_call(summary, message or summary)
+        self.chat_manager.invalidate_toolbar()
 
     def append(self, text):
-        """Append text to panel and refresh display (kept for compatibility).
+        """Store result/detail text in the toolbar activity log.
 
-        Args:
-            text: Text to append (may contain Rich markup)
+        Called by _print_or_append after add_tool_call. Only store if the
+        text looks like a result line (starts with ╰─ or similar), to avoid
+        duplicating the tool name already stored by add_tool_call.
         """
-        # Update panel to refresh title counter (no-op if context manager not entered)
-        if self._live:
-            self._live.update(self._render_panel())
+        if text and text.strip():
+            stripped = text.strip()
+            # Skip if this is a duplicate of what add_tool_call already stored
+            # (build_panel_tool_message includes the result line in its output)
+            with self.chat_manager.progress._lock:
+                log = self.chat_manager.progress.subagent_activity_log
+                if log and stripped in log[-1]:
+                    return
+            self.chat_manager.progress.update_subagent_activity(stripped)
+        self.chat_manager.invalidate_toolbar()
 
     def set_complete(self, usage=None):
-        """Mark panel as complete with optional token info.
-
-        Args:
-            usage: Optional dict with 'prompt', 'completion', 'total' token counts
-        """
-        self._show_spinner = False  # Stop spinner
-
-        if not self._live:
-            return
-
-        # Build title with token usage: conversation length first, total billed second
+        """Mark subagent as complete."""
+        self._stop_refresh_timer()
+        self._subagent_finished = True
         if usage and usage.get('total_tokens'):
             ctx_tokens = usage.get('context_tokens', 0)
             total_tokens = usage.get('total_tokens', 0)
-            title = f"[green]✓ Sub-Agent Complete ({self.total_tool_calls}) - {ctx_tokens:,} curr, {total_tokens:,} total[/green]"
-        else:
-            title = f"[green]✓ Sub-Agent Complete ({self.total_tool_calls})[/green]"
-
-        self._live.update(self._render_panel(
-            title=title,
-            border_style="green"
-        ))
+            self.chat_manager.progress.update_subagent_tokens(
+                f"{ctx_tokens:,} curr, {total_tokens:,} total"
+            )
+        self.chat_manager.progress.finish_subagent()
+        self._restore_spinner()
+        self.chat_manager.invalidate_toolbar()
 
     def set_error(self, message):
-        """Show error in panel with red styling.
+        """Mark subagent as error."""
+        self._stop_refresh_timer()
+        self._subagent_finished = True
+        self.chat_manager.progress.finish_subagent(error=message)
+        self._restore_spinner()
+        self.chat_manager.invalidate_toolbar()
 
-        Args:
-            message: Error message to display
+    def cancel(self):
+        """Clear subagent display on user cancellation.
+
+        Stops the refresh timer, clears subagent state from the progress
+        bar, stops any active spinner, and invalidates the toolbar.
+        Does NOT restore the generic spinner — user cancellation should
+        fully clear active progress.
         """
-        self._show_spinner = False  # Stop spinner
-        if not self._live:
-            return
-        self._live.update(Panel(
-            message,
-            title="[red]✗ Sub-Agent Error[/red]",
-            title_align="left",
-            border_style="red",
-            padding=(0, 1),
-        ))
+        self._stop_refresh_timer()
+        self._subagent_finished = True
+        self.chat_manager.progress.clear_subagent()
+        self.chat_manager.progress.stop_spinner()
+        self.chat_manager.invalidate_toolbar()

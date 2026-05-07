@@ -217,7 +217,7 @@ class SettingSelector(ToolbarInteraction):
     def _render_settings_window(self) -> list:
         """Render a windowed list of settings around the focused one."""
         lines_out = []
-        _MAX_VISIBLE = 4
+        _MAX_VISIBLE = 8
         total = self._total_setting_rows()
 
         if total == 0:
@@ -261,7 +261,7 @@ class SettingSelector(ToolbarInteraction):
     def _render_options_window(self, setting: "SettingOption") -> list:
         """Render a windowed radio-button list of options for an options-type setting."""
         lines_out = []
-        _MAX_VISIBLE = 5
+        _MAX_OPTIONS = 7  # 7 options + 1 header line = 8 total, matching settings window
         options = setting.options or []
         total = len(options)
 
@@ -276,15 +276,15 @@ class SettingSelector(ToolbarInteraction):
             (i for i, o in enumerate(options) if o.get("value") == setting.value), 0
         )
 
-        if total <= _MAX_VISIBLE:
+        if total <= _MAX_OPTIONS:
             visible_start = 0
             visible_end = total
         else:
-            half = _MAX_VISIBLE // 2
+            half = _MAX_OPTIONS // 2
             visible_start = max(0, current_idx - half)
-            visible_end = min(total, visible_start + _MAX_VISIBLE)
-            if visible_end - visible_start < _MAX_VISIBLE:
-                visible_start = max(0, visible_end - _MAX_VISIBLE)
+            visible_end = min(total, visible_start + _MAX_OPTIONS)
+            if visible_end - visible_start < _MAX_OPTIONS:
+                visible_start = max(0, visible_end - _MAX_OPTIONS)
 
         if visible_start > 0:
             lines_out.append(
