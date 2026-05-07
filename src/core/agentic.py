@@ -1260,6 +1260,8 @@ class AgenticOrchestrator:
                                 elif self._can_suspend_approval():
                                     # Auto-approve when accept_edits mode is active
                                     if self.chat_manager.approve_mode == "accept_edits":
+                                        console.print(preview)
+                                        console.print()
                                         from tools.edit import _execute_edit_file
                                         approved_result = _execute_edit_file(
                                             path=arguments.get('path'),

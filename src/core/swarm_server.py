@@ -1021,5 +1021,11 @@ class SwarmServer:
         self.stop_all(force=force)
         if self._thread:
             self._thread.join(timeout=5)
+            # If the thread is still alive, the event loop didn't stop on its
+            # own (e.g. wait_closed didn't unblock). Force-stop the loop from
+            # inside its own thread and wait again.
+            if self._thread.is_alive() and self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                self._thread.join(timeout=5)
         if self._loop and not self._loop.is_closed():
             self._loop.close()

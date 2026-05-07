@@ -1,5 +1,6 @@
 """Transient progress state for toolbar rendering."""
 
+import random
 import threading
 import time
 
@@ -9,6 +10,120 @@ class ProgressState:
 
     SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
+    _COMMON_WORDS = [
+        "Thinking",
+        "Chunking",
+        "Completing",
+        "Computing",
+        "Programming",
+        "Understanding",
+        "Vibing",
+        "Perpetuating",
+        "Analyzing",
+        "Evaluating",
+        "Synthesizing",
+        "Working",
+        "Debugging",
+        "Scrutinizing",
+        "Formulating",
+        "Predicting next token",
+        "Outsourcing",
+        "Checking vitals",
+        "Scanning fingerprints",
+        "Rerouting",
+        "Refactoring",
+        "Burning tokens",
+        "Conjuring",
+        "Recalculating",
+        "Spinning",
+        "Pointing",
+        "Dematerializing",
+        "Compiling",
+        "Fetching",
+        "Buffering",
+        "Syncing",
+        "Caching",
+        "Connecting",
+        "Indexing",
+        "Authenticating",
+        "Validating",
+    ]
+
+    _RARE_WORDS = [
+        '"Engineering"',
+        "Deleting (jk)",
+        "Computer... Fix my program",
+        "Exiting VIM",
+        "Rolling for perception",
+        "Pinging",
+        "Ponging",
+        "Programming HTML",
+        "Leaking memory",
+        "Cooking",
+        "Mining",
+        "Crafting",
+        "Pushing to prod",
+        "Checking with Altman",
+        "Collecting 200",
+        "Rebooting",
+        "Wasting water",
+        "Asking Stack Overflow",
+        "Reading the docs",
+        "Asking ChatGPT",
+        "Binging it",
+        "Googling it",
+        "Dockerizing",
+        "Forking it",
+        "Checking the logs",
+        "Checking the backup",
+        "Performing vLookup",
+        "Downloading more RAM",
+        "Performing SumIf",
+        "Spinning up servers",
+        "Getting chat completion",
+        "Merging conflicts",
+        "Feature creeping",
+    ]
+
+    _LEGENDARY_WORDS = [
+        "I'm confused",
+        "Running in O(n²)",
+        "Checking Jira",
+        "Gaining consciousness",
+        "Mining Bitcoin",
+        "Accessing null pointer",
+        "FIXING ME",
+        "READING ME",
+        "Converting to PDF and back",
+        "Rewriting in Rust",
+        "Rewriting in JavaScript",
+        "Recursively calling myself",
+        "Contacting AWS Support",
+        "Reviewing footage",
+        "Dedotating wam",
+        "Pondering the orb",
+        "Computer... ENHANCE",
+        "Consulting council",
+        "Releasing the files",
+        "Redacting the files",
+        "Uhhhh",
+        "Selling data",
+        "Okeyyy lets go",
+    ]
+
+    WORD_ROTATION_INTERVAL = 15.0  # seconds between word changes
+
+    @classmethod
+    def random_word(cls):
+        """Pick a random fun word (weighted: 80% common, 15% rare, 5% legendary)."""
+        roll = random.random()
+        if roll < 0.80:
+            return random.choice(cls._COMMON_WORDS)
+        elif roll < 0.95:
+            return random.choice(cls._RARE_WORDS)
+        else:
+            return random.choice(cls._LEGENDARY_WORDS)
+
     def __init__(self):
         self._lock = threading.Lock()
         # Spinner state
@@ -16,6 +131,7 @@ class ProgressState:
         self.spinner_started_at = None  # time.monotonic()
         self.spinner_frame_index = 0
         self.spinner_message = ""
+        self._last_word_change = 0.0  # monotonic timestamp
         # Active tool (shown during tool execution)
         self.active_tool_name = None
         # Subagent state
@@ -31,24 +147,32 @@ class ProgressState:
 
     # --- Spinner ---
 
-    def start_spinner(self, message=""):
+    def start_spinner(self, message=None):
         with self._lock:
             self.spinner_active = True
             self.spinner_started_at = time.monotonic()
             self.spinner_frame_index = 0
-            self.spinner_message = message
+            self.spinner_message = message if message is not None else self.random_word()
+            self._last_word_change = time.monotonic()
 
     def stop_spinner(self):
         with self._lock:
             self.spinner_active = False
             self.spinner_started_at = None
             self.spinner_message = ""
+            self._last_word_change = 0.0
 
     def advance_spinner(self):
-        """Advance spinner frame. Called by timer thread."""
+        """Advance spinner frame and rotate word if interval elapsed."""
         with self._lock:
             if self.spinner_active or self.subagent_active:
                 self.spinner_frame_index += 1
+            # Rotate fun word every WORD_ROTATION_INTERVAL seconds
+            if self.spinner_active and self.spinner_started_at:
+                now = time.monotonic()
+                if now - self._last_word_change >= self.WORD_ROTATION_INTERVAL:
+                    self.spinner_message = self.random_word()
+                    self._last_word_change = now
 
     def get_spinner_text(self):
         """Return formatted spinner string like ‘⠋ Thinking ... (3s)’."""
@@ -62,7 +186,7 @@ class ProgressState:
             else:
                 time_str = f"{int(elapsed)}s"
             msg = self.spinner_message or "Working"
-            return f"{frame} {msg} ({time_str})"
+            return f"{frame} {msg} ... ({time_str})"
 
     # --- Active tool ---
 

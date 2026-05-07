@@ -3882,9 +3882,14 @@ def _handle_swarm_close(chat_manager, console):
     console.print(f"[dim]Stopping swarm server '{server.swarm_name}'...[/dim]")
 
     try:
-        server.stop(force=True)
-    except Exception as e:
-        console.print(f"[red]Error stopping server: {e}[/red]")
+        # Try graceful shutdown first (sends stop_worker to workers,
+        # awaits wait_closed). Fall back to force if that fails.
+        server.stop(force=False)
+    except Exception:
+        try:
+            server.stop(force=True)
+        except Exception as e:
+            console.print(f"[red]Error stopping server: {e}[/red]")
 
     chat_manager.stop_swarm_inbox_poller()
     chat_manager.swarm_server = None

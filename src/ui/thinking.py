@@ -1,8 +1,9 @@
 """ThinkingIndicator — Rich spinner with rotating messages and elapsed time."""
 
-import random
 import threading
 import time
+
+from .status_state import ProgressState
 
 SPINNER_REFRESH_INTERVAL = 0.1
 
@@ -16,108 +17,7 @@ class ThinkingIndicator:
         self.spinner = spinner
         self.chat_manager = chat_manager
         self._last_word_change = 0
-        self._word_change_interval = 15.0  # Change word every 15 seconds
-        
-        self._common_words = [
-            "Thinking ...",
-            "Chunking ...",
-            "Completing ...",
-            "Computing ...",
-            "Programming ...",
-            "Understanding ...",
-            "Vibing ...",
-            "Perpetuating ...",
-            "Analyzing ...",
-            "Evaluating ...",
-            "Synthesizing ...",
-            "Working ...",
-            "Debugging ...",
-            "Scrutinizing ...",
-            "Formulating ...",
-            "Predicting next token ...",
-            "Outsourcing ...",
-            "Checking vitals ...",
-            "Scanning fingerprints ...",
-            "Rerouting ...",
-            "Refactoring ...",
-            "Burning tokens ...",
-            "Conjuring ...",
-            "Recalculating ...",
-            "Spinning ...",
-            "Pointing ...",
-            "Dematerializing ...",
-            "Compiling ...",
-            "Fetching ...",
-            "Buffering ...",
-            "Syncing ...",
-            "Caching ...",
-            "Connecting ...",
-            "Indexing ...",
-            "Authenticating ...",
-            "Validating ...",
-        ]
-
-        self._rare_words = [
-            '"Engineering" ...',
-            "Deleting (jk) ...",
-            "Computer... Fix my program ...",
-            "Exiting VIM ...",
-            "Rolling for perception ...",
-            "Pinging ...",
-            "Ponging ...",
-            "Programming HTML ...",
-            "Leaking memory ...",
-            "Cooking ...",
-            "Mining ...",
-            "Crafting ...",
-            "Pushing to prod ...",
-            "Checking with Altman ...",
-            "Collecting 200 ...",
-            "Rebooting...",
-            "Wasting water ...",
-            "Asking Stack Overflow ...",
-            "Reading the docs ...",
-            "Asking ChatGPT ...",
-            "Binging it ...",
-            "Googling it ...",
-            "Dockerizing ...",
-            "Forking it ...",
-            "Checking the logs ...",
-            "Checking the backup ...",
-            "Performing vLookup ...",
-            "Downloading more RAM ...",
-            "Performing SumIf ...",
-            "Spinning up servers ...",
-            "Getting chat completion ...",
-            "Merging conflicts ...",
-            "Feature creeping ...",
-        ]
-
-        self._legendary_words = [
-            "I'm confused ...",
-            "Running in O(n²) ...",
-            "Checking Jira ...",
-            "Gaining consciousness ...",
-            "Mining Bitcoin ...",
-            "Accessing null pointer ...",
-            "FIXING ME ...",
-            "READING ME ...",
-            "Converting to PDF and back ...",
-            "Rewriting in Rust ...",
-            "Rewriting in JavaScript ...",
-            "Recursively calling myself ...",
-            "Contacting AWS Support ...",
-            "Reviewing footage ...",
-            "Dedotating wam ...",
-            "Pondering the orb ...",
-            "Computer... ENHANCE ...",
-            "Consulting council ...",
-            "Releasing the files ...",
-            "Redacting the files ...",
-            "Uhhhh ...",
-            "Selling data ...",
-            "Okeyyy lets go ...",
-        ]
+        self._word_change_interval = ProgressState.WORD_ROTATION_INTERVAL
         self._status = None
         self._active = False
         self._start_time = None
@@ -126,16 +26,10 @@ class ThinkingIndicator:
         self._elapsed_before_pause = 0.0
         self._has_been_started = False
 
-    def _select_random_word(self):
+    @staticmethod
+    def _select_random_word():
         """Select a random word from weighted word lists."""
-        roll = random.random()
-        
-        if roll < 0.80:
-            return random.choice(self._common_words)
-        elif roll < 0.95:
-            return random.choice(self._rare_words)
-        else:
-            return random.choice(self._legendary_words)
+        return ProgressState.random_word()
 
     @staticmethod
     def _format_time(seconds):

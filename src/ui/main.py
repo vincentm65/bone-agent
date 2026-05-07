@@ -292,7 +292,7 @@ def _resume_orchestrator_with_live_toolbar(
     completion_event = threading.Event()
     result_holder = {'done': False}
     safe_console.set_app(session.app)
-    _start_progress_spinner(chat_manager, "Thinking ...")
+    _start_progress_spinner(chat_manager)
     agent_thread = threading.Thread(
         target=_run_resume_in_thread,
         args=(chat_manager, resume_method_name, completion_event, result_holder),
@@ -675,7 +675,7 @@ def main():
                         completion_event = threading.Event()
                         result_holder = {'done': False}
                         safe_console.set_app(session.app)
-                        _start_progress_spinner(chat_manager, "Thinking ...")
+                        _start_progress_spinner(chat_manager)
                         console.print("─" * console.width, style="rgb(30,30,30)")
                         console.print()
                         agent_thread = threading.Thread(
@@ -958,7 +958,7 @@ def main():
                     completion_event = threading.Event()
                     result_holder = {'done': False}
                     safe_console.set_app(session.app)
-                    _start_progress_spinner(chat_manager, "Thinking ...")
+                    _start_progress_spinner(chat_manager)
                     console.print("─" * console.width, style="rgb(30,30,30)")
                     console.print()  # Extra newline after user input to separate from LLM response
                     agent_thread = threading.Thread(
