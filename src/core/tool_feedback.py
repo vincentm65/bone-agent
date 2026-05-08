@@ -172,8 +172,6 @@ def build_tool_label(function_name, arguments):
         approved = arguments.get('approved', False)
         action = "approve" if approved else "deny"
         return f"handle_approval: {action} {task_id}/{call_id}"
-    elif function_name == "mark_swarm_complete":
-        return "mark_swarm_complete"
     elif function_name == "kill_swarm_worker":
         worker_id = arguments.get('worker_id', '?')
         return f"kill_swarm_worker: {worker_id}"
@@ -535,13 +533,9 @@ def _format_swarm_tool_summary(command, tool_result):
                 section = None
             elif stripped == "Write scope:":
                 section = "write_scope"
-            elif stripped == "Prompt sent:":
-                section = "prompt"
             elif section == "write_scope":
                 if stripped.startswith("- "):
                     write_scope.append(stripped[2:])
-            elif section == "prompt":
-                continue
 
         scope_text = ", ".join(write_scope) if write_scope else "none"
         status_text = f" ({status})" if status else ""
@@ -713,7 +707,7 @@ def display_tool_feedback(command, tool_result, console, indent=False, panel_upd
         return
 
     # For swarm admin tools: display a concise console summary.
-    if command.startswith(("dispatch_swarm_task", "handle_approval", "mark_swarm_complete", "kill_swarm_worker")):
+    if command.startswith(("dispatch_swarm_task", "handle_approval", "kill_swarm_worker")):
         summary, is_failure = _format_swarm_tool_summary(command, tool_result)
         prefix = "╰─ " if not panel_updater else ""
         if is_failure:
@@ -903,12 +897,14 @@ def build_panel_tool_message(tool_name, tool_result, command):
         first_two = "\n".join(tool_result.splitlines()[:2]).strip()
         return f"[grey]{tool_name}[/grey]\n[dim]╰─ {first_two or tool_result.strip()}[/dim]"
 
-    if tool_name in ("dispatch_swarm_task", "handle_approval", "mark_swarm_complete", "kill_swarm_worker"):
+    if tool_name in ("dispatch_swarm_task", "handle_approval", "kill_swarm_worker"):
         label = command if command else tool_name
         summary, is_failure = _format_swarm_tool_summary(command or tool_name, tool_result)
         if is_failure:
             return f"[grey]{label}[/grey]\n[dim red]╰─ {summary or 'Failed'}[/dim red]"
-        return f"[grey]{label}[/grey]\n[dim]╰─ {summary or 'Completed'}[/dim]"
+        if not summary:
+            return f"[grey]{label}[/grey]"
+        return f"[grey]{label}[/grey]\n[dim]╰─ {summary}[/dim]"
 
     return f"[grey]{tool_name}[/grey]"
 

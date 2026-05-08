@@ -39,8 +39,6 @@ def format_worker_label(worker_id: str) -> str:
 
 def format_swarm_toolbar_lines(
     snapshot: dict,
-    max_requests: int = 3,
-    pending_by_worker: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[str]:
     """Return compact toolbar lines for live swarm status.
 
@@ -58,14 +56,8 @@ def format_swarm_toolbar_lines(
     matching ``worker_id``.  Prompt previews are intentionally excluded
     from toolbar worker lines to keep them compact.
 
-    Both ``max_requests`` and ``pending_by_worker`` are retained for
-    backward compatibility but no longer used — all state is derived
-    from the server snapshot.
-
     Args:
         snapshot: dict from ``SwarmServer.status_snapshot()``.
-        max_requests: deprecated, ignored.
-        pending_by_worker: deprecated, ignored.
 
     Returns:
         List of short status lines.
@@ -122,8 +114,6 @@ def format_task_list_toolbar_line(
     title: str | None = None,
     max_next_len: int = 70,
     swarm_complete: bool = False,
-    swarm_complete_summary: str = "",
-    plan_map: dict | None = None,
     max_visible: int = 6,
 ) -> list[str]:
     """Return toolbar lines showing plan checklist with in-flight markers.
@@ -141,9 +131,6 @@ def format_task_list_toolbar_line(
         title: Task list title shown in the header line.
         max_next_len: Max length of task descriptions before truncation.
         swarm_complete: If True, show a completion banner instead.
-        swarm_complete_summary: Summary text for the completion banner.
-        plan_map: Optional dict mapping task_id -> plan_index, sourced
-                  from ``chat_manager._swarm_task_plan_map``.
         max_visible: Maximum task lines to show before truncation.
 
     Returns:
@@ -152,10 +139,6 @@ def format_task_list_toolbar_line(
     """
     # When swarm is marked complete, show a single-line completion banner.
     if swarm_complete:
-        summary = swarm_complete_summary.strip()
-        if summary:
-            truncated = summary[:max_next_len] + "..." if len(summary) > max_next_len else summary
-            return [f"Swarm: complete - {truncated}"]
         return ["Swarm: complete"]
 
     # No task list at all — nothing to show.
@@ -175,15 +158,6 @@ def format_task_list_toolbar_line(
             pi = tinfo.get("plan_index")
             status = tinfo.get("status", "")
             if pi is not None and status in ("dispatched", "running"):
-                plan_indices_in_flight.add(int(pi))
-
-    # plan_map fallback: includes tasks that may have left the server's
-    # active dict but whose plan_index was recorded at dispatch time.
-    if plan_map and snapshot:
-        for _tid, pi in plan_map.items():
-            # Cross-reference with snapshot to confirm still active.
-            tinfo = snapshot.get("tasks", {}).get(_tid)
-            if tinfo and tinfo.get("status") in ("dispatched", "running"):
                 plan_indices_in_flight.add(int(pi))
 
     # ------------------------------------------------------------------
@@ -227,6 +201,27 @@ def format_task_list_toolbar_line(
             visible_set.add(i)
 
         visible_indices = sorted(visible_set)
+
+    # ------------------------------------------------------------------
+    # Final overflow clamp: if mandatory in-flight items pushed us past
+    # max_visible, truncate and re-count hidden.
+    # ------------------------------------------------------------------
+    if len(visible_indices) > max_visible:
+        # Prioritize in-flight (↻), then pending (○), then completed (✓).
+        def _sort_key(idx: int) -> int:
+            m = markers[idx]
+            if m == "\u21bb":    # ↻ in-flight — highest priority
+                return 0
+            if m == "\u25cb":    # ○ pending
+                return 1
+            return 2             # ✓ completed — lowest priority
+
+        visible_indices = sorted(
+            sorted(visible_indices),   # stable: preserve order within tier
+            key=_sort_key,
+        )[:max_visible]
+        # Restore original index order for display.
+        visible_indices = sorted(visible_indices)
 
     hidden_count = total - len(visible_indices)
 

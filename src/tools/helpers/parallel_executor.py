@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 from .base import ToolRegistry, build_context
 
+_DEFAULT_TOOL_TIMEOUT_SECONDS = 90
+
 
 @dataclass
 class ToolCall:
@@ -86,13 +88,18 @@ class ParallelToolExecutor:
             # Fast path for single tool (no threading overhead)
             return self._execute_single(tool_calls[0], context)
 
-        # Parallel execution for multiple tools
+        # Parallel execution for multiple tools. Bound the batch wait so one
+        # stuck network/plugin call cannot leave the UI spinner alive forever.
         results = []
-
-        with concurrent.futures.ThreadPoolExecutor(
+        completed_futures = set()
+        timeout_seconds = context.get(
+            "tool_timeout_seconds",
+            _DEFAULT_TOOL_TIMEOUT_SECONDS,
+        )
+        executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.max_workers, len(tool_calls))
-        ) as executor:
-            # Submit all tool executions
+        )
+        try:
             future_to_call = {
                 executor.submit(
                     self._execute_single_tool,
@@ -102,20 +109,42 @@ class ParallelToolExecutor:
                 for tool_call in tool_calls
             }
 
-            # Collect results as they complete
-            for future in concurrent.futures.as_completed(future_to_call):
-                tool_call = future_to_call[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
+            try:
+                completed_iter = concurrent.futures.as_completed(
+                    future_to_call,
+                    timeout=timeout_seconds,
+                )
+                for future in completed_iter:
+                    completed_futures.add(future)
+                    tool_call = future_to_call[future]
+                    try:
+                        result = future.result()
+                        results.append(result)
+                    except Exception as e:
+                        results.append(ToolResult(
+                            tool_id=tool_call.tool_id,
+                            call_index=tool_call.call_index,
+                            success=False,
+                            result="",
+                            error=str(e)
+                        ))
+            except concurrent.futures.TimeoutError:
+                for future, tool_call in future_to_call.items():
+                    if future in completed_futures:
+                        continue
+                    future.cancel()
                     results.append(ToolResult(
                         tool_id=tool_call.tool_id,
                         call_index=tool_call.call_index,
                         success=False,
                         result="",
-                        error=str(e)
+                        error=(
+                            f"Tool '{tool_call.function_name}' timed out after "
+                            f"{timeout_seconds} seconds"
+                        ),
                     ))
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # Sort by call_index to maintain order
         results.sort(key=lambda r: r.call_index)

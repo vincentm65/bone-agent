@@ -495,6 +495,11 @@ def build_sub_agent_prompt(sub_agent_type: str = "research", soft_limit_tokens: 
 # Admin-mode sections to suppress in swarm admin prompt
 _ADMIN_SUPPRESS_SECTIONS = {"editing_pattern", "task_lists_pattern", "temp_folder", "mode"}
 
+# Worker-mode sections to suppress in swarm worker prompt.
+# Suppresses the default mode section (replaced by swarm_worker_mode.md)
+# and sub-agent delegation guidance (workers are leaf agents).
+_WORKER_SUPPRESS_SECTIONS = {"mode", "when_to_use_sub_agent"}
+
 
 def _admin_sections(variant: str) -> list[tuple[str, callable]]:
     """Return main sections for swarm admin prompt, suppressing edit/task/temp sections.
@@ -506,6 +511,19 @@ def _admin_sections(variant: str) -> list[tuple[str, callable]]:
     return [
         (key, fn) for key, fn in all_sections
         if key not in _ADMIN_SUPPRESS_SECTIONS
+    ]
+
+
+def _worker_sections(variant: str) -> list[tuple[str, callable]]:
+    """Return main sections for swarm worker prompt, suppressing mode and sub-agent guidance.
+
+    Workers are leaf agents — they should not see edit-mode instructions
+    or sub-agent delegation guidance.
+    """
+    all_sections = _main_sections(variant)
+    return [
+        (key, fn) for key, fn in all_sections
+        if key not in _WORKER_SUPPRESS_SECTIONS
     ]
 
 
@@ -546,8 +564,9 @@ def build_swarm_admin_prompt(variant: str | None = None, active_skills_section: 
 def build_swarm_worker_prompt(variant: str | None = None) -> str:
     """Build system prompt for swarm worker.
 
-    Reuses main sections (full tool guidance) and appends
-    swarm_worker_mode.md as the final mode section.
+    Reuses main sections with mode and sub-agent guidance suppressed
+    (workers are leaf agents). Appends swarm_worker_mode.md as the
+    final mode section.
 
     Args:
         variant: Variant name ('main' or 'micro'). Defaults to settings.
@@ -563,7 +582,7 @@ def build_swarm_worker_prompt(variant: str | None = None) -> str:
             f"{_PROMPTS_DIR / variant} does not exist"
         )
 
-    result = _build_prompt(_main_sections(variant))
+    result = _build_prompt(_worker_sections(variant))
 
     # Append the swarm worker mode section as the final section
     mode_content = _static(variant, "swarm_worker_mode.md")

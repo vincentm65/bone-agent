@@ -16,7 +16,7 @@ CHAINING_OPERATORS = re.compile(
 )
 
 # Localhost patterns allowed over plain HTTP (no TLS needed for loopback)
-_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def validate_api_url(url: str) -> tuple[bool, str]:

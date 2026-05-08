@@ -285,7 +285,6 @@ class AgenticOrchestrator:
                 "dispatch_swarm_task",
                 "handle_approval",
                 "kill_swarm_worker",
-                "mark_swarm_complete",
             }
             return [
                 tool for tool in tools
@@ -345,29 +344,7 @@ class AgenticOrchestrator:
                     self.console.print(f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]")
 
                 # ── Mid-turn swarm inbox injection ──────────────────────
-                # Drain any auto-turn prompts that the background poller
-                # queued since the last iteration (e.g. worker approvals
-                # or completions that arrived during the LLM HTTP call or
-                # tool execution).  Inject them as synthetic user messages
-                # so the admin agent handles swarm events without waiting
-                # for the current turn to end.
-                inject_queue = getattr(self.chat_manager, '_swarm_inject_queue', None)
-                if inject_queue is not None:
-                    pending_prompts = []
-                    while not inject_queue.empty():
-                        try:
-                            pending_prompts.append(inject_queue.get_nowait())
-                        except Exception:
-                            break
-                    if pending_prompts:
-                        inject_content = "\n\n---\n\n".join(pending_prompts)
-                        inject_msg = {"role": "user", "content": inject_content}
-                        self.chat_manager.messages.append(inject_msg)
-                        self.chat_manager.log_message(inject_msg)
-                        if self.debug_mode:
-                            self.console.print(
-                                f"[dim]Injected {len(pending_prompts)} swarm event(s) mid-turn[/dim]"
-                            )
+                self._drain_and_inject_swarm_messages()
 
                 # Get response from LLM
                 response = self._get_llm_response(
@@ -474,10 +451,6 @@ class AgenticOrchestrator:
                         value_str = str(value)
                         if "\n" in value_str and key != "original_error":
                             detail_lines.append(f"{key}: {value_str}")
-                    # TEMP DEBUG: surface provider-side bad-request bodies.
-                    # Remove after the DeepSeek 400 payload issue is diagnosed.
-                    if details.get("status_code") == 400 and details.get("original_error"):
-                        detail_lines.append(f"original_error: {details['original_error']}")
                     detailed_error = str(e)
                     if detail_lines:
                         detailed_error += "\n\n" + "\n\n".join(detail_lines)
@@ -637,7 +610,7 @@ class AgenticOrchestrator:
                 filtered_tool_ids.append(tool_call.get("id"))
                 continue
 
-            _admin_swarm_tools = {"dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "mark_swarm_complete"}
+            _admin_swarm_tools = {"dispatch_swarm_task", "handle_approval", "kill_swarm_worker"}
             if function_name in _admin_swarm_tools and not getattr(self.chat_manager, "swarm_admin_mode", False):
                 # Swarm tools are only available to the admin agent.
                 if self.debug_mode:
@@ -1056,6 +1029,10 @@ class AgenticOrchestrator:
                     self.chat_manager.messages.append(tool_msg)
                     # Log tool result
                     self.chat_manager.log_message(tool_msg)
+
+                    self._check_swarm_completion(
+                        tool_calls[result.call_index].get("function", {}).get("name", "")
+                    )
                 else:
                     # Tool failed
                     error_msg = result.error or result.result
@@ -1574,6 +1551,8 @@ class AgenticOrchestrator:
                             # Then display feedback
                             display_tool_feedback(label, result, console, indent=self.is_sub_agent, panel_updater=self.panel_updater)
 
+                self._check_swarm_completion(function_name)
+
                 return False, result_str
             except (ToolApprovalSuspended, SelectionSuspended, BoundaryApprovalSuspended):
                 # Re-raise suspension exceptions so they propagate to
@@ -1917,6 +1896,64 @@ class AgenticOrchestrator:
 
         return self._continue_loop(thinking_indicator)
 
+    def _check_swarm_completion(self, fn_name: str) -> None:
+        """Mark swarm complete if admin just finished the last task."""
+        if fn_name == "complete_task" and getattr(self.chat_manager, "swarm_admin_mode", False):
+            task_list = getattr(self.chat_manager, "task_list", None) or []
+            if task_list and all(t.get("completed") for t in task_list):
+                self.chat_manager.swarm_complete = True
+
+    def _drain_and_inject_swarm_messages(self):
+        """Drain swarm inject queue, evict old [AUTO-TURN] messages, inject new ones.
+
+        Injects mid-turn swarm events (worker approvals, completions) as
+        synthetic user messages prefixed with [AUTO-TURN].  Before injecting,
+        evicts the oldest [AUTO-TURN] messages, capping them at 5 to prevent
+        unbounded context growth in long-running swarm sessions.
+        """
+        inject_queue = getattr(self.chat_manager, '_swarm_inject_queue', None)
+        if inject_queue is None:
+            return
+
+        pending_prompts = []
+        while not inject_queue.empty():
+            try:
+                pending_prompts.append(inject_queue.get_nowait())
+            except Exception:
+                break
+
+        if not pending_prompts:
+            return
+
+        # Evict old [AUTO-TURN] messages, keeping the last N (cap at 5 total)
+        AUTO_TURN_TAG = "[AUTO-TURN]"
+        MAX_AUTO_TURN = 5
+        auto_turn_indices = [
+            i for i, msg in enumerate(self.chat_manager.messages)
+            if isinstance(msg.get("content"), str)
+            and msg["content"].startswith(AUTO_TURN_TAG)
+        ]
+        if len(auto_turn_indices) >= MAX_AUTO_TURN:
+            # Remove the oldest, leaving room for the new injection
+            to_remove = auto_turn_indices[:-(MAX_AUTO_TURN - 1)]
+            for idx in reversed(to_remove):
+                del self.chat_manager.messages[idx]
+            if self.debug_mode:
+                self.console.print(
+                    "[dim]Evicted %d old [AUTO-TURN] message(s)[/dim]"
+                    % len(to_remove)
+                )
+
+        inject_content = AUTO_TURN_TAG + "\n" + "\n\n---\n\n".join(pending_prompts)
+        inject_msg = {"role": "user", "content": inject_content}
+        self.chat_manager.messages.append(inject_msg)
+        self.chat_manager.log_message(inject_msg)
+        if self.debug_mode:
+            self.console.print(
+                "[dim]Injected %d swarm event(s) mid-turn[/dim]"
+                % len(pending_prompts)
+            )
+
     def _continue_loop(self, thinking_indicator=None):
         """Internal: continue the main orchestration loop from its current state.
 
@@ -1936,26 +1973,7 @@ class AgenticOrchestrator:
                     )
 
                 # Mid-turn swarm inbox injection
-                inject_queue = getattr(
-                    self.chat_manager, '_swarm_inject_queue', None
-                )
-                if inject_queue is not None:
-                    pending_prompts = []
-                    while not inject_queue.empty():
-                        try:
-                            pending_prompts.append(inject_queue.get_nowait())
-                        except Exception:
-                            break
-                    if pending_prompts:
-                        inject_content = "\n\n---\n\n".join(pending_prompts)
-                        inject_msg = {"role": "user", "content": inject_content}
-                        self.chat_manager.messages.append(inject_msg)
-                        self.chat_manager.log_message(inject_msg)
-                        if self.debug_mode:
-                            self.console.print(
-                                f"[dim]Injected {len(pending_prompts)} "
-                                f"swarm event(s) mid-turn[/dim]"
-                            )
+                self._drain_and_inject_swarm_messages()
 
                 response = self._get_llm_response(
                     allowed_tools=getattr(self, "_current_allowed_tools", None),

@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import queue
+import secrets
 import threading
 import time
 import uuid
@@ -40,6 +41,7 @@ class SwarmServer:
         self.host = host
         self.port = port
         self.base_url = f"ws://{host}:{port}/{swarm_name}"
+        self._auth_token = secrets.token_hex(16)
 
         # Worker tracking: worker_id -> {websocket, status, current_task_id}
         self._workers: dict[str, dict[str, Any]] = {}
@@ -98,6 +100,17 @@ class SwarmServer:
         with self._lock:
             return [wid for wid, w in self._workers.items() if w["status"] == "idle"]
 
+    @property
+    def connection_info(self) -> dict[str, str]:
+        """Connection details including the auth token.
+
+        The admin can relay these to workers so they can authenticate.
+        """
+        return {
+            "url": self.base_url,
+            "auth_token": self._auth_token,
+        }
+
     def _next_idle_worker_id(self) -> str | None:
         """Pick the next idle worker using a round-robin cursor."""
         with self._lock:
@@ -131,8 +144,15 @@ class SwarmServer:
 
         for attempt in range(MAX_RETRIES + 1):
             try:
-                if self._thread:
-                    self._thread.join(timeout=2)
+                if self._thread and self._thread.is_alive():
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(self._loop.stop)
+                    self._thread.join(timeout=3)
+                    if self._thread.is_alive():
+                        logger.warning(
+                            "Old server thread still alive after stop signal on port %d",
+                            self.port,
+                        )
                 if self._loop and not self._loop.is_closed():
                     self._loop.close()
                 self._loop = asyncio.new_event_loop()
@@ -238,6 +258,16 @@ class SwarmServer:
 
             if msg.get("type") != "worker_hello":
                 await websocket.close(1008, "Expected worker_hello")
+                return
+
+            # Validate auth token (skip for localhost connections)
+            remote_addr = websocket.remote_address
+            is_local = (
+                remote_addr
+                and remote_addr[0] in ("127.0.0.1", "::1")
+            )
+            if not is_local and msg.get("token") != self._auth_token:
+                await websocket.close(1008, "Invalid auth token")
                 return
 
             # Assign worker ID and register (under lock)
@@ -686,12 +716,16 @@ class SwarmServer:
             "guidance": guidance,
         }
         if ws:
-            asyncio.run_coroutine_threadsafe(
-                ws.send(json.dumps(response)),
-                self._loop,
-            ).result(timeout=10)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    ws.send(json.dumps(response)),
+                    self._loop,
+                ).result(timeout=10)
+            except Exception as e:
+                logger.warning("Failed to send approval response to worker %s: %s", worker_id, e)
 
         # Worker resumes the same running task after receiving the response.
+        # Status revert and event storage always execute, even if the send failed.
         with self._lock:
             if worker_id in self._workers:
                 self._workers[worker_id]["status"] = "running"
@@ -735,11 +769,15 @@ class SwarmServer:
             "guidance": reason,
         }
         if ws:
-            asyncio.run_coroutine_threadsafe(
-                ws.send(json.dumps(response)),
-                self._loop,
-            ).result(timeout=10)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    ws.send(json.dumps(response)),
+                    self._loop,
+                ).result(timeout=10)
+            except Exception as e:
+                logger.warning("Failed to send denial response to worker %s: %s", worker_id, e)
 
+        # Status revert and event storage always execute, even if the send failed.
         with self._lock:
             if worker_id in self._workers:
                 self._workers[worker_id]["status"] = "running"
@@ -959,6 +997,7 @@ class SwarmServer:
 
             return {
                 "swarm_name": self.swarm_name,
+                "auth_token": self._auth_token,
                 "worker_count": len(self._workers),
                 "idle_workers": len([w for w in self._workers.values() if w["status"] == "idle"]),
                 "running_tasks": len([t for t in self._tasks.values() if t["status"] == "running"]),
@@ -974,7 +1013,7 @@ class SwarmServer:
         """Send a message to a worker from the server event loop."""
         with self._lock:
             worker = self._workers.get(worker_id)
-            if not worker or worker["status"] == "disconnected":
+            if not worker:
                 return False
             ws = worker["websocket"]
             if not ws:

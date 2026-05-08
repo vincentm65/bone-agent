@@ -20,6 +20,7 @@ from rich.table import Table
 
 from rich import box
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 import logging
 import ssl
@@ -3839,19 +3840,31 @@ def _handle_swarm_start(chat_manager, console, name_arg):
 
 def _handle_swarm_join(chat_manager, console, name_arg):
     """Turn the current session into a swarm worker."""
+    import json
+
     if not name_arg:
-        console.print("[red]Usage: /swarm join <name>[/red]")
+        console.print("[red]Usage: /swarm join <name> [token][/red]")
         return CommandResult(status="handled")
 
-    swarm_name = name_arg
-    server_url = (
-        chat_manager.swarm_server.base_url
-        if chat_manager.swarm_admin_mode and chat_manager.swarm_server
-        else f"ws://{swarm_settings.host}:{swarm_settings.port}/{swarm_name}"
-    )
+    parts = name_arg.split(None, 1)
+    swarm_name = parts[0]
+    auth_token = parts[1] if len(parts) > 1 else ""
+
+    # Auto-connect for localhost: skip token prompt
+    is_local = swarm_settings.host in ("127.0.0.1", "localhost", "::1")
+
+    if not auth_token and not is_local:
+        auth_token = console.input("[bold]Auth token: [/]").strip()
+
+    if not auth_token and not is_local:
+        console.print("[red]No auth token provided. Cannot join swarm.[/red]")
+        return CommandResult(status="handled")
 
     console.print(f"[dim]Joining swarm '{swarm_name}' as worker...[/dim]")
-    return CommandResult(status="swarm_worker", replacement_input=swarm_name)
+    return CommandResult(
+        status="swarm_worker",
+        replacement_input=json.dumps({"swarm_name": swarm_name, "auth_token": auth_token}),
+    )
 
 
 def _handle_swarm_status(chat_manager, console):
@@ -3862,7 +3875,19 @@ def _handle_swarm_status(chat_manager, console):
         return CommandResult(status="handled")
 
     server = chat_manager.swarm_server
-    snap = server.status_snapshot()
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(server.status_snapshot)
+    timed_out = False
+    try:
+        snap = future.result(timeout=5)
+    except FutureTimeoutError:
+        timed_out = True
+        future.cancel()
+        console.print("[red]Swarm status request timed out — the server may be overloaded or unresponsive.[/red]")
+        return CommandResult(status="handled")
+    finally:
+        executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
 
     console.print()
     console.print(Panel(
@@ -3896,6 +3921,7 @@ def _handle_swarm_close(chat_manager, console):
     chat_manager.stop_swarm_inbox_poller()
     chat_manager.swarm_server = None
     chat_manager.swarm_admin_mode = False
+    chat_manager._reset_swarm_state()
 
     chat_manager.update_system_prompt()
 

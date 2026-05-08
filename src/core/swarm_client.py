@@ -36,6 +36,7 @@ class SwarmClient:
         swarm_name: str,
         host: str = "127.0.0.1",
         port: int = 8765,
+        auth_token: str = "",
         on_worker_id: Optional[Callable[[str], None]] = None,
         on_message: Optional[Callable[[dict], None]] = None,
         on_disconnect: Optional[Callable[[], None]] = None,
@@ -46,6 +47,7 @@ class SwarmClient:
             swarm_name: Name of the swarm to join.
             host: WebSocket server host.
             port: WebSocket server port.
+            auth_token: Shared secret for server authentication.
             on_worker_id: Callback fired when worker_id is assigned.
             on_message: Callback fired for each incoming message (before queueing).
             on_disconnect: Callback fired when connection is lost.
@@ -54,6 +56,7 @@ class SwarmClient:
         self.host = host
         self.port = port
         self.base_url = f"ws://{host}:{port}/{swarm_name}"
+        self._auth_token = auth_token
 
         self._on_worker_id = on_worker_id
         self._on_message = on_message
@@ -131,7 +134,7 @@ class SwarmClient:
 
             async with websockets.connect(self.base_url) as ws:
                 self._ws = ws
-                await ws.send(json.dumps({"type": "worker_hello"}))
+                await ws.send(json.dumps({"type": "worker_hello", "token": self._auth_token}))
                 response = await ws.recv()
                 resp = json.loads(response)
                 self._worker_id = resp.get("worker_id", "unknown")

@@ -21,20 +21,20 @@ def resolve_config_path() -> Path:
 CONFIG_PATH = resolve_config_path()
 
 # Environment variable names for API keys (env vars take precedence over config file)
-ENV_API_KEYS = {
-    'ANTHROPIC_API_KEY': os.environ.get('ANTHROPIC_API_KEY'),
-    'OPENAI_API_KEY': os.environ.get('OPENAI_API_KEY'),
-    'GLM_PLAN_API_KEY': os.environ.get('GLM_PLAN_API_KEY'),
-    'GLM_API_KEY': os.environ.get('GLM_API_KEY'),
-    'GEMINI_API_KEY': os.environ.get('GEMINI_API_KEY'),
-    'OPENROUTER_API_KEY': os.environ.get('OPENROUTER_API_KEY'),
-    'KIMI_API_KEY': os.environ.get('KIMI_API_KEY'),
-    'MINIMAX_PLAN_API_KEY': os.environ.get('MINIMAX_PLAN_API_KEY'),
-    'MINIMAX_API_KEY': os.environ.get('MINIMAX_API_KEY'),
-    'BONE_PROXY_API_KEY': os.environ.get('BONE_PROXY_API_KEY'),
-    'CODEX_PLAN_API_KEY': os.environ.get('CODEX_PLAN_API_KEY'),
-    'DEEPSEEK_API_KEY': os.environ.get('DEEPSEEK_API_KEY'),
-}
+ENV_API_KEYS = [
+    'ANTHROPIC_API_KEY',
+    'OPENAI_API_KEY',
+    'GLM_PLAN_API_KEY',
+    'GLM_API_KEY',
+    'GEMINI_API_KEY',
+    'OPENROUTER_API_KEY',
+    'KIMI_API_KEY',
+    'MINIMAX_PLAN_API_KEY',
+    'MINIMAX_API_KEY',
+    'BONE_PROXY_API_KEY',
+    'CODEX_PLAN_API_KEY',
+    'DEEPSEEK_API_KEY',
+]
 
 # Detect platform for llama.cpp paths
 _IS_WINDOWS = platform.system() == "Windows"
@@ -66,7 +66,8 @@ def _load_config():
         config = {}
     
     # Override API keys from environment variables (env vars take precedence)
-    for key, env_value in ENV_API_KEYS.items():
+    for key in ENV_API_KEYS:
+        env_value = os.environ.get(key)
         if env_value:  # Only override if env var is set and non-empty
             config[key] = env_value
     

@@ -7,8 +7,19 @@ Falls back to direct console.print() when no PTK app is running.
 
 import asyncio
 import threading
+import concurrent.futures
 
 from prompt_toolkit.application import in_terminal, run_in_terminal
+
+_TERMINAL_PRINT_TIMEOUT_SECONDS = 5
+
+
+def _wait_for_future(future):
+    """Wait briefly for concurrent futures; asyncio futures use nonblocking check."""
+    if isinstance(future, concurrent.futures.Future):
+        future.result(timeout=_TERMINAL_PRINT_TIMEOUT_SECONDS)
+    elif hasattr(future, "done") and future.done():
+        future.result()
 
 
 class SafeConsole:
@@ -82,12 +93,18 @@ class SafeConsole:
                             self._run_in_terminal(app, func, *args, **kwargs),
                             loop,
                         )
-                        future.result()
+                        future.result(timeout=_TERMINAL_PRINT_TIMEOUT_SECONDS)
                 else:
                     future = run_in_terminal(lambda: func(*args, **kwargs))
                     if hasattr(future, "result"):
-                        future.result()
+                        _wait_for_future(future)
                     app.invalidate()
+                return
+            except concurrent.futures.TimeoutError:
+                try:
+                    app.invalidate()
+                except Exception:
+                    pass
                 return
             except Exception:
                 pass  # Fall through to direct call

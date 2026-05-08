@@ -214,6 +214,17 @@ def _safe_print(console, session, *args, **kwargs):
         console.print(*args, **kwargs)
 
 
+def _invalidate_prompt_app(app):
+    """Request a PTK repaint from any thread."""
+    if not app or not app.is_running:
+        return
+    loop = getattr(app, "loop", None)
+    if loop and loop.is_running():
+        loop.call_soon_threadsafe(app.invalidate)
+    else:
+        app.invalidate()
+
+
 # ── Helper: agent-in-thread wrapper ───────────────────────────────
 
 def _run_agent_in_thread(chat_manager, user_content, console, safe_console,
@@ -603,11 +614,7 @@ def main():
     session = PromptSession(key_bindings=bindings, style=TOOLBAR_STYLE)
 
     # Register PTK toolbar invalidation callback (called from background thread)
-    chat_manager._invalidate_toolbar = lambda: (
-        session.app.invalidate()
-        if session.app and session.app.is_running
-        else None
-    )
+    chat_manager._invalidate_toolbar = lambda: _invalidate_prompt_app(session.app)
 
     handoff_to_worker = False
 
@@ -861,9 +868,12 @@ def main():
                     chat_manager.cleanup()
                     handoff_to_worker = True
 
+                    import json as _json
+                    _payload = _json.loads(modified_input)
                     from core.swarm_worker import run_worker_cli
                     return run_worker_cli(
-                        swarm_name=modified_input,
+                        swarm_name=_payload["swarm_name"],
+                        auth_token=_payload["auth_token"],
                         repo_root=str(Path.cwd()),
                         rg_exe_path=RG_EXE_PATH,
                         host=swarm_settings.host,
@@ -1123,6 +1133,7 @@ if __name__ == "__main__":
     parser.add_argument("--worker", metavar="SWARM_NAME", help="Run as a swarm worker (joins the named swarm)")
     parser.add_argument("--swarm-host", default="127.0.0.1", help="Swarm server host for --worker")
     parser.add_argument("--swarm-port", type=int, default=8765, help="Swarm server port for --worker")
+    parser.add_argument("--auth-token", default="", help="Auth token for swarm server")
     args = parser.parse_args()
 
     if args.cron_run:
@@ -1139,6 +1150,7 @@ if __name__ == "__main__":
                 rg_exe_path=RG_EXE_PATH,
                 host=args.swarm_host,
                 port=args.swarm_port,
+                auth_token=args.auth_token,
             )
         )
 

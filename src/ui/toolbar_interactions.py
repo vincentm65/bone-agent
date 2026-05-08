@@ -910,26 +910,15 @@ def run_toolbar_interaction(
     """
     # ------------------------------------------------------------------
     # Monkey-patch finish/cancel to also call get_app().exit().
+    # Save originals first so the finally-block can restore them.
     # ------------------------------------------------------------------
     _orig_finish = interaction.finish
     _orig_cancel = interaction.cancel
 
-    def _patched_finish(result: Any = None) -> None:
-        _orig_finish(result)
-        try:
-            get_app().exit(result=result)
-        except Exception:
-            pass
-
-    def _patched_cancel() -> None:
-        _orig_cancel()
-        try:
-            get_app().exit(result=None)
-        except Exception:
-            pass
-
-    interaction.finish = _patched_finish  # type: ignore[method-assign]
-    interaction.cancel = _patched_cancel  # type: ignore[method-assign]
+    # Use the shared helper which applies the is_done() guard, preventing
+    # double-exit when cancel fires more than once (e.g. Escape + timeout
+    # race, or swarm interrupt after normal resolution).
+    _make_idempotent_exit(interaction, None)
 
     timeout_timer: Optional[threading.Timer] = None
 

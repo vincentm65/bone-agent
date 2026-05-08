@@ -217,6 +217,14 @@ def _validate_worker_write_scope(path: str, repo_root: str, write_scope: list[st
     if not write_scope:
         return None
 
+    # Reject empty/falsy paths before Path() resolution (Path("") → cwd)
+    if not path:
+        return (
+            "exit_code=1\n"
+            "Edit blocked: empty or missing file path.\n"
+            "Provide a valid file path for the edit."
+        )
+
     try:
         repo_path = Path(repo_root).resolve()
         target_path = Path(path)
@@ -262,11 +270,13 @@ def _worker_handle_command_approval(
     cron_job_id: Optional[str] = None,
     cron_allowlist: Any = None,
     cron_interactive: bool = False,
+    danger_mode: bool = False,
 ) -> tuple[str, bool, bool]:
     """Handle command approval for a worker.
 
-    Checks for silent blocks and auto-approval first (same as main agent).
-    For non-auto-approved commands, routes through the approval awaiter.
+    Delegates to the shared evaluate_swarm_approval() policy as the single
+    source of truth. Cron allowlist checks take priority over standard policy.
+    Commands requiring human approval are routed through the approval awaiter.
 
     Args:
         command: The shell command string.
@@ -283,49 +293,65 @@ def _worker_handle_command_approval(
         cron_job_id: Optional cron job ID.
         cron_allowlist: Optional cron allowlist.
         cron_interactive: If True, cron job is in interactive test-run mode.
+        danger_mode: If True, non-git commands are auto-approved (Rule 4).
 
     Returns:
         (result, should_exit, command_executed) tuple.
     """
-    from utils.validation import is_auto_approved_command, check_for_silent_blocked_command
+    from core.swarm_approval import evaluate_swarm_approval, ApprovalDecision
 
-    # Check for silent blocks
-    is_blocked, reprompt_msg = check_for_silent_blocked_command(command)
-    if is_blocked:
-        if debug_mode:
-            console.print(f"[dim]Silently blocked command: {command.split()[0]}[/dim]")
-        return f"exit_code=1\n{reprompt_msg}", False, False
+    should_execute = False
 
-    # Check auto-approval (global safe commands)
-    auto_approve = is_auto_approved_command(command)
-
-    # Check cron allow list
-    cron_auto_approved = False
+    # ── Cron allowlist check (takes priority over standard policy) ──
     if cron_job_id and cron_allowlist:
         if cron_allowlist.is_allowed(cron_job_id, command):
-            cron_auto_approved = True
-        elif not auto_approve:
-            if cron_interactive:
-                pass  # Fall through to interactive approval
-            else:
-                allowed_cmds = cron_allowlist.get_commands(cron_job_id)
-                allowed_preview = ", ".join(f"'{c}'" for c in allowed_cmds[:5])
-                if len(allowed_cmds) > 5:
-                    allowed_preview += f", ... ({len(allowed_cmds)} total)"
-                if not allowed_preview:
-                    allowed_preview = "(none)"
-                return (
-                    f"exit_code=1\n"
-                    f"Command not in cron allow list for job '{cron_job_id}'.\n"
-                    f"Command: {command}\n"
-                    f"Allowed: {allowed_preview}\n"
-                    f"Do not retry this command."
-                ), False, False
+            should_execute = True
+        elif not cron_interactive:
+            allowed_cmds = cron_allowlist.get_commands(cron_job_id)
+            allowed_preview = ", ".join(f"'{c}'" for c in allowed_cmds[:5])
+            if len(allowed_cmds) > 5:
+                allowed_preview += f", ... ({len(allowed_cmds)} total)"
+            if not allowed_preview:
+                allowed_preview = "(none)"
+            return (
+                f"exit_code=1\n"
+                f"Command not in cron allow list for job '{cron_job_id}'.\n"
+                f"Command: {command}\n"
+                f"Allowed: {allowed_preview}\n"
+                f"Do not retry this command."
+            ), False, False
+        # cron_interactive with non-allowed command → fall through to policy
 
-    if cron_auto_approved or auto_approve:
+    # ── Shared approval policy (single source of truth) ──
+    if not should_execute:
+        approval = evaluate_swarm_approval(command, danger_mode=danger_mode)
+
+        if approval.decision == ApprovalDecision.DENIED:
+            if debug_mode:
+                console.print(f"[dim]Denied command: {command.split()[0]}[/dim]")
+            return f"exit_code=1\n{approval.reason}", False, False
+
+        if approval.decision == ApprovalDecision.APPROVED:
+            should_execute = True
+
+    # ── Single execute point ──
+    if should_execute:
         result = tool.execute(arguments, context)
-        command_executed = True
-        return result, False, command_executed
+        return result, False, True
+
+    # ── REQUIRES_HUMAN ──
+
+    # Local tasks have synthetic task IDs — deny instead of sending a
+    # phantom ID to the server that has no record of it.
+    if task_id.startswith("local-"):
+        return (
+            f"exit_code=1\n"
+            f"Command requires human approval but this is a local task with no "
+            f"server-side task record.\n"
+            f"Command: {command}\n"
+            f"Reason: {approval.reason}\n"
+            f"Restart as a swarm task or ask the admin to approve this manually."
+        ), False, False
 
     # Route to admin via WebSocket
     call_id = f"cmd-{uuid.uuid4().hex[:6]}"
@@ -335,16 +361,25 @@ def _worker_handle_command_approval(
     # Register before sending so a fast approval response cannot race past us.
     future = approve_awaiter.submit(call_id)
 
-    # Submit approval request to server
-    sent = send_approval_fn(
-        task_id=task_id,
-        worker_id=worker_id,
-        call_id=call_id,
-        command=command,
-        reason=arguments.get('reason', 'Execute shell command'),
-        cwd=arguments.get('cwd', ''),
-        preview="",
-    )
+    # Submit approval request to server (guarded against send failures)
+    try:
+        sent = send_approval_fn(
+            task_id=task_id,
+            worker_id=worker_id,
+            call_id=call_id,
+            command=command,
+            reason=arguments.get('reason', 'Execute shell command'),
+            cwd=arguments.get('cwd', ''),
+            preview="",
+        )
+    except Exception:
+        approve_awaiter.resolve(call_id, False, "Failed to send approval request")
+        return (
+            "exit_code=1\n"
+            "Failed to send approval request to admin.\n"
+            "Check that the swarm connection is still active."
+        ), False, False
+
     if sent is False:
         approve_awaiter.resolve(call_id, False, "Could not reach admin for approval")
         result = {"approved": False, "guidance": "Could not reach admin for approval"}
@@ -357,13 +392,16 @@ def _worker_handle_command_approval(
             result = future.result(timeout=approval_timeout)
         except _futures.TimeoutError:
             approve_awaiter.resolve(call_id, False, f"Approval timeout ({approval_timeout}s)")
-            send_approval_fn(
-                type="approval_cancelled",
-                task_id=task_id,
-                worker_id=worker_id,
-                call_id=call_id,
-                reason=f"Approval timeout ({approval_timeout}s)",
-            )
+            try:
+                send_approval_fn(
+                    type="approval_cancelled",
+                    task_id=task_id,
+                    worker_id=worker_id,
+                    call_id=call_id,
+                    reason=f"Approval timeout ({approval_timeout}s)",
+                )
+            except Exception:
+                pass
             result = {"approved": False, "guidance": f"Approval timeout ({approval_timeout}s)"}
 
     if result["approved"]:
@@ -409,6 +447,7 @@ class SwarmWorkerRunner:
         rg_exe_path: str,
         console: Console,
         websocket_url: str = "ws://127.0.0.1",
+        auth_token: str = "",
         approval_timeout: int = 300,
         worker_tools: list[str] | None = None,
         allow_active_plugins: bool = False,
@@ -423,6 +462,7 @@ class SwarmWorkerRunner:
         self._safe_console = SafeConsole(console)
         self._cached_prompt = None
         self.websocket_url = websocket_url
+        self._auth_token = auth_token
         self.approval_timeout = approval_timeout
         self.worker_tools = worker_tools or swarm_settings.worker_tools
         self.allow_active_plugins = allow_active_plugins
@@ -461,6 +501,7 @@ class SwarmWorkerRunner:
                 swarm_name=self.swarm_name,
                 host=host,
                 port=port,
+                auth_token=self._auth_token,
                 on_message=self._handle_client_message,
             )
             if self._client.connect():
@@ -552,6 +593,46 @@ class SwarmWorkerRunner:
         tool_def = ToolRegistry.get("create_file")
         return tool_def.execute(arguments, context)
 
+    def _handle_command_approval(
+        self,
+        command: str,
+        arguments: dict,
+        tool: Any,
+        context: dict,
+        console: Console | None,
+        debug_mode: bool,
+        approve_awaiter: ApprovalAwaiter,
+        send_approval_fn: Any,
+        task_id: str,
+        worker_id: str,
+        approval_timeout: int = 300,
+        cron_job_id: Optional[str] = None,
+        cron_allowlist: Any = None,
+        cron_interactive: bool = False,
+    ) -> tuple[str, bool, bool]:
+        """Worker command approval wrapper — injects danger_mode from chat_manager."""
+        danger_mode = bool(
+            hasattr(self.chat_manager, "approve_mode")
+            and self.chat_manager.approve_mode == "danger"
+        )
+        return _worker_handle_command_approval(
+            command=command,
+            arguments=arguments,
+            tool=tool,
+            context=context,
+            console=console,
+            debug_mode=debug_mode,
+            approve_awaiter=approve_awaiter,
+            send_approval_fn=send_approval_fn,
+            task_id=task_id,
+            worker_id=worker_id,
+            approval_timeout=approval_timeout,
+            cron_job_id=cron_job_id,
+            cron_allowlist=cron_allowlist,
+            cron_interactive=cron_interactive,
+            danger_mode=danger_mode,
+        )
+
     @property
     def orchestrator(self) -> Any:
         """Lazily build the orchestrator."""
@@ -571,7 +652,7 @@ class SwarmWorkerRunner:
                 cron_interactive=self.cron_interactive,
                 edit_approval_handler=self._handle_edit_approval,
                 create_file_handler=self._handle_create_file,
-                command_approval_handler=_worker_handle_command_approval,
+                command_approval_handler=self._handle_command_approval,
                 command_approval_awaiter=self._approval_awaiter,
                 command_send_approval_fn=self._send_approval_request,
                 approval_timeout=self.approval_timeout,
@@ -784,7 +865,11 @@ class SwarmWorkerRunner:
 
             # Clear context for the new task
             clear_worker_context(self.chat_manager)
-            display_startup_banner(self.chat_manager.approve_mode, clear_screen=True)
+            if hasattr(self.chat_manager, "approve_mode"):
+                display_startup_banner(self.chat_manager.approve_mode, clear_screen=True)
+            elif sys.stdout.isatty():
+                sys.stdout.write("\033[2J\033[H")
+                sys.stdout.flush()
 
             self.console.print()
             self.console.print(f"[bold #5F9EA0]Local task[/bold #5F9EA0]")
@@ -1226,6 +1311,8 @@ class SwarmWorkerRunner:
 
     def _send_approval_request(self, **kwargs) -> bool:
         """Send an approval_request to the admin server via SwarmClient."""
+        if self._client is None:
+            return False
         message_type = kwargs.pop("type", "approval_request")
         return self._client.send({
             "type": message_type,
@@ -1251,6 +1338,7 @@ def run_worker_cli(
     rg_exe_path: str,
     host: str = "127.0.0.1",
     port: int = 8765,
+    auth_token: str = "",
     approval_timeout: int = 300,
     worker_tools: list[str] | None = None,
     allow_active_plugins: bool = False,
@@ -1278,6 +1366,7 @@ def run_worker_cli(
         rg_exe_path=rg_exe_path,
         console=console,
         websocket_url=f"ws://{host}:{port}",
+        auth_token=auth_token,
         approval_timeout=approval_timeout,
         worker_tools=worker_tools,
         allow_active_plugins=allow_active_plugins,

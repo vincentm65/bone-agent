@@ -400,14 +400,11 @@ def _get_normal_status_text(chat_manager, include_progress: bool = True):
                 # Page 2 — Plan (full checklist).
                 task_list = getattr(chat_manager, 'task_list', None)
                 swarm_complete = getattr(chat_manager, 'swarm_complete', False)
-                swarm_complete_summary = getattr(chat_manager, 'swarm_complete_summary', "")
                 plan_lines = format_task_list_toolbar_line(
                     task_list,
                     snapshot=snapshot,
                     title=getattr(chat_manager, 'task_list_title', None),
                     swarm_complete=swarm_complete,
-                    swarm_complete_summary=swarm_complete_summary,
-                    plan_map=getattr(chat_manager, '_swarm_task_plan_map', None),
                 )
                 if plan_lines:
                     for line in plan_lines:
@@ -428,8 +425,6 @@ def _get_normal_status_text(chat_manager, include_progress: bool = True):
                     snapshot=None,
                     title=getattr(chat_manager, 'task_list_title', None),
                     swarm_complete=False,
-                    swarm_complete_summary="",
-                    plan_map=None,
                 )
                 if plan_lines:
                     toolbar_text += '\n' + _separator_line(width)

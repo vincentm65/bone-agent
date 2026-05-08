@@ -8,6 +8,9 @@ import time
 import uuid
 import requests
 import threading
+
+logger = logging.getLogger(__name__)
+
 import queue
 from typing import Optional, IO, Any
 
@@ -80,7 +83,6 @@ class ChatManager:
         self.swarm_server: Any = None
         self.swarm_admin_mode: bool = False
         self.swarm_complete: bool = False
-        self.swarm_complete_summary: str = ""
         self.swarm_status_page: int = 0  # 0=Workers, 1=Plan
         # Maps swarm task_ids to task_list plan indices (populated by dispatch_swarm_task)
         self._swarm_task_plan_map: dict[str, int] = {}
@@ -1682,32 +1684,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                     project_dir=Path.cwd().resolve(),
                 )
 
-    def notify(self, text: str) -> None:
-        """Append a background notification as a visible message in chat history.
-
-        Used for swarm events so the model can see worker communication
-        without having to expand tool call results.
-
-        Args:
-            text: Notification text to append.
-        """
-        self.messages.append({
-            "role": "user",
-            "content": f"[Swarm] {text}",
-        })
-
-    def request_ui_invalidation(self) -> None:
-        """Request a toolbar refresh via the swarm server's app reference.
-
-        Safe to call from any thread. No-ops if no server is active.
-        """
-        server = getattr(self, 'swarm_server', None)
-        if server and getattr(server, '_app', None):
-            try:
-                server._app.invalidate()
-            except Exception:
-                pass
-
     def invalidate_toolbar(self) -> None:
         """Trigger a toolbar redraw if a PTK app is active.
 
@@ -1805,8 +1781,8 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                         prompts = _drain_inbox_to_prompts(server)
                         for prompt in prompts:
                             self._swarm_inject_queue.put(prompt)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error("inbox poller error: %s", e, exc_info=True)
                 # Respect stop signal even during sleep — use a short sleep
                 # so we don't block the shutdown signal.
                 self._swarm_inbox_poller_stop.wait(timeout=poll_interval)
@@ -1830,6 +1806,12 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         thread = self._swarm_inbox_poller_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=2)
+            if thread.is_alive():
+                logger.warning(
+                    "swarm inbox poller thread did not exit within timeout — "
+                    "keeping reference to prevent double-poller"
+                )
+                return
         self._swarm_inbox_poller_thread = None
 
         # Flush stale swarm prompts so a future swarm doesn't process old events.
@@ -1838,6 +1820,13 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                 self._swarm_inject_queue.get_nowait()
             except Exception:
                 break
+
+    def _reset_swarm_state(self) -> None:
+        """Clear all swarm-related state. Called on /swarm close."""
+        self.swarm_complete = False
+        self._swarm_task_plan_map.clear()
+        self.task_list = None
+        self.task_list_title = None
 
     def has_pending_swarm_work(self) -> bool:
         """Check whether any swarm work is waiting — either in the server

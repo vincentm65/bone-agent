@@ -75,8 +75,17 @@ def dispatch_swarm_task(
     if not ok:
         return f"exit_code=1\n{error}"
 
+    if write_scope is not None and not isinstance(write_scope, list):
+        return "exit_code=1\nwrite_scope must be a list of file paths."
+
+    if not prompt or not prompt.strip():
+        return "exit_code=1\nprompt must not be empty."
+
     server = chat_manager.swarm_server
-    result = server.submit_task(prompt, write_scope=write_scope or [], plan_index=plan_index)
+    try:
+        result = server.submit_task(prompt, write_scope=write_scope or [], plan_index=plan_index)
+    except Exception as e:
+        return f"exit_code=1\nFailed to dispatch task: {e}"
 
     if plan_index is not None and result.get("task_id"):
         if not hasattr(chat_manager, "_swarm_task_plan_map"):
@@ -84,12 +93,17 @@ def dispatch_swarm_task(
         chat_manager._swarm_task_plan_map[result["task_id"]] = plan_index
 
     agent = result.get("worker_id") or "queued"
+    conn_info = server.connection_info
     parts = [
         "exit_code=0",
         f"Task: {result['task_id']}",
         f"Status: {result['status']}",
         f"Agent: {agent}",
         "Write scope:",
+        "",
+        "Connection info for new workers:",
+        f"  URL: {conn_info['url']}",
+        f"  Auth token: {conn_info['auth_token']}",
     ]
 
     if write_scope:
@@ -97,7 +111,7 @@ def dispatch_swarm_task(
     else:
         parts.append("- none")
 
-    if result.get("queue_position"):
+    if result.get("queue_position") is not None:
         parts.append(f"Queue position: {result['queue_position']}")
 
     return "\n".join(parts)
@@ -149,62 +163,34 @@ def handle_approval(
     if not ok:
         return f"exit_code=1\n{error}"
 
+    if not task_id or not task_id.strip():
+        return "exit_code=1\ntask_id must not be empty."
+    if not call_id or not call_id.strip():
+        return "exit_code=1\ncall_id must not be empty."
+
     if not approved and not reason:
         return "exit_code=1\nDenial requires a reason."
 
     server = chat_manager.swarm_server
 
     if approved:
-        success = server.approve(task_id, call_id, guidance=reason or "")
+        try:
+            success = server.approve(task_id, call_id, guidance=reason or "")
+        except Exception as e:
+            return f"exit_code=1\nFailed to approve command: {e}"
         if success:
             return f"exit_code=0\nApproved command {task_id}/{call_id}."
         else:
             return f"exit_code=1\nNo pending approval found for {task_id}/{call_id}."
     else:
-        success = server.deny(task_id, call_id, reason=reason or "Denied by admin.")
+        try:
+            success = server.deny(task_id, call_id, reason=reason or "Denied by admin.")
+        except Exception as e:
+            return f"exit_code=1\nFailed to deny command: {e}"
         if success:
             return f"exit_code=0\nDenied command {task_id}/{call_id}: {reason}."
         else:
             return f"exit_code=1\nNo pending approval found for {task_id}/{call_id}."
-
-
-@tool(
-    name="mark_swarm_complete",
-    description=(
-        "Mark the current swarm plan as complete with a brief summary. "
-        "Only works when the admin agent is in swarm admin mode. "
-        "This does NOT stop the swarm server — use /swarm close for that. "
-        "After calling this, the toolbar will show 'Swarm: complete' and "
-        "the admin should stop issuing new work."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "summary": {
-                "type": "string",
-                "description": "A concise summary of what the swarm accomplished. "
-                "Include key outcomes, files changed, and remaining notes.",
-            },
-        },
-        "required": ["summary"],
-    },
-    tier="core",
-    tags=["swarm", "pool", "admin", "complete"],
-    category="swarm",
-)
-def mark_swarm_complete(
-    summary: str,
-    chat_manager: Any = None,
-) -> str:
-    """Mark the swarm plan as complete via the admin agent."""
-    ok, error = _require_swarm_admin(chat_manager)
-    if not ok:
-        return f"exit_code=1\n{error}"
-
-    chat_manager.swarm_complete = True
-    chat_manager.swarm_complete_summary = summary
-
-    return "exit_code=0\nSwarm marked complete."
 
 
 @tool(
@@ -240,8 +226,14 @@ def kill_swarm_worker(
     if not ok:
         return f"exit_code=1\n{error}"
 
+    if not worker_id or not worker_id.strip():
+        return "exit_code=1\nworker_id must not be empty."
+
     server = chat_manager.swarm_server
-    success = server.kill_worker(worker_id)
+    try:
+        success = server.kill_worker(worker_id)
+    except Exception as e:
+        return f"exit_code=1\nFailed to kill worker: {e}"
 
     if success:
         return f"exit_code=0\nKilled worker {worker_id} — removed from pool, approvals cancelled, task marked killed."
