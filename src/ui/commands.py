@@ -3801,7 +3801,6 @@ def _handle_swarm_start(chat_manager, console, name_arg):
     swarm_name = name_arg if name_arg else "default"
     host = swarm_settings.host
     port = swarm_settings.port
-    console.print(f"[dim]Starting swarm '{swarm_name}' on ws://{host}:{port}/{swarm_name}...[/dim]")
 
     from core.swarm_server import SwarmServer
     server = SwarmServer(swarm_name, host=host, port=port)
@@ -3810,9 +3809,12 @@ def _handle_swarm_start(chat_manager, console, name_arg):
         console.print(f"[red]Failed to start swarm server: {error}[/red]")
         console.print(
             "[yellow]Tip: Run [/yellow][bold]/swarm close[/bold][yellow] first to stop "
-            "any existing swarm, or configure a different port.[/yellow]"
+            "any existing swarm, or configure a different port in your config.[/yellow]"
         )
         return CommandResult(status="handled")
+
+
+    console.print(f"[dim]Swarm '{swarm_name}' started on ws://{host}:{server.port}/{swarm_name}[/dim]")
 
     chat_manager.swarm_server = server
     chat_manager.swarm_admin_mode = True

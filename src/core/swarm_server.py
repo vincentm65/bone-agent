@@ -71,6 +71,7 @@ class SwarmServer:
         self._thread: threading.Thread | None = None
         self._dispatch_start_timeout_seconds = 15
         self._last_error: str | None = None
+        self._error_lock = threading.Lock()
 
     @property
     def workers(self) -> dict[str, dict[str, Any]]:
@@ -118,36 +119,81 @@ class SwarmServer:
     def start(self) -> bool:
         """Start the server in a background thread.
 
+        On bind-in-use errors, automatically increments the port up to
+        20 times.  ``self.port`` and ``self.base_url`` reflect the
+        actual bound port on success.
+
         Returns:
             True if server started successfully. On failure, check
             ``self._last_error`` for the reason.
         """
-        try:
-            self._loop = asyncio.new_event_loop()
-            self._thread = threading.Thread(
-                target=lambda: self._loop.run_until_complete(self._serve()),
-                daemon=True,
-            )
-            self._thread.start()
-            # Give the server a moment to bind
-            import time
-            for _ in range(50):  # 5 seconds max wait
-                if self._running:
-                    return True
-                time.sleep(0.1)
-            # Timeout — server didn't start. Check if _serve already set an error.
-            if self._last_error is None:
-                self._last_error = (
-                    f"Server failed to start on {self.host}:{self.port} "
-                    "(timed out waiting for ready signal). "
-                    "The port may already be in use. Run ``/swarm close`` first "
-                    "or use a different port in your config."
+        MAX_RETRIES = 20
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                if self._thread:
+                    self._thread.join(timeout=2)
+                if self._loop and not self._loop.is_closed():
+                    self._loop.close()
+                self._loop = asyncio.new_event_loop()
+                self._thread = threading.Thread(
+                    target=lambda: self._loop.run_until_complete(self._serve()),
+                    daemon=True,
                 )
-            return False
-        except Exception as e:
-            self._last_error = f"Failed to start swarm server: {e}"
-            logger.error("Failed to start swarm server: %s", e)
-            return False
+                self._thread.start()
+                # Give the server a moment to bind
+                for _ in range(50):  # 5 seconds max wait
+                    if self._running:
+                        return True
+                    with self._error_lock:
+                        if self._last_error:
+                            break
+                    time.sleep(0.1)
+
+                # Server didn't start. Check if _serve already set an error.
+                with self._error_lock:
+                    has_error = self._last_error is not None
+                if not has_error:
+                    # Timeout with no error set
+                    with self._error_lock:
+                        self._last_error = (
+                            f"Server failed to start on {self.host}:{self.port} "
+                            "(timed out waiting for ready signal). "
+                            "The port may already be in use. Run ``/swarm close`` first "
+                            "or use a different port in your config."
+                        )
+                    return False
+
+                # Check if it's an address-in-use error worth retrying.
+                with self._error_lock:
+                    error_lower = self._last_error.lower()
+                if any(kw in error_lower for kw in
+                       ("address already in use", "eaddrinuse", "errno 98", "10048")):
+                    if attempt >= MAX_RETRIES:
+                        with self._error_lock:
+                            self._last_error = (
+                                f"Failed to start server after {MAX_RETRIES} port retries "
+                                f"(last tried {self.host}:{self.port}). "
+                                f"All ports up to {self.host}:{self.port} are occupied."
+                            )
+                        return False
+
+                    old_port = self.port
+                    self.port += 1
+                    self.base_url = f"ws://{self.host}:{self.port}/{self.swarm_name}"
+                    with self._error_lock:
+                        self._last_error = None
+                    logger.info("Port %d in use, trying %d...", old_port, self.port)
+                    continue
+                else:
+                    # Unrelated error — fail immediately, don't retry.
+                    return False
+
+            except Exception as e:
+                with self._error_lock:
+                    self._last_error = f"Failed to start swarm server: {e}"
+                logger.error("Failed to start swarm server: %s", e)
+                return False
 
     async def _serve(self):
         """Main async server loop."""
@@ -163,6 +209,16 @@ class SwarmServer:
             )
             self._running = True
             logger.info("Swarm server running on ws://%s:%d", self.host, self.port)
+        except OSError as e:
+            # Bind-in-use errors are expected during port auto-increment.
+            # start() will retry — don't spam the terminal.
+            self._last_error = f"Failed to bind to {self.host}:{self.port}: {e}"
+            error_lower = str(e).lower()
+            if any(kw in error_lower for kw in ("address already in use", "eaddrinuse", "errno 98", "10048")):
+                logger.debug("Port %d in use: %s", self.port, e)
+            else:
+                logger.error("Server failed to start: %s", e)
+            return
         except Exception as e:
             self._last_error = f"Failed to bind to {self.host}:{self.port}: {e}"
             logger.error("Server failed to start: %s", e)
