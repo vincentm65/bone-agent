@@ -215,7 +215,12 @@ class SwarmServer:
             await self._handle_worker_messages(worker_id, websocket)
 
         except Exception as e:
-            logger.warning("Connection handler error: %s", e)
+            # Suppress expected disconnect errors — workers disconnecting is normal.
+            import websockets.exceptions
+            if isinstance(e, (websockets.exceptions.ConnectionClosed, ConnectionResetError, ConnectionAbortedError, ConnectionError)):
+                logger.debug("Worker connection closed: %s", e)
+            else:
+                logger.warning("Connection handler error: %s", e)
 
     async def _handle_worker_messages(self, worker_id: str, websocket):
         """Handle messages from a specific worker."""
@@ -421,7 +426,12 @@ class SwarmServer:
                     await websocket.send(json.dumps({"type": "pong"}))
 
         except Exception as e:
-            logger.warning("Worker %s message loop error: %s", worker_id, e)
+            # Suppress expected disconnect errors — workers disconnecting is normal.
+            import websockets.exceptions
+            if isinstance(e, (websockets.exceptions.ConnectionClosed, ConnectionResetError, ConnectionAbortedError, ConnectionError)):
+                logger.debug("Worker %s disconnected: %s", worker_id, e)
+            else:
+                logger.warning("Worker %s message loop error: %s", worker_id, e)
         finally:
             # Worker disconnected
             self._store_event(

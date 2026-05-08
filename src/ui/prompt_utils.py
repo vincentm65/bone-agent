@@ -74,6 +74,59 @@ def _style_task_toolbar_line(line: str, width: int | None = None) -> str:
     return escaped
 
 
+def _build_status_line(chat_manager, approval_value: str, width: int) -> tuple[str, str]:
+    """Build the model/tokens/cost status line shared by normal and worker toolbars.
+
+    Returns (status_line: str, status_html: str) where status_line is the
+    plain-text version and status_html is the styled HTML string.
+    """
+    provider_name = chat_manager.client.provider
+    model = get_provider_config(provider_name).get("model", "Unknown")
+
+    tokens_curr = chat_manager.token_tracker.current_context_tokens
+    tokens_in = chat_manager.token_tracker.total_prompt_tokens
+    tokens_out = chat_manager.token_tracker.total_completion_tokens
+    tokens_total = chat_manager.token_tracker.total_tokens
+    total_cost = chat_manager.token_tracker.get_display_cost(model)
+
+    # Format model name (take last part if path)
+    if "\\" in model or "/" in model:
+        model_display = model.split("\\")[-1].split("/")[-1]
+    else:
+        model_display = model
+
+    model_name = model_display or provider_name
+    if model_name.endswith(".gguf"):
+        model_name = model_name[:-5]
+
+    status_parts = [model_name, f"Approval: {approval_value}"]
+    optional_parts = []
+    if STATUS_BAR_SETTINGS.get("show_curr_tokens", True):
+        optional_parts.append(f"curr {tokens_curr:,}")
+    if STATUS_BAR_SETTINGS.get("show_in_tokens", True):
+        optional_parts.append(f"in {tokens_in:,}")
+    if STATUS_BAR_SETTINGS.get("show_out_tokens", True):
+        optional_parts.append(f"out {tokens_out:,}")
+    if STATUS_BAR_SETTINGS.get("show_total_tokens", True):
+        optional_parts.append(f"total {tokens_total:,}")
+    if STATUS_BAR_SETTINGS.get("show_cost", True):
+        optional_parts.append(f"${total_cost:.4f}")
+
+    for part in optional_parts:
+        candidate = " | ".join(status_parts + [part])
+        if len(candidate) <= width:
+            status_parts.append(part)
+
+    status_line = " | ".join(status_parts)
+    if len(status_line) > width:
+        approval = f"Approval: {approval_value}"
+        reserved = len(" | ") + len(approval)
+        model_budget = max(8, width - reserved)
+        status_line = f"{_truncate_plain(model_name, model_budget)} | {approval}"
+    status_html = _style_line(status_line, "#606060", width)
+    return status_line, status_html
+
+
 def _join_toolbar_sections(*sections: str) -> str:
     """Join toolbar sections so each section starts on its own line."""
     return "\n".join(section.rstrip("\n") for section in sections if section)
@@ -115,6 +168,81 @@ def get_bottom_toolbar_text(chat_manager):
 
     # No interaction: normal status only.
     return HTML(_get_normal_status_text(chat_manager))
+
+
+def get_worker_toolbar_text(chat_manager, worker_runner):
+    """Return bottom toolbar text for swarm worker mode.
+
+    Shows model status, worker identity/state, and progress indicators.
+    Workers run in auto-approve mode and show their own identity line
+    rather than the admin's swarm page switching.
+
+    Args:
+        chat_manager: ChatManager instance for state access
+        worker_runner: WorkerRunner instance with worker metadata
+
+    Returns:
+        HTML formatted toolbar text
+    """
+    # Active interaction: status bar on top, separator, interaction content below.
+    active_render = render_active_interaction(chat_manager)
+    if active_render is not None:
+        status = _get_worker_status_text(chat_manager, worker_runner, include_progress=False)
+        sep = _separator_line(_toolbar_width())
+        return HTML(_join_toolbar_sections(status, sep, active_render))
+
+    # Pending interaction: status bar on top, separator, interaction prompt below.
+    pending_render = render_pending_interaction(chat_manager)
+    if pending_render is not None:
+        status = _get_worker_status_text(chat_manager, worker_runner, include_progress=False)
+        sep = _separator_line(_toolbar_width())
+        return HTML(_join_toolbar_sections(status, sep, pending_render))
+
+    # No interaction: normal worker status.
+    return HTML(_get_worker_status_text(chat_manager, worker_runner, include_progress=True))
+
+
+def _get_worker_status_text(chat_manager, worker_runner, include_progress: bool = True):
+    """Return the full worker status toolbar text (model, tokens, cost, worker identity, progress).
+
+    Returns a string suitable for concatenating and wrapping in ``HTML()``.
+    """
+    # Above-status progress: generic spinner + active tool
+    progress_above = _get_progress_above_text(chat_manager) if include_progress else ""
+
+    width = _toolbar_width()
+    _status_line, status_html = _build_status_line(chat_manager, "auto", width)
+
+    # Worker-specific identity line
+    worker_id = _escape_html(str(getattr(worker_runner, 'worker_id', '?')))
+    swarm_name = _escape_html(str(getattr(worker_runner, 'swarm_name', '')))
+    client = getattr(worker_runner, '_client', None)
+    is_connected = getattr(client, 'is_connected', False) if client else False
+    conn = "connected" if is_connected else "disconnected"
+    busy = getattr(worker_runner, '_busy', None)
+    task_id = getattr(worker_runner, '_task_id', '')
+    if busy and busy.is_set() and task_id:
+        state_str = f"working on {_escape_html(str(task_id))}"
+    elif busy and busy.is_set():
+        state_str = "working"
+    else:
+        state_str = "idle"
+
+    worker_line = f"Worker {worker_id} | {conn} | {state_str} | {swarm_name}"
+    worker_html = _style_line(worker_line, "#aaaaaa", width)
+
+    # Prepend progress_above (spinner / active tool) when present
+    if progress_above:
+        toolbar_text = progress_above.rstrip('\n') + '\n' + status_html + '\n' + worker_html
+    else:
+        toolbar_text = status_html + '\n' + worker_html
+
+    # Below-status: subagent active / done
+    progress_below = _get_progress_below_text(chat_manager) if include_progress else ""
+    if progress_below:
+        toolbar_text += '\n' + _separator_line(width) + '\n' + progress_below
+
+    return toolbar_text
 
 
 def _get_progress_above_text(chat_manager):
@@ -220,25 +348,6 @@ def _get_normal_status_text(chat_manager, include_progress: bool = True):
     # Above-status progress: generic spinner + active tool
     progress_above = _get_progress_above_text(chat_manager) if include_progress else ""
 
-    provider_name = chat_manager.client.provider
-    model = get_provider_config(provider_name).get("model", "Unknown")
-
-    # Get token counts
-    tokens_curr = chat_manager.token_tracker.current_context_tokens
-    tokens_in = chat_manager.token_tracker.total_prompt_tokens
-    tokens_out = chat_manager.token_tracker.total_completion_tokens
-    tokens_total = chat_manager.token_tracker.total_tokens
-
-    # Calculate cost — prefer upstream-reported actual cost (e.g. OpenRouter)
-    # over locally estimated cost from token counts × static rates
-    total_cost = chat_manager.token_tracker.get_display_cost(model)
-    
-    # Format model name (take last part if path)
-    if "\\" in model or "/" in model:
-        model_display = model.split("\\")[-1].split("/")[-1]
-    else:
-        model_display = model
-    
     val = APPROVE_MODE_LABELS.get(chat_manager.approve_mode, chat_manager.approve_mode.upper())
 
     # Color approval mode: safe=green, accept_edits=muted gold
@@ -247,35 +356,8 @@ def _get_normal_status_text(chat_manager, include_progress: bool = True):
     )
 
     width = _toolbar_width()
-    model_name = model_display or provider_name
-    if model_name.endswith(".gguf"):
-        model_name = model_name[:-5]
+    _status_line, status_html = _build_status_line(chat_manager, val, width)
 
-    status_parts = [model_name, f"Approval: {val}"]
-    optional_parts = []
-    if STATUS_BAR_SETTINGS.get("show_curr_tokens", True):
-        optional_parts.append(f"curr {tokens_curr:,}")
-    if STATUS_BAR_SETTINGS.get("show_in_tokens", True):
-        optional_parts.append(f"in {tokens_in:,}")
-    if STATUS_BAR_SETTINGS.get("show_out_tokens", True):
-        optional_parts.append(f"out {tokens_out:,}")
-    if STATUS_BAR_SETTINGS.get("show_total_tokens", True):
-        optional_parts.append(f"total {tokens_total:,}")
-    if STATUS_BAR_SETTINGS.get("show_cost", True):
-        optional_parts.append(f"${total_cost:.4f}")
-
-    for part in optional_parts:
-        candidate = " | ".join(status_parts + [part])
-        if len(candidate) <= width:
-            status_parts.append(part)
-
-    status_line = " | ".join(status_parts)
-    if len(status_line) > width:
-        approval = f"Approval: {val}"
-        reserved = len(" | ") + len(approval)
-        model_budget = max(8, width - reserved)
-        status_line = f"{_truncate_plain(model_name, model_budget)} | {approval}"
-    status_html = _style_line(status_line, "#606060", width)
     # Inject color into the approval value within the rendered HTML
     escaped_approval = _escape_html(f"Approval: {val}")
     colored_approval = f'Approval: <style fg="{_approve_color}">{_escape_html(val)}</style>'

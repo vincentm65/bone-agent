@@ -10,7 +10,6 @@ The worker runs in its own process/terminal and connects to the admin's
 WebSocket server to receive task assignments and send results back.
 """
 
-import json
 import logging
 import os
 import queue
@@ -20,17 +19,31 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from ui.thinking import ThinkingIndicator
 from typing import Any, Optional
 
 from rich.console import Console
+from rich.text import Text as RichText
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import ANSI
+
+from ui.toolbar_interactions import (
+    set_active_interaction,
+    clear_active_interaction,
+    patch_for_active_prompt,
+    SETTING_RESOLVED_SENTINEL,
+    COMMAND_CONFIRM_SENTINEL,
+)
 
 from core.chat_manager import ChatManager
+
+# Sentinel values for programmatic prompt exits
+ADMIN_STOP_SENTINEL = 130    # Admin sent stop_worker or pending work
+AGENT_DONE_SENTINEL = 999    # Agent thread completed during inputhook
 from core.swarm_client import SwarmClient
 from llm.prompts import build_swarm_worker_prompt
 from utils.settings import swarm_settings
 from ui.banner import display_startup_banner
+from ui.safe_console import SafeConsole
 
 logger = logging.getLogger(__name__)
 
@@ -407,6 +420,8 @@ class SwarmWorkerRunner:
         self.repo_root = Path(repo_root)
         self.rg_exe_path = rg_exe_path
         self.console = console
+        self._safe_console = SafeConsole(console)
+        self._cached_prompt = None
         self.websocket_url = websocket_url
         self.approval_timeout = approval_timeout
         self.worker_tools = worker_tools or swarm_settings.worker_tools
@@ -427,9 +442,8 @@ class SwarmWorkerRunner:
         self._inbox: queue.Queue[InboxItem] = queue.Queue()
         self._admin_work_pending = threading.Event()
         self._busy = threading.Event()
-        self._local_input_stop = threading.Event()
-        self._local_input_thread: threading.Thread | None = None
-        self._local_prompt_active = threading.Event()
+        self._spinner_timer: threading.Timer | None = None
+        self._deferred_user_input: str | None = None
 
     @property
     def worker_id(self) -> str:
@@ -487,11 +501,9 @@ class SwarmWorkerRunner:
         elif msg.get("type") == "task_dispatch":
             self._inbox.put(InboxItem(source="admin", kind="task", data=msg))
             self._admin_work_pending.set()
-            self._interrupt_idle_prompt()
         elif msg.get("type") == "stop_worker":
             self._inbox.put(InboxItem(source="admin", kind="stop"))
             self._admin_work_pending.set()
-            self._interrupt_idle_prompt()
         elif msg.get("type") == "clear_worker_context":
             # Only clear if worker is idle (not running a task)
             if not self._busy.is_set():
@@ -549,7 +561,7 @@ class SwarmWorkerRunner:
                 chat_manager=self.chat_manager,
                 repo_root=self.repo_root,
                 rg_exe_path=self.rg_exe_path,
-                console=self.console,
+                console=self._safe_console,
                 debug_mode=False,
                 suppress_result_display=False,
                 is_sub_agent=False,
@@ -603,88 +615,6 @@ class SwarmWorkerRunner:
         }
         return self._client.send(summary)
 
-    def run_task(self, task_dispatch: dict) -> dict:
-        """Execute a single task assignment.
-
-        Args:
-            task_dispatch: Dict with 'task_id' and 'prompt' fields.
-
-        Returns:
-            Dict with 'task_id', 'summary', 'status'.
-        """
-        self._task_id = task_dispatch["task_id"]
-        self._write_scope = list(task_dispatch.get("write_scope") or [])
-        prompt = task_dispatch["prompt"]
-
-        # Reset tool-call budget for the new task
-        self.orchestrator.tool_calls_count = 0
-
-        # Set task context for approval routing
-        self.orchestrator._current_task_id = self._task_id
-        self.orchestrator._current_worker_id = self.worker_id
-
-        # Clear context for the new task
-        clear_worker_context(self.chat_manager)
-
-        # Send task_started to server
-        self._client.send({
-            "type": "task_started",
-            "task_id": self._task_id,
-            "worker_id": self.worker_id,
-        })
-
-        self.console.print()
-
-        # Run the orchestrator loop with spinner
-        thinking_indicator = ThinkingIndicator(self.console)
-        user_intervened = False
-        try:
-            thinking_indicator.start()
-            self.orchestrator.run(
-                prompt,
-                thinking_indicator=thinking_indicator,
-                allowed_tools=self.worker_tools,
-                allow_active_plugins=self.allow_active_plugins,
-            )
-        except KeyboardInterrupt:
-            user_intervened = True
-            self.console.print("[yellow]Worker interrupted by user (Ctrl+C)[/yellow]")
-        except Exception as e:
-            logger.error("Worker task error: %s", e)
-            self.console.print(f"[red]Worker task failed before completion summary: {e}[/red]", markup=False)
-            return {
-                "task_id": self._task_id,
-                "summary": f"Error: {e}",
-                "status": "failed",
-            }
-        finally:
-            thinking_indicator.stop(reset=True)
-
-        # Extract final response. Context was cleared before the try block so
-        # this can only return content from the current task run — no stale
-        # messages from previous tasks leak through.
-        final_content = ""
-        for msg in reversed(self.chat_manager.messages):
-            if msg.get("role") == "assistant" and msg.get("content"):
-                final_content = msg["content"].strip()
-                break
-
-        if not final_content:
-            final_content = "Task completed with no output."
-
-        # Status remains "done" even on KeyboardInterrupt because:
-        #   - The server passes status through to the admin LLM inbox unchanged.
-        #   - The user_intervened flag already distinguishes normal completion
-        #     from manual interruption.
-        #   - The server uses "interrupted" only for unexpected disconnects
-        #     (_cleanup_worker), which is a different semantic.
-        return {
-            "task_id": self._task_id,
-            "summary": final_content,
-            "status": "done",
-            "user_intervened": user_intervened,
-        }
-
     def _process_inbox_item(self, item: InboxItem) -> None:
         """Process the next item from the unified inbox."""
         if item.source == "admin" and item.kind == "task":
@@ -695,46 +625,158 @@ class SwarmWorkerRunner:
             self._killed = True
             self.console.print("[dim]Received stop_worker — exiting.[/dim]")
             self._running = False
-            self._local_input_stop.set()
         elif item.source == "local" and item.kind == "command":
             self._run_local_command(item.data)
         elif item.source == "local" and item.kind == "task":
             self._run_local_task(item.data)
 
     def _run_admin_task(self, task_dispatch: dict) -> None:
-        """Execute an admin-assigned task and send completion back to server."""
+        """Execute an admin-assigned task and send completion back to server.
+
+        Runs the orchestrator in a background thread while the main thread
+        drives a PTK prompt with live toolbar updates and progress spinner.
+        """
+        from ui.prompt_utils import get_worker_toolbar_text
+
         self._busy.set()
-        self._interrupt_idle_prompt()
+        session = self._prompt_session
+
         try:
             self._clear_terminal_for_next_task()
             self._print_task_header(task_dispatch)
-            result = self.run_task(task_dispatch)
+
+            # Setup task context
+            self._task_id = task_dispatch["task_id"]
+            self._write_scope = list(task_dispatch.get("write_scope") or [])
+            prompt = task_dispatch["prompt"]
+
+            # Bug 3 fix: reset cancellation state from any prior task.
+            # clear_agent_cancel() creates a fresh Event so the old (set)
+            # event is no longer referenced by chat_manager, but the cached
+            # orchestrator still holds its snapshot — refresh it.
+            self.chat_manager.clear_agent_cancel()
+            if self.__orchestrator is not None:
+                self.__orchestrator._cancel_event = self.chat_manager.get_agent_cancel_event()
+
+            # Reset tool-call budget for the new task
+            self.orchestrator.tool_calls_count = 0
+            self.orchestrator._current_task_id = self._task_id
+            self.orchestrator._current_worker_id = self.worker_id
+
+            # Clear context for the new task
+            clear_worker_context(self.chat_manager)
+
+            # Send task_started to server
+            self._client.send({
+                "type": "task_started",
+                "task_id": self._task_id,
+                "worker_id": self.worker_id,
+            })
+
+            self.console.print()
+
+            # Run orchestrator in background thread with spinner
+            completion_event = threading.Event()
+            result_holder = {'interrupted': False, 'error': None}
+
+            self._start_progress_spinner()
+            agent_thread = threading.Thread(
+                target=self._run_agent_in_thread,
+                args=(prompt, completion_event, result_holder),
+                daemon=True,
+            )
+            agent_thread.start()
+
+            # Main thread runs PTK prompt with live toolbar. If the user sends
+            # a line while the agent is running, queue it as the next local
+            # prompt and keep waiting for the active task to finish.
+            if session:
+                self._safe_console.set_app(session.app)
+                try:
+                    raw_result = self._wait_for_agent_with_prompt(
+                        session,
+                        completion_event,
+                        lambda: get_worker_toolbar_text(self.chat_manager, self),
+                    )
+                except KeyboardInterrupt:
+                    result_holder['interrupted'] = True
+                    self._cancel_and_join_agent(completion_event, agent_thread)
+                    raw_result = None
+            else:
+                raw_result = None
+
+            # Bug 2 fix: admin sent stop_worker during active task.
+            # The inputhook exits with result=ADMIN_STOP_SENTINEL when
+            # _admin_work_pending is set.  Cancel the agent thread and
+            # return without sending a completion summary.
+            if raw_result == ADMIN_STOP_SENTINEL:
+                self._cancel_and_join_agent(completion_event, agent_thread)
+                self._stop_progress_spinner()
+                return
+
+            self._stop_progress_spinner()
+
+            # Extract final response
+            error = result_holder.get('error')
+            user_intervened = result_holder.get('interrupted', False)
+
+            if error:
+                final_content = f"Error: {error}"
+                self.console.print(f"[red]Worker task failed: {error}[/red]", markup=False)
+            elif user_intervened:
+                final_content = "Task interrupted by user"
+                self.console.print("[yellow]Worker interrupted by user (Ctrl+C)[/yellow]")
+            else:
+                final_content = ""
+                for msg in reversed(self.chat_manager.messages):
+                    if msg.get("role") == "assistant" and msg.get("content"):
+                        final_content = msg["content"].strip()
+                        break
+                if not final_content:
+                    final_content = "Task completed with no output."
+
+            # Send completion summary
             if not self._killed:
                 sent = self.send_completion_summary(
-                    message=result["summary"],
-                    status=result["status"],
-                    user_intervened=result.get("user_intervened", False),
+                    message=final_content,
+                    status="failed" if error else "done",
+                    user_intervened=user_intervened,
                 )
                 if sent:
                     self.console.print("[dim]Completion summary sent.[/dim]")
                 else:
                     self.console.print("[red]Failed to send completion summary; swarm connection may be closed.[/red]")
                     self._running = False
-                    self._local_input_stop.set()
         finally:
+            self._safe_console.set_app(None)
             self._busy.clear()
             self._drain_stdin()
+            self._enqueue_deferred_user_input()
 
     def _run_local_task(self, prompt: str) -> None:
         """Execute a local task using the same executor as admin tasks.
 
-        Does not send a completion summary back to the server since
-        local tasks don't have a server-side task_id.
+        Runs the orchestrator in a background thread while the main thread
+        drives a PTK prompt with live toolbar. Does not send a completion
+        summary back to the server since local tasks don't have a
+        server-side task_id.
         """
+        from ui.prompt_utils import get_worker_toolbar_text
+
         self._busy.set()
+        session = self._prompt_session
+
         try:
             self._task_id = f"local-{uuid.uuid4().hex[:8]}"
             self._write_scope = []
+
+            # Bug 3 fix: reset cancellation state from any prior task.
+            self.chat_manager.clear_agent_cancel()
+            if self.__orchestrator is not None:
+                self.__orchestrator._cancel_event = self.chat_manager.get_agent_cancel_event()
+
+            # Reset tool-call budget for the new task (was missing for local tasks)
+            self.orchestrator.tool_calls_count = 0
 
             # Set task context for approval routing
             self.orchestrator._current_task_id = self._task_id
@@ -750,36 +792,66 @@ class SwarmWorkerRunner:
             self.console.print(prompt, markup=False)
             self.console.print()
 
-            thinking_indicator = ThinkingIndicator(self.console)
-            user_intervened = False
-            try:
-                thinking_indicator.start()
-                self.orchestrator.run(
-                    prompt,
-                    thinking_indicator=thinking_indicator,
-                    allowed_tools=self.worker_tools,
-                    allow_active_plugins=self.allow_active_plugins,
-                )
-            except KeyboardInterrupt:
-                user_intervened = True
+            # Run orchestrator in background thread with spinner
+            completion_event = threading.Event()
+            result_holder = {'interrupted': False, 'error': None}
+
+            self._start_progress_spinner()
+            agent_thread = threading.Thread(
+                target=self._run_agent_in_thread,
+                args=(prompt, completion_event, result_holder),
+                daemon=True,
+            )
+            agent_thread.start()
+
+            # Main thread runs PTK prompt with live toolbar. If the user sends
+            # a line while the agent is running, queue it as the next local
+            # prompt and keep waiting for the active task to finish.
+            if session:
+                self._safe_console.set_app(session.app)
+                try:
+                    raw_result = self._wait_for_agent_with_prompt(
+                        session,
+                        completion_event,
+                        lambda: get_worker_toolbar_text(self.chat_manager, self),
+                    )
+                except KeyboardInterrupt:
+                    result_holder['interrupted'] = True
+                    self._cancel_and_join_agent(completion_event, agent_thread)
+                    raw_result = None
+            else:
+                raw_result = None
+
+            # Bug 2 fix: admin sent stop_worker during active task.
+            if raw_result == ADMIN_STOP_SENTINEL:
+                self._cancel_and_join_agent(completion_event, agent_thread)
+                self._stop_progress_spinner()
+                return
+
+            self._stop_progress_spinner()
+
+            error = result_holder.get('error')
+            user_intervened = result_holder.get('interrupted', False)
+            if error:
+                self.console.print(f"[red]Local task failed: {error}[/red]", markup=False)
+            elif user_intervened:
                 self.console.print("[yellow]Worker interrupted by user (Ctrl+C)[/yellow]")
-            except Exception as e:
-                logger.error("Local task error: %s", e)
-                self.console.print(f"[red]Local task failed: {e}[/red]", markup=False)
-            finally:
-                thinking_indicator.stop(reset=True)
-                self.console.print("[dim]Local task finished.[/dim]")
+
+            self.console.print("[dim]Local task finished.[/dim]")
         finally:
+            self._safe_console.set_app(None)
             self._busy.clear()
             self._drain_stdin()
+            self._enqueue_deferred_user_input()
 
-    def _run_local_command(self, command: str) -> None:
-        """Execute a local slash command."""
+    def _run_local_command(self, command: str) -> str | None:
+        """Execute a local slash command. Returns the command status string."""
         from ui.commands import process_command
         debug_mode = {"debug": False}
-        status, _, _ = process_command(self.chat_manager, command, self.console, debug_mode)
+        status, _, _ = process_command(self.chat_manager, command, self._safe_console, debug_mode)
         if status == "exit":
             self._running = False
+        return status
 
     def _try_pop_inbox(self, timeout: float = 0.1) -> InboxItem | None:
         """Try to pop the next inbox item.
@@ -792,17 +864,7 @@ class SwarmWorkerRunner:
         except queue.Empty:
             return None
 
-    def _start_local_input_thread(self) -> None:
-        """Start the idle local-input loop once."""
-        if self._local_input_thread and self._local_input_thread.is_alive():
-            return
-        self._local_input_stop.clear()
-        self._local_input_thread = threading.Thread(
-            target=self._local_input_loop,
-            name="swarm-worker-local-input",
-            daemon=True,
-        )
-        self._local_input_thread.start()
+    # ── Prompt helpers ──────────────────────────────────────────────
 
     def _drain_stdin(self):
         """Drain buffered keystrokes and clear the prompt_toolkit buffer."""
@@ -826,92 +888,341 @@ class SwarmWorkerRunner:
         except Exception:
             pass
 
-    def _local_input_loop(self) -> None:
-        """Convert local prompt input into inbox items without owning task execution.
+    def _get_worker_prompt(self):
+        """Return styled prompt caret for worker idle state."""
+        if self._cached_prompt is None:
+            prompt_text = RichText.assemble((" > ", "white"))
+            with self.console.capture() as capture:
+                self.console.print(prompt_text, end="")
+            self._cached_prompt = ANSI(capture.get())
+        return self._cached_prompt
 
-        Ctrl-C at idle prompt: first press warns, second press within 2 seconds
-        exits the worker (matching the user preference that Ctrl-C exits).
+    def _create_worker_inputhook(self):
+        """Inputhook that exits prompt when admin work arrives."""
+        def inputhook(context):
+            while not context.input_is_ready():
+                if self._admin_work_pending.is_set() or not self._running:
+                    return
+                time.sleep(0.05)
+        return inputhook
+
+    def _create_worker_pre_run(self):
+        """pre_run that creates background task to exit on admin work."""
+        import asyncio
+        from prompt_toolkit.application import get_app
+
+        def pre_run():
+            app = get_app()
+            async def poll():
+                while True:
+                    if self._admin_work_pending.is_set() or not self._running:
+                        try:
+                            get_app().exit(result=ADMIN_STOP_SENTINEL)
+                        except Exception:
+                            pass
+                        return
+                    await asyncio.sleep(0.1)
+            app.create_background_task(poll())
+        return pre_run
+
+    def _create_agent_done_inputhook(self, completion_event):
+        """Inputhook that exits when agent work completes or admin sends stop.
+
+        User keystrokes are silently ignored while the agent is running;
+        the prompt will only exit when the agent finishes or a stop is received.
         """
-        idle_notice_shown = False
+        def inputhook(context):
+            while True:
+                if completion_event.is_set():
+                    from prompt_toolkit.application import get_app
+                    get_app().exit(result=AGENT_DONE_SENTINEL)
+                    return
+                if not self._running:
+                    return
+                if self._admin_work_pending.is_set():
+                    from prompt_toolkit.application import get_app
+                    get_app().exit(result=ADMIN_STOP_SENTINEL)  # Exit via sentinel, like idle pre_run
+                    return
+                if context.input_is_ready():
+                    # Let prompt_toolkit consume the key event. The active-task
+                    # prompt uses no-op bindings for normal keys, so input is
+                    # discarded instead of accepting the hidden prompt. Keeping
+                    # this hook in a loop while input is ready can starve PTK's
+                    # event processing and pin the CPU.
+                    return
+                time.sleep(0.05)
+        return inputhook
+
+    def _wait_for_agent_with_prompt(self, session, completion_event, toolbar_fn):
+        """Keep the active-task prompt alive while queueing user-submitted lines."""
+        while True:
+            raw_result = session.prompt(
+                lambda: "",
+                bottom_toolbar=toolbar_fn,
+                inputhook=self._create_agent_done_inputhook(completion_event),
+            )
+            if raw_result == AGENT_DONE_SENTINEL or raw_result == ADMIN_STOP_SENTINEL:
+                return raw_result
+            if isinstance(raw_result, str) and raw_result.strip():
+                self._set_deferred_user_input(raw_result)
+            if completion_event.is_set():
+                return AGENT_DONE_SENTINEL
+            if not self._running or self._admin_work_pending.is_set():
+                return ADMIN_STOP_SENTINEL
+
+    def _enqueue_deferred_user_input(self) -> None:
+        """Move user text typed during active work into the normal inbox."""
+        text = (self._deferred_user_input or "").strip()
+        self._deferred_user_input = None
+        if not text:
+            return
+        kind = "command" if text.startswith("/") else "task"
+        self._inbox.put(InboxItem(source="local", kind=kind, data=text))
+
+    def _set_deferred_user_input(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        if self._deferred_user_input:
+            self._deferred_user_input = f"{self._deferred_user_input}\n{text}"
+        else:
+            self._deferred_user_input = text
+
+    # ── Progress spinner ───────────────────────────────────────────
+
+    _SPINNER_REFRESH_INTERVAL = 0.1
+
+    def _start_progress_spinner(self, message=""):
+        """Start toolbar spinner and frame-advance timer."""
+        progress = getattr(self.chat_manager, 'progress', None)
+        if progress:
+            progress.start_spinner(message)
+            self._schedule_spinner_advance()
+
+    def _schedule_spinner_advance(self):
+        """Schedule next spinner frame advance."""
+        progress = getattr(self.chat_manager, 'progress', None)
+        if progress and (progress.spinner_active or progress.subagent_active):
+            progress.advance_spinner()
+            self._invalidate_toolbar()
+            self._spinner_timer = threading.Timer(
+                self._SPINNER_REFRESH_INTERVAL,
+                self._schedule_spinner_advance,
+            )
+            self._spinner_timer.daemon = True
+            self._spinner_timer.start()
+
+    def _stop_progress_spinner(self):
+        """Stop toolbar spinner and cancel timer."""
+        if self._spinner_timer:
+            self._spinner_timer.cancel()
+            self._spinner_timer = None
+        progress = getattr(self.chat_manager, 'progress', None)
+        if progress:
+            progress.stop_spinner()
+        self._invalidate_toolbar()
+
+    def _invalidate_toolbar(self):
+        """Trigger toolbar repaint from any thread."""
+        session = self._prompt_session
+        if session and session.app and session.app.is_running:
+            try:
+                session.app.invalidate()
+            except Exception:
+                pass
+
+    # ── Agent-in-thread runner ─────────────────────────────────────
+
+    def _run_agent_in_thread(self, prompt_text, completion_event, result_holder):
+        """Run the orchestrator in a background thread.
+
+        The main thread runs a PTK prompt with live toolbar updates
+        while this thread executes the agent loop.
+        """
+        try:
+            self.orchestrator.run(
+                prompt_text,
+                thinking_indicator=None,  # spinner replaces thinking indicator
+                allowed_tools=self.worker_tools,
+                allow_active_plugins=self.allow_active_plugins,
+            )
+        except Exception as e:
+            result_holder['error'] = str(e)
+            logger.error("Worker task error: %s", e)
+        finally:
+            completion_event.set()
+
+    def _cancel_and_join_agent(self, completion_event, agent_thread,
+                                wait_timeout=5.0, join_timeout=10.0):
+        """Cancel the running agent and wait for its thread to finish.
+
+        Requests cancellation via the chat manager, then waits for the
+        completion event and joins the agent thread with bounded timeouts
+        to prevent deadlocks.  Used by both Ctrl+C and admin-stop paths.
+
+        Args:
+            completion_event: threading.Event set when the agent finishes.
+            agent_thread: The background agent thread.
+            wait_timeout: Seconds to wait for completion_event after cancel.
+            join_timeout: Seconds to wait for the thread after completion_event.
+        """
+        self.chat_manager.request_agent_cancel()
+        completion_event.wait(timeout=wait_timeout)
+        agent_thread.join(timeout=join_timeout)
+        if agent_thread.is_alive():
+            logger.warning(
+                "Agent thread did not terminate within %ss after cancel",
+                wait_timeout + join_timeout,
+            )
+
+    # ── Main loop ──────────────────────────────────────────────────
+
+    def wait_for_tasks(self) -> None:
+        """Main-thread PTK prompt loop with full feature parity to the admin.
+
+        Instead of a background input thread, the main thread owns the
+        PromptSession with toolbar, key bindings, styled prompt, and
+        agent-working state with progress spinner.
+        """
+        from ui.prompt_utils import (
+            get_worker_toolbar_text, setup_common_bindings, TOOLBAR_STYLE,
+        )
+        from ui.status_state import ProgressState
+
+        # Ensure ChatManager has progress state for spinner/toolbar
+        if not hasattr(self.chat_manager, 'progress') or self.chat_manager.progress is None:
+            self.chat_manager.progress = ProgressState()
+
+        # Setup PromptSession with full features
+        bindings = setup_common_bindings(self.chat_manager)
+        session = PromptSession(key_bindings=bindings, style=TOOLBAR_STYLE)
+        self._running = True
+        self._prompt_session = session
+
+        # Register toolbar invalidation callback for background thread redraws
+        self.chat_manager._invalidate_toolbar = self._invalidate_toolbar
+
+        self.console.print("[dim]Worker ready. Waiting for admin tasks. Press Ctrl+C twice to exit, or /exit.[/dim]")
+
         last_ctrl_c_time: float = 0.0
-        while not self._local_input_stop.is_set():
+
+        while self._running:
+            # Check connection
+            if not self._client or not self._client.is_connected:
+                self.console.print("[dim]Swarm connection closed — exiting worker.[/dim]")
+                break
+
+            # Check for pending admin work before prompting
+            if self._admin_work_pending.is_set():
+                item = self._try_pop_inbox(timeout=0.01)
+                if item:
+                    self._process_inbox_item(item)
+                else:
+                    self._admin_work_pending.clear()
+                continue
+
+            # Drain any queued inbox items
+            while True:
+                item = self._try_pop_inbox(timeout=0.01)
+                if item is None:
+                    break
+                self._process_inbox_item(item)
+                if not self._running:
+                    break
             if not self._running:
                 break
-            if self._busy.is_set() or self._admin_work_pending.is_set():
-                idle_notice_shown = False
-                last_ctrl_c_time = 0.0
-                time.sleep(0.05)
-                continue
 
-            if not idle_notice_shown:
-                self.console.print("[dim]Worker ready. Waiting for admin tasks. Press Ctrl+C twice to exit, or /exit.[/dim]")
-                idle_notice_shown = True
-
+            # Prompt with full PTK features
             try:
-                self._local_prompt_active.set()
-                user_input = self._prompt_session.prompt(" > ", in_thread=True)
-            except EOFError:
-                continue
+                raw_input = session.prompt(
+                    lambda: self._get_worker_prompt(),
+                    bottom_toolbar=lambda: get_worker_toolbar_text(self.chat_manager, self),
+                    inputhook=self._create_worker_inputhook(),
+                    pre_run=self._create_worker_pre_run(),
+                )
             except KeyboardInterrupt:
                 now = time.monotonic()
                 if last_ctrl_c_time and (now - last_ctrl_c_time) < 2.0:
-                    # Double Ctrl-C — exit worker
                     self._running = False
-                    self._local_input_stop.set()
-                    self.console.print("[dim]Exiting worker (double Ctrl+C).[/dim]")
                     break
                 last_ctrl_c_time = now
                 self.console.print("[dim]Ctrl+C again within 2s to exit, or /exit.[/dim]")
                 continue
-            finally:
-                self._local_prompt_active.clear()
-
-            if self._local_input_stop.is_set() or self._busy.is_set() or self._admin_work_pending.is_set():
+            except EOFError:
                 continue
 
-            stripped = user_input.strip()
-            if not stripped:
+            # ADMIN_STOP_SENTINEL from pre_run — admin work arrived during prompt
+            if raw_input == ADMIN_STOP_SENTINEL:
                 continue
 
-            if stripped.startswith("/"):
-                self._inbox.put(InboxItem(source="local", kind="command", data=stripped))
-            else:
-                self._inbox.put(InboxItem(source="local", kind="task", data=stripped))
-
-    def _interrupt_idle_prompt(self) -> None:
-        """Best-effort wakeup of the idle prompt.
-
-        Incoming admin messages set the admin_work_pending Event before
-        calling this. The prompt exit call is cosmetic and not required
-        for dispatch correctness.
-        """
-        session = self._prompt_session
-        app = getattr(session, "app", None) if session else None
-        loop = getattr(app, "loop", None) if app else None
-        if app and loop:
-            try:
-                loop.call_soon_threadsafe(app.exit, exception=EOFError)
-            except Exception:
-                pass
-
-    def wait_for_tasks(self) -> None:
-        """Inbox-driven worker loop; local prompt input is only another source."""
-        self._running = True
-        self._prompt_session = PromptSession()
-        self._start_local_input_thread()
-
-        while self._running:
-            item = self._try_pop_inbox(timeout=0.1)
-            if item is not None:
-                self._process_inbox_item(item)
+            # Setting selector resolved via toolbar
+            if raw_input == SETTING_RESOLVED_SENTINEL and getattr(self.chat_manager, '_setting_selector', None) is not None:
+                selector = self.chat_manager._setting_selector
+                continuation = getattr(self.chat_manager, '_setting_continuation', None)
+                try:
+                    if continuation is not None:
+                        continuation(selector)
+                finally:
+                    new_selector = getattr(self.chat_manager, '_setting_selector', None)
+                    if new_selector is not selector:
+                        patch_for_active_prompt(new_selector, SETTING_RESOLVED_SENTINEL)
+                        set_active_interaction(self.chat_manager, new_selector)
+                    else:
+                        self.chat_manager._setting_selector = None
+                        self.chat_manager._setting_continuation = None
+                        clear_active_interaction(self.chat_manager)
                 continue
 
-            if not self._client or not self._client.is_connected:
-                self.console.print("[dim]Swarm connection closed — exiting worker.[/dim]")
-                self._running = False
-                self._local_input_stop.set()
-                self._interrupt_idle_prompt()
-                return
+            # Command confirm resolved via toolbar
+            if raw_input == COMMAND_CONFIRM_SENTINEL and getattr(self.chat_manager, '_confirm_interaction', None) is not None:
+                interaction = self.chat_manager._confirm_interaction
+                continuation = getattr(self.chat_manager, '_confirm_continuation', None)
+                cancelled = interaction.was_cancelled()
+                try:
+                    if continuation is not None:
+                        continuation(None if cancelled else True)
+                finally:
+                    self.chat_manager._confirm_interaction = None
+                    self.chat_manager._confirm_continuation = None
+                    clear_active_interaction(self.chat_manager)
+                continue
+
+            # Pending text interaction resolved via toolbar
+            if raw_input and isinstance(raw_input, str) and getattr(self.chat_manager, '_pending_text_interaction', None) is not None:
+                pending = self.chat_manager._pending_text_interaction
+                continuation = getattr(self.chat_manager, '_pending_text_continuation', None)
+                try:
+                    if continuation is not None:
+                        continuation(raw_input)
+                finally:
+                    self.chat_manager._pending_text_interaction = None
+                    self.chat_manager._pending_text_continuation = None
+                    clear_active_interaction(self.chat_manager)
+                continue
+
+            # Process user input
+            if raw_input and isinstance(raw_input, str):
+                stripped = raw_input.strip()
+                if stripped.startswith("/"):
+                    cmd_status = self._run_local_command(stripped)
+                    if cmd_status == "setting_selector":
+                        selector = getattr(self.chat_manager, '_setting_selector', None)
+                        if selector is not None:
+                            patch_for_active_prompt(selector, SETTING_RESOLVED_SENTINEL)
+                            set_active_interaction(self.chat_manager, selector)
+                    elif cmd_status == "confirm_input":
+                        interaction = getattr(self.chat_manager, '_confirm_interaction', None)
+                        if interaction is not None:
+                            patch_for_active_prompt(interaction, COMMAND_CONFIRM_SENTINEL)
+                            set_active_interaction(self.chat_manager, interaction)
+                    elif cmd_status == "text_input":
+                        pass  # Already set on chat_manager by handoff
+                    elif cmd_status == "subagent_run":
+                        self.console.print("[dim]Sub-agent commands not supported in worker mode.[/dim]")
+                    elif cmd_status == "handled":
+                        pass
+                elif stripped:
+                    self._run_local_task(stripped)
 
     def _send_approval_request(self, **kwargs) -> bool:
         """Send an approval_request to the admin server via SwarmClient."""
@@ -924,8 +1235,8 @@ class SwarmWorkerRunner:
     def shutdown(self) -> None:
         """Clean up the worker's connections."""
         self._running = False
-        self._local_input_stop.set()
-        self._interrupt_idle_prompt()
+        self._killed = True
+        self._stop_progress_spinner()
         self._approval_awaiter.cleanup()
         if self._client:
             self._client.shutdown()

@@ -175,7 +175,13 @@ class SwarmClient:
                     error.append(e)
                 ready.set()
             else:
-                logger.warning("Client message loop error: %s", e)
+                # Suppress expected disconnect errors — these are normal when
+                # the admin shuts down the swarm or the connection drops.
+                import websockets.exceptions
+                if isinstance(e, (websockets.exceptions.ConnectionClosed, ConnectionResetError, ConnectionAbortedError, ConnectionError)):
+                    logger.debug("WebSocket disconnected: %s", e)
+                else:
+                    logger.warning("Client message loop error: %s", e)
         finally:
             self._ws = None
             self._running = False
