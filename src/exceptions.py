@@ -77,6 +77,3 @@ class PathValidationError(ValidationError):
     pass
 
 
-class CommandValidationError(ValidationError):
-    """Raised when command validation fails (dangerous operators, etc.)."""
-    pass

@@ -27,54 +27,10 @@ def format_worker_label(worker_id: str) -> str:
 # Event-line helpers
 # ---------------------------------------------------------------------------
 
-def format_swarm_event_line(text: str, extra: dict | None = None) -> str:
-    """Build a compact one-line swarm message for the notification bar.
-
-    Uses friendly worker labels and normalises the kind-specific prefix so
-    the admin never sees raw internal IDs like *worker-01*.
-
-    Args:
-        text: The human-readable message from the server.
-        extra: Optional metadata dict with 'kind', 'task_id', 'worker_id',
-               etc.  Used for label substitution.
-
-    Returns:
-        A single-line string suitable for ``console.print(f"[dim]{line}[/dim]")``.
-    """
-    if not text:
-        return ""
-
-    extra = extra or {}
-    worker_id = extra.get("worker_id", "")
-    if worker_id:
-        text = text.replace(worker_id, format_worker_label(worker_id), 1)
-
-    return text
-
 
 # ---------------------------------------------------------------------------
 # Approval rendering helpers
 # ---------------------------------------------------------------------------
-
-def format_approval_line(text: str, extra: dict | None = None) -> str:
-    """Build an action-oriented line for approval_requested events.
-
-    Unlike passive events, approval lines are prefixed with an emoji-free
-    attention grabber so the admin notices them immediately.
-    """
-    extra = extra or {}
-    task_id = extra.get("task_id", "-")
-    call_id = extra.get("call_id", "-")
-    worker_id = format_worker_label(extra.get("worker_id", extra.get("worker_id", "-")))
-    command_preview = str(extra.get("command_preview") or extra.get("command", "")).strip()
-
-    if command_preview:
-        preview = command_preview[:160]
-        if len(command_preview) > 160:
-            preview += "..."
-        return f"[bold #F4A261]Swarm approval needed[/bold #F4A261] {worker_id} on {task_id}/{call_id}: {preview}"
-
-    return f"[bold #F4A261]Swarm approval needed[/bold #F4A261] {worker_id} on {task_id}/{call_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -294,38 +250,6 @@ def format_task_list_toolbar_line(
 # ---------------------------------------------------------------------------
 # Queue / Activity toolbar line (page 3)
 # ---------------------------------------------------------------------------
-
-def format_queue_activity_toolbar_line(
-    snapshot: dict,
-    pending_by_worker: dict[str, list[dict[str, Any]]] | None = None,
-) -> str | None:
-    """Return a single toolbar line with compact queue/activity state.
-
-    Shows queued task count and pending approval count from the server
-    snapshot.  Never exposes raw approval command text or call IDs.
-
-    Args:
-        snapshot: dict from ``SwarmServer.status_snapshot()``.
-        pending_by_worker: deprecated, ignored.
-
-    Returns:
-        A plain text string suitable for prompt-toolkit toolbar, or None
-        if there is nothing to show.
-    """
-    pending_tasks = snapshot.get("pending_tasks", [])
-    queued_count = len(pending_tasks)
-    pending_approval_count = snapshot.get("pending_approvals", 0)
-
-    parts: list[str] = []
-    if queued_count > 0:
-        parts.append(f"Queued: {queued_count}")
-    if pending_approval_count > 0:
-        parts.append(f"Approvals: {pending_approval_count}")
-
-    if not parts:
-        return "Queue: idle"
-
-    return " | ".join(parts)
 
 
 def format_swarm_status(snapshot: dict, mode: str = "human") -> str:

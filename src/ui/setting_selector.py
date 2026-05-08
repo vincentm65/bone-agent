@@ -6,7 +6,6 @@ prompt_toolkit ``Application``.
 """
 
 from dataclasses import dataclass, field
-from html import escape as _html_escape
 from typing import Optional, List, Dict, Any, Callable, Union
 
 from ui.toolbar_interactions import (

@@ -10,7 +10,6 @@ human-required approvals).
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 from utils.safe_commands import is_git_command, is_safe_command
 from utils.validation import check_for_silent_blocked_command

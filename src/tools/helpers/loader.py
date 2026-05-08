@@ -149,13 +149,4 @@ def discover_tools(directories: List[str]) -> int:
     return new_tools
 
 
-def list_registered_tools() -> List[str]:
-    """List names of all registered tools.
-
-    Returns:
-        List of tool names
-    """
-    return [tool.name for tool in ToolRegistry.get_all()]
-
-
 

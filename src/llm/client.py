@@ -4,7 +4,7 @@ import logging
 
 import requests
 from llm import config as config_module
-from llm.config import PROVIDER_REGISTRY, get_provider_config, get_providers
+from llm.config import get_provider_config, get_providers
 from llm.providers import get_handler
 from llm.capabilities import ensure_message_capabilities
 from exceptions import LLMConnectionError, LLMResponseError, ConfigurationError

@@ -503,7 +503,6 @@ __all__ = [
     "LLM_PROVIDER",
     "TOOLS_ENABLED",
     "TOOLS_REQUIRE_CONFIRMATION",
-    "WEB_SEARCH_REQUIRE_CONFIRMATION",
     "APPROVE_MODES",
     "APPROVE_MODE_LABELS",
 
@@ -528,7 +527,6 @@ def generate_config_template():
 # Tooling configuration
 TOOLS_ENABLED = True
 TOOLS_REQUIRE_CONFIRMATION = False
-WEB_SEARCH_REQUIRE_CONFIRMATION = False
 
 # Status bar configuration
 STATUS_BAR_SETTINGS = _build_status_bar_settings()

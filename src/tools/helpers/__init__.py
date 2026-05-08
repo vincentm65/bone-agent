@@ -48,7 +48,6 @@ from .converters import (
 # Tool loading and discovery
 from .loader import (
     discover_tools,
-    list_registered_tools,
 )
 
 # Plugin manifest for on-demand tool discovery
@@ -88,7 +87,6 @@ __all__ = [
     'coerce_bool',
     # Tool loading and discovery
     'discover_tools',
-    'list_registered_tools',
     # Plugin manifest
     'PluginManifest',
     'plugin_manifest',

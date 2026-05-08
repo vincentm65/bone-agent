@@ -15,7 +15,6 @@ from rich.panel import Panel
 from rich.text import Text
 
 from llm import config as llm_config
-from core.config_manager import ConfigManager
 
 # Provider metadata for wizard display
 WIZARD_PROVIDERS = [
@@ -31,7 +30,6 @@ WIZARD_PROVIDERS = [
 ]
 
 # API providers that need a key (skip bone free tier and local)
-_API_PROVIDERS = [p for p in WIZARD_PROVIDERS if p[2] == "api" and p[0] != "bone"]
 
 
 def _resolve_config_path() -> Path:

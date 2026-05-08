@@ -132,10 +132,6 @@ def _join_toolbar_sections(*sections: str) -> str:
     return "\n".join(section.rstrip("\n") for section in sections if section)
 
 
-def _join_toolbar_sections_with_gap(*sections: str) -> str:
-    """Join toolbar sections with one blank line between each section."""
-    return "\n\n".join(section.rstrip("\n") for section in sections if section)
-
 
 def get_bottom_toolbar_text(chat_manager):
     """Return bottom toolbar text with model, approval mode, and token count.

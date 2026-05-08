@@ -259,28 +259,3 @@ class ConfigManager:
 
         return self.save(config_data, create_backup=False)
 
-    def list_model_prices(self) -> Dict[str, Dict[str, float]]:
-        """Get all model-specific pricing.
-
-        Returns:
-            Dict mapping model names to their pricing (cost_in/cost_out per 1M tokens)
-        """
-        config_data = self.load()
-        return config_data.get('MODEL_PRICES', {})
-
-    def delete_model_price(self, model_name: str) -> Optional[Path]:
-        """Delete pricing for a specific model.
-
-        Args:
-            model_name: Model name to remove from pricing
-
-        Returns:
-            Backup path if backup was created, None otherwise
-        """
-        config_data = self.load(force_reload=True)
-
-        if 'MODEL_PRICES' in config_data and model_name in config_data['MODEL_PRICES']:
-            del config_data['MODEL_PRICES'][model_name]
-            return self.save(config_data, create_backup=False)
-
-        return None

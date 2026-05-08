@@ -37,11 +37,6 @@ class SubAgentCancelled(Exception):
     pass
 
 
-class PreflightContextOverflow(Exception):
-    """Raised when initial sub-agent context already exceeds hard_limit_tokens."""
-    pass
-
-
 def _format_messages_dump(messages) -> str:
     """Format sub-agent message history as a markdown dump.
 

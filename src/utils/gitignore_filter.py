@@ -115,35 +115,3 @@ def _find_matching_pattern(path_str: str, gitignore_spec) -> Optional[str]:
     return None
 
 
-def format_gitignore_error(
-    path: Path, repo_root: Path, matched_pattern: Optional[str]
-) -> str:
-    """Format a user-friendly error message for .gitignore blocked files.
-
-    Args:
-        path: The blocked file path
-        repo_root: Repository root
-        matched_pattern: The .gitignore pattern that matched
-
-    Returns:
-        Formatted error message
-    """
-    try:
-        rel_path = path.relative_to(repo_root)
-    except ValueError:
-        rel_path = path
-
-    error_msg = (
-        f"exit_code=ERROR_GITIGNORE_BLOCKED\n"
-        f"File blocked by .gitignore: {rel_path}\n\n"
-    )
-    error_msg += "This file matches patterns in .gitignore and cannot be accessed.\n"
-
-    if matched_pattern:
-        error_msg += f"Matched pattern: {matched_pattern}\n"
-
-    error_msg += "\nTo access this file:\n"
-    error_msg += "1. Remove it from .gitignore, or\n"
-    error_msg += "2. Use git commands directly (git show, git diff)\n"
-
-    return error_msg
