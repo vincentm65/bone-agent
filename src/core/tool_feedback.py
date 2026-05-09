@@ -175,6 +175,12 @@ def build_tool_label(function_name, arguments):
     elif function_name == "kill_swarm_worker":
         worker_id = arguments.get('worker_id', '?')
         return f"kill_swarm_worker: {worker_id}"
+    elif function_name == "spawn_swarm_worker":
+        count = arguments.get('count', 1)
+        profile = arguments.get('profile', '')
+        if profile:
+            return f"spawn_swarm_worker: {count}x {profile}"
+        return f"spawn_swarm_worker: {count}x"
     else:
         return function_name
 
@@ -542,6 +548,20 @@ def _format_swarm_tool_summary(command, tool_result):
         q_text = f"; queue position: {queue_pos}" if queue_pos is not None else ""
         return f"Dispatched {task_id} → {agent}{status_text}; Write scope: {scope_text}{q_text}", False
 
+    if command.startswith("spawn_swarm_worker") and exit_code == 0:
+        count = ""
+        profile_text = ""
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("Requested"):
+                count = stripped.replace("Requested ", "").replace(" worker terminal(s).", "")
+            elif stripped.startswith("Profile:"):
+                profile_text = stripped.split(":", 1)[1].strip()
+        if count:
+            label = f"{count} {profile_text} worker(s)" if profile_text else f"{count} worker(s)"
+            return f"Spawned {label}", False
+        return "Worker spawn requested", False
+
     # Generic: first non-exit_code line as summary
     first_content = ""
     for line in lines:
@@ -597,6 +617,8 @@ def display_tool_feedback(command, tool_result, console, indent=False, panel_upd
  
         elif command.startswith("dispatch_swarm_task"):
             tool_name = "dispatch_swarm_task"
+        elif command.startswith("spawn_swarm_worker"):
+            tool_name = "spawn_swarm_worker"
         else:
             tool_name = command.split()[0]
         
@@ -707,7 +729,7 @@ def display_tool_feedback(command, tool_result, console, indent=False, panel_upd
         return
 
     # For swarm admin tools: display a concise console summary.
-    if command.startswith(("dispatch_swarm_task", "handle_approval", "kill_swarm_worker")):
+    if command.startswith(("dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "spawn_swarm_worker")):
         summary, is_failure = _format_swarm_tool_summary(command, tool_result)
         prefix = "╰─ " if not panel_updater else ""
         if is_failure:
@@ -897,7 +919,7 @@ def build_panel_tool_message(tool_name, tool_result, command):
         first_two = "\n".join(tool_result.splitlines()[:2]).strip()
         return f"[grey]{tool_name}[/grey]\n[dim]╰─ {first_two or tool_result.strip()}[/dim]"
 
-    if tool_name in ("dispatch_swarm_task", "handle_approval", "kill_swarm_worker"):
+    if tool_name in ("dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "spawn_swarm_worker"):
         label = command if command else tool_name
         summary, is_failure = _format_swarm_tool_summary(command or tool_name, tool_result)
         if is_failure:

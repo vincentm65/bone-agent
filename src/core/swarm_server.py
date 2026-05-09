@@ -36,10 +36,11 @@ class SwarmServer:
     The admin terminal communicates through the server's inbox queue.
     """
 
-    def __init__(self, swarm_name: str, host: str = "127.0.0.1", port: int = 8765):
+    def __init__(self, swarm_name: str, host: str = "127.0.0.1", port: int = 8765, repo_root: str = ""):
         self.swarm_name = swarm_name
         self.host = host
         self.port = port
+        self.repo_root = repo_root
         self.base_url = f"ws://{host}:{port}/{swarm_name}"
         self._auth_token = secrets.token_hex(16)
 
@@ -109,6 +110,16 @@ class SwarmServer:
         return {
             "url": self.base_url,
             "auth_token": self._auth_token,
+        }
+
+    def get_spawn_info(self) -> dict[str, str]:
+        """Return connection info needed to spawn a new worker terminal."""
+        return {
+            "host": self.host,
+            "port": str(self.port),
+            "swarm_name": self.swarm_name,
+            "auth_token": self._auth_token,
+            "repo_root": self.repo_root,
         }
 
     def _next_idle_worker_id(self) -> str | None:

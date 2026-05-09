@@ -331,6 +331,15 @@ def _resume_orchestrator_with_live_toolbar(
 
 # ── Helper: inputhook for agent-done waiting ──────────────────────
 
+def _exit_prompt_safe(result):
+    """Exit the active prompt_toolkit app, ignoring duplicate-exit races."""
+    from prompt_toolkit.application import get_app
+    try:
+        get_app().exit(result=result)
+    except Exception:
+        pass
+
+
 def _create_agent_done_inputhook(completion_event, on_complete=None):
     """Inputhook that exits the prompt when agent work completes.
 
@@ -343,15 +352,16 @@ def _create_agent_done_inputhook(completion_event, on_complete=None):
     clear the spinner line.
     """
     def inputhook(context):
+        did_complete = False
         while True:
             if completion_event.is_set():
-                if on_complete is not None:
+                if on_complete is not None and not did_complete:
                     try:
                         on_complete()
                     except Exception:
                         pass
-                from prompt_toolkit.application import get_app
-                get_app().exit(result=999)
+                did_complete = True
+                _exit_prompt_safe(999)
                 return
             if context.input_is_ready():
                 return
@@ -373,6 +383,19 @@ def _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread=None):
     safe_console.set_app(None)
     INPUT_BLOCKED['blocked'] = False
     _drain_stdin(session)
+
+
+def _prompt_with_erase_when_done(session, *args, **kwargs):
+    """Run a transient background prompt without leaving its toolbar in scrollback."""
+    app = getattr(session, "app", None)
+    previous = getattr(app, "erase_when_done", False) if app is not None else False
+    if app is not None:
+        app.erase_when_done = True
+    try:
+        return session.prompt(*args, **kwargs)
+    finally:
+        if app is not None:
+            app.erase_when_done = previous
 
 
 def _handle_ctrl_c_bg_prompt(chat_manager, session, safe_console,
@@ -563,6 +586,28 @@ def main():
         chat_manager.swarm_status_page = min(1, page + 1)
         event.app.invalidate()
 
+    @bindings.add('c-s-up')
+    def swarm_worker_scroll_up(event):
+        """Scroll swarm worker list up (Ctrl+Shift+Up)."""
+        if INPUT_BLOCKED.get('blocked', False):
+            return
+        if not getattr(chat_manager, 'swarm_admin_mode', False):
+            return
+        scroll = getattr(chat_manager, 'swarm_worker_scroll', 0)
+        chat_manager.swarm_worker_scroll = max(0, scroll - 1)
+        event.app.invalidate()
+
+    @bindings.add('c-s-down')
+    def swarm_worker_scroll_down(event):
+        """Scroll swarm worker list down (Ctrl+Shift+Down)."""
+        if INPUT_BLOCKED.get('blocked', False):
+            return
+        if not getattr(chat_manager, 'swarm_admin_mode', False):
+            return
+        scroll = getattr(chat_manager, 'swarm_worker_scroll', 0)
+        chat_manager.swarm_worker_scroll = scroll + 1
+        event.app.invalidate()
+
     @bindings.add('c-v')
     def paste_image_or_text(event):
         """Paste a clipboard image as an attachment, otherwise fall back to text paste."""
@@ -698,7 +743,8 @@ def main():
                             daemon=True,
                         )
                         agent_thread.start()
-                        raw_input = session.prompt(
+                        raw_input = _prompt_with_erase_when_done(
+                            session,
                             lambda: "",
                             bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
                             inputhook=_create_agent_done_inputhook(
@@ -941,7 +987,8 @@ def main():
                     )
                     agent_thread.start()
                     try:
-                        raw_input = session.prompt(
+                        raw_input = _prompt_with_erase_when_done(
+                            session,
                             lambda: "",
                             bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
                             inputhook=_create_agent_done_inputhook(
@@ -984,7 +1031,8 @@ def main():
                     )
                     agent_thread.start()
                     try:
-                        raw_input = session.prompt(
+                        raw_input = _prompt_with_erase_when_done(
+                            session,
                             lambda: "",
                             bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
                             inputhook=_create_agent_done_inputhook(
@@ -1134,6 +1182,7 @@ if __name__ == "__main__":
     parser.add_argument("--swarm-host", default="127.0.0.1", help="Swarm server host for --worker")
     parser.add_argument("--swarm-port", type=int, default=8765, help="Swarm server port for --worker")
     parser.add_argument("--auth-token", default="", help="Auth token for swarm server")
+    parser.add_argument("--profile", default="", help="Worker profile name (from ~/.bone/worker_profiles/)")
     args = parser.parse_args()
 
     if args.cron_run:
@@ -1151,6 +1200,7 @@ if __name__ == "__main__":
                 host=args.swarm_host,
                 port=args.swarm_port,
                 auth_token=args.auth_token,
+                profile=args.profile,
             )
         )
 

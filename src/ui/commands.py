@@ -3762,6 +3762,8 @@ def _handle_swarm(chat_manager, console, debug_mode_container, args, cron_schedu
         return _handle_swarm_start(chat_manager, console, subargs)
     elif subcmd in ("join",):
         return _handle_swarm_join(chat_manager, console, subargs)
+    elif subcmd in ("spawn",):
+        return _handle_swarm_spawn(chat_manager, console, subargs)
     elif subcmd in ("status", "stat"):
         return _handle_swarm_status(chat_manager, console)
     elif subcmd in ("close", "stop", "exit"):
@@ -3781,6 +3783,7 @@ def _print_swarm_help(console):
 
     table.add_row("[bold #5F9EA0]/swarm start[/bold #5F9EA0] <name>", "Start a swarm server (admin mode)")
     table.add_row("[bold #5F9EA0]/swarm join[/bold #5F9EA0] <name>", "Turn this session into a worker")
+    table.add_row("[bold #5F9EA0]/swarm spawn[/bold #5F9EA0] [count] [--profile name]", "Spawn worker terminals that auto-join the swarm")
     table.add_row("[bold #5F9EA0]/swarm status[/bold #5F9EA0]", "Show worker/task snapshot")
     table.add_row("[bold #5F9EA0]/swarm close[/bold #5F9EA0]", "Stop server, exit swarm admin mode")
 
@@ -3804,7 +3807,7 @@ def _handle_swarm_start(chat_manager, console, name_arg):
     port = swarm_settings.port
 
     from core.swarm_server import SwarmServer
-    server = SwarmServer(swarm_name, host=host, port=port)
+    server = SwarmServer(swarm_name, host=host, port=port, repo_root=os.getcwd())
     if not server.start():
         error = server._last_error or "Unknown error"
         console.print(f"[red]Failed to start swarm server: {error}[/red]")
@@ -3865,6 +3868,74 @@ def _handle_swarm_join(chat_manager, console, name_arg):
         status="swarm_worker",
         replacement_input=json.dumps({"swarm_name": swarm_name, "auth_token": auth_token}),
     )
+
+
+def _handle_swarm_spawn(chat_manager, console, args):
+    """Spawn new terminal windows as swarm workers."""
+    if not chat_manager.swarm_admin_mode or not chat_manager.swarm_server:
+        console.print("[yellow]No active swarm. Start one with /swarm start <name>[/yellow]")
+        return CommandResult(status="handled")
+
+    # Parse args: optional count and --profile name
+    count = 1
+    profile = ""
+
+    if args:
+        parts = args.split()
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--profile":
+                if i + 1 < len(parts):
+                    profile = parts[i + 1]
+                    i += 2
+                else:
+                    console.print("[yellow]Missing profile name after --profile[/yellow]")
+                    return CommandResult(status="handled")
+            else:
+                try:
+                    count = int(parts[i])
+                    if count < 1:
+                        console.print("[yellow]Worker count must be at least 1.[/yellow]")
+                        return CommandResult(status="handled")
+                    if count > 10:
+                        from prompt_toolkit.shortcuts import confirm as ptk_confirm
+                        if not ptk_confirm(f"Spawn {count} workers?"):
+                            return CommandResult(status="handled")
+                    i += 1
+                    continue
+                except ValueError:
+                    console.print(f"[yellow]Unknown argument: {parts[i]}[/yellow]")
+                    i += 1
+
+    server = chat_manager.swarm_server
+
+    try:
+        from core.terminal_spawn import build_and_spawn_workers
+        spawned, errors = build_and_spawn_workers(server, count, profile)
+    except ValueError as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        return CommandResult(status="handled")
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        return CommandResult(status="handled")
+    except Exception as e:
+        console.print(f"[red]Failed to spawn workers: {e}[/red]")
+        return CommandResult(status="handled")
+
+    if spawned > 0:
+        console.print(f"[green]Requested {spawned} worker terminal(s).[/green]")
+        if profile:
+            console.print(f"[dim]Profile: {profile}[/dim]")
+        console.print("[dim]Use /swarm status to confirm workers connected and are idle.[/dim]")
+        console.print("[dim]If a worker startup fails, its terminal stays open with the error.[/dim]")
+
+    if errors:
+        console.print(f"[red]{len(errors)} spawn(s) failed:[/red]")
+        for err in errors:
+            console.print(f"[red]  {err}[/red]")
+
+    console.print()
+    return CommandResult(status="handled")
 
 
 def _handle_swarm_status(chat_manager, console):

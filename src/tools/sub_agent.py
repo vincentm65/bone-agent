@@ -163,6 +163,7 @@ def sub_agent(
                 summary_parts.append(f"{total_tok:,} tokens")
             summary_line = f"[green]✓[/green] subagent done: [dim]{' | '.join(summary_parts)}[/dim]"
             console.print(summary_line, highlight=False)
+            console.print()
             console.file.flush()
 
         # Display sub-agent result summary (used for context)

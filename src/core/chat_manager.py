@@ -42,9 +42,9 @@ _ACTION_LABELS = {
 class ChatManager:
     """Manages chat state, messages, and provider switching."""
 
-    def __init__(self, compact_trigger_tokens: Optional[int] = None):
-        # Initialize client with provider from global config
-        self.client = LLMClient()
+    def __init__(self, compact_trigger_tokens: Optional[int] = None, provider: Optional[str] = None):
+        # Initialize client with provider from global config (or override)
+        self.client = LLMClient(provider=provider)
         self.conversation_id = str(uuid.uuid4())
         self.client.conversation_id = self.conversation_id
         self.messages = SanitizedMessageList()
@@ -84,6 +84,7 @@ class ChatManager:
         self.swarm_admin_mode: bool = False
         self.swarm_complete: bool = False
         self.swarm_status_page: int = 0  # 0=Workers, 1=Plan
+        self.swarm_worker_scroll: int = 0  # Scroll offset for worker list toolbar
         # Maps swarm task_ids to task_list plan indices (populated by dispatch_swarm_task)
         self._swarm_task_plan_map: dict[str, int] = {}
         # Background poller drains server inbox items into this queue as

@@ -45,25 +45,27 @@ def format_worker_label(worker_id: str, winfo: dict | None = None) -> str:
 
 def format_swarm_toolbar_lines(
     snapshot: dict,
+    max_visible: int = 6,
+    scroll_offset: int = 0,
 ) -> list[str]:
     """Return compact toolbar lines for live swarm status.
 
     Each line is plain text (no markup) suitable for prompt-toolkit's
     bottom toolbar.  Returns an empty list when there are no workers.
 
-    Worker lines use a compact format:
-      idle:           ``Worker 1 - idle``
-      running:        ``Worker 2 - working`` or ``Worker 2 - working - task-a12``
-      blocked+approval: ``Worker 3 - pending approval``
-      blocked no approval: ``Worker 3 - blocked`` or ``Worker 3 - blocked - task-c56``
-      unknown/other:  ``Worker N - {status}`` plus `` - {task_id}`` if present
+    When there are more workers than max_visible, active workers (non-idle)
+    are sorted to the top, then idle workers.  Within each group, workers
+    are sorted alphabetically.  When total <= max_visible, all workers are
+    shown in simple alphabetical order.
 
-    Pending approval is detected by checking ``approval_requests`` for a
-    matching ``worker_id``.  Prompt previews are intentionally excluded
-    from toolbar worker lines to keep them compact.
+    A scroll window of max_visible workers is shown starting at
+    scroll_offset.  A scroll indicator line is appended when there are
+    more workers than fit in the window.
 
     Args:
         snapshot: dict from ``SwarmServer.status_snapshot()``.
+        max_visible: Maximum number of worker rows to render.
+        scroll_offset: 0-based index of the first visible worker.
 
     Returns:
         List of short status lines.
@@ -77,10 +79,40 @@ def format_swarm_toolbar_lines(
         req.get("worker_id", "") for req in approval_requests
     }
 
+    # --- Sorting ---
+    max_visible = max(1, int(max_visible or 1))
+    total = len(workers)
+
+    def _sort_key(item):
+        """Alphabetical by display_name (fallback worker_id)."""
+        return item[1].get("display_name", item[0])
+
+    def _is_active(item):
+        """True if worker is not idle."""
+        return item[1].get("status", "idle") != "idle"
+
+    if total > max_visible:
+        # Split into active and idle, sort each alphabetically.
+        active = sorted(
+            [item for item in workers.items() if _is_active(item)],
+            key=_sort_key,
+        )
+        idle = sorted(
+            [item for item in workers.items() if not _is_active(item)],
+            key=_sort_key,
+        )
+        sorted_workers = active + idle
+    else:
+        sorted_workers = sorted(workers.items(), key=_sort_key)
+
+    # --- Scroll windowing ---
+    max_scroll = max(0, total - max_visible)
+    scroll_offset = max(0, min(scroll_offset, max_scroll))
+    visible_workers = sorted_workers[scroll_offset:scroll_offset + max_visible]
+
     lines: list[str] = []
 
-    # Worker lines — compact, one line per worker, no prompt previews.
-    for wid, winfo in workers.items():
+    for wid, winfo in visible_workers:
         label = format_worker_label(wid, winfo)
         model = winfo.get("model", "")
         if model:
@@ -116,12 +148,23 @@ def format_swarm_toolbar_lines(
             else:
                 lines.append(f"{label} - starting")
         else:
-            # Unknown or other status — include task id if present.
             base = f"{label} - {status}"
             if task_id:
                 lines.append(f"{base} - {task_id}")
             else:
                 lines.append(base)
+
+    # --- Scroll indicator ---
+    if total > max_visible:
+        first = scroll_offset + 1
+        last = min(scroll_offset + max_visible, total)
+        parts = []
+        if scroll_offset > 0:
+            parts.append("↑")
+        parts.append(f"{first}-{last}/{total}")
+        if scroll_offset < max_scroll:
+            parts.append("↓")
+        lines.append(" ".join(parts))
 
     return lines
 
@@ -296,7 +339,7 @@ def format_swarm_status(snapshot: dict, mode: str = "human") -> str:
     if workers:
         lines.append("")
         lines.append("Workers:")
-        for wid, winfo in workers.items():
+        for wid, winfo in sorted(workers.items(), key=lambda item: item[1].get("display_name", item[0])):
             status = winfo.get("status", "unknown")
             task_id = winfo.get("current_task_id") or "none"
             model = winfo.get("model", "")

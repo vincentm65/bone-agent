@@ -63,7 +63,7 @@ class InboxItem:
 # ── ChatManager factory ──────────────────────────────────────────────
 
 
-def _create_worker_chat_manager(system_prompt: str) -> ChatManager:
+def _create_worker_chat_manager(system_prompt: str, provider: str | None = None) -> ChatManager:
     """Create a fresh ChatManager for a swarm worker.
 
     Disables markdown logging and user message logging to prevent
@@ -71,11 +71,12 @@ def _create_worker_chat_manager(system_prompt: str) -> ChatManager:
 
     Args:
         system_prompt: Pre-built worker system prompt.
+        provider: Optional provider name override from worker profile.
 
     Returns:
         Configured ChatManager instance.
     """
-    cm = ChatManager(compact_trigger_tokens=None)
+    cm = ChatManager(compact_trigger_tokens=None, provider=provider)
     cm._compaction_disabled = True
     cm.markdown_logger = None
     cm.user_message_logger = None
@@ -89,8 +90,8 @@ def _create_worker_chat_manager(system_prompt: str) -> ChatManager:
 def clear_worker_context(chat_manager: ChatManager) -> None:
     """Clear a worker's message history, keeping only the system prompt.
 
-    Called before each new task assignment. No teardown or recreation —
-    the ChatManager, tool tracker, and client are all preserved.
+    No teardown or recreation — the ChatManager, tool tracker, and client
+    are all preserved. Safe to call at any time (idempotent).
 
     Args:
         chat_manager: Worker's ChatManager instance.
@@ -531,7 +532,8 @@ class SwarmWorkerRunner:
     def _build_chat_manager(self) -> ChatManager:
         """Build a worker ChatManager with the worker prompt."""
         prompt = build_swarm_worker_prompt()
-        return _create_worker_chat_manager(prompt)
+        provider = self.provider or None
+        return _create_worker_chat_manager(prompt, provider=provider)
 
     def _parse_websocket_url(self) -> tuple[str, int]:
         """Extract host and port from websocket_url."""
@@ -747,6 +749,9 @@ class SwarmWorkerRunner:
             self._current_activity = task_dispatch.get("activity_label", "")
             prompt = task_dispatch["prompt"]
 
+            # Clear accumulated context from prior tasks before starting
+            clear_worker_context(self.chat_manager)
+
             # Bug 3 fix: reset cancellation state from any prior task.
             # clear_agent_cancel() creates a fresh Event so the old (set)
             # event is no longer referenced by chat_manager, but the cached
@@ -759,9 +764,6 @@ class SwarmWorkerRunner:
             self.orchestrator.tool_calls_count = 0
             self.orchestrator._current_task_id = self._task_id
             self.orchestrator._current_worker_id = self.worker_id
-
-            # Clear context for the new task
-            clear_worker_context(self.chat_manager)
 
             # Send task_started to server
             self._client.send({
@@ -868,6 +870,9 @@ class SwarmWorkerRunner:
             self._task_id = f"local-{uuid.uuid4().hex[:8]}"
             self._write_scope = []
 
+            # Clear accumulated context from prior tasks before starting
+            clear_worker_context(self.chat_manager)
+
             # Bug 3 fix: reset cancellation state from any prior task.
             self.chat_manager.clear_agent_cancel()
             if self.__orchestrator is not None:
@@ -880,8 +885,6 @@ class SwarmWorkerRunner:
             self.orchestrator._current_task_id = self._task_id
             self.orchestrator._current_worker_id = self.worker_id
 
-            # Clear context for the new task
-            clear_worker_context(self.chat_manager)
             if hasattr(self.chat_manager, "approve_mode"):
                 display_startup_banner(self.chat_manager.approve_mode, clear_screen=True)
             elif sys.stdout.isatty():
@@ -1037,13 +1040,19 @@ class SwarmWorkerRunner:
             while True:
                 if completion_event.is_set():
                     from prompt_toolkit.application import get_app
-                    get_app().exit(result=AGENT_DONE_SENTINEL)
+                    try:
+                        get_app().exit(result=AGENT_DONE_SENTINEL)
+                    except Exception:
+                        pass
                     return
                 if not self._running:
                     return
                 if self._admin_work_pending.is_set():
                     from prompt_toolkit.application import get_app
-                    get_app().exit(result=ADMIN_STOP_SENTINEL)  # Exit via sentinel, like idle pre_run
+                    try:
+                        get_app().exit(result=ADMIN_STOP_SENTINEL)  # Exit via sentinel, like idle pre_run
+                    except Exception:
+                        pass
                     return
                 if context.input_is_ready():
                     # Let prompt_toolkit consume the key event. The active-task
@@ -1349,6 +1358,21 @@ class SwarmWorkerRunner:
 # ── CLI entry point ──────────────────────────────────────────────────
 
 
+def _load_worker_profile(profile_name: str) -> dict:
+    """Load a worker profile YAML from ~/.bone/worker_profiles/."""
+    import yaml
+    profile_dir = Path.home() / ".bone" / "worker_profiles"
+    profile_path = profile_dir / f"{profile_name}.yaml"
+    if not profile_path.exists():
+        return {}
+    try:
+        with open(profile_path) as f:
+            return yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError) as exc:
+        logger.warning("Failed to load worker profile '%s': %s — using defaults", profile_name, exc)
+        return {}
+
+
 def run_worker_cli(
     swarm_name: str,
     repo_root: str,
@@ -1359,6 +1383,7 @@ def run_worker_cli(
     approval_timeout: int = 300,
     worker_tools: list[str] | None = None,
     allow_active_plugins: bool = False,
+    profile: str = "",
 ):
     """Run the worker as a CLI process.
 
@@ -1374,8 +1399,14 @@ def run_worker_cli(
         approval_timeout: Timeout for command approval in seconds.
         worker_tools: Override list of allowed tool names.
         allow_active_plugins: Whether to allow active plugin tools.
+        profile: Worker profile name (loaded from ~/.bone/worker_profiles/).
     """
     console = Console()
+
+    # Load profile overrides (provider, model, display_name)
+    profile_cfg = {}
+    if profile:
+        profile_cfg = _load_worker_profile(profile)
 
     worker = SwarmWorkerRunner(
         swarm_name=swarm_name,
@@ -1387,6 +1418,9 @@ def run_worker_cli(
         approval_timeout=approval_timeout,
         worker_tools=worker_tools,
         allow_active_plugins=allow_active_plugins,
+        display_name=profile_cfg.get("display_name"),
+        model=profile_cfg.get("model"),
+        provider=profile_cfg.get("provider"),
     )
 
     if not worker.connect():

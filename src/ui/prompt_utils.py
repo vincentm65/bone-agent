@@ -404,7 +404,8 @@ def _get_normal_status_text(chat_manager, include_progress: bool = True):
 
             if page == 0:
                 # Page 1 — Workers.
-                swarm_lines = format_swarm_toolbar_lines(snapshot)
+                swarm_scroll = getattr(chat_manager, 'swarm_worker_scroll', 0)
+                swarm_lines = format_swarm_toolbar_lines(snapshot, scroll_offset=swarm_scroll)
                 if swarm_lines:
                     for line in swarm_lines:
                         toolbar_text += '\n' + _style_line(line, "#888888", width)

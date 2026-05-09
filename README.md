@@ -214,6 +214,17 @@ Available plans: **Free**, **Lite**, and **Pro**. Use `/plan` to see details and
 - Never commit API keys or sensitive configuration
 - Use environment variables for CI/CD or shared environments
 
+## Project Status
+
+**Current version: 1.5.1** (published to npm)
+
+bone-agent is actively maintained with ongoing work toward production stability. Key focus areas include:
+
+- Expanding provider and model coverage
+- Swarm pool reliability and error handling
+- Test suite expansion
+- Landing page and documentation
+
 ## Development
 
 bone-agent is currently in active development. Production readiness is in progress with focus on:

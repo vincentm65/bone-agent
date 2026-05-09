@@ -250,3 +250,77 @@ def kill_swarm_worker(
         return f"exit_code=0\nKilled worker {worker_id} — removed from pool, approvals cancelled, task marked killed."
     else:
         return f"exit_code=1\nWorker {worker_id} not found in the swarm pool."
+
+
+@tool(
+    name="spawn_swarm_worker",
+    description=(
+        "Spawn new terminal windows that launch bone workers and join the swarm. "
+        "Only works when the admin agent is in swarm admin mode. "
+        "Each spawned terminal opens a new bone process in worker mode that "
+        "connects to the swarm server automatically."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "count": {
+                "type": "integer",
+                "description": "Number of worker terminals to spawn. Default 1.",
+            },
+            "profile": {
+                "type": "string",
+                "description": "Worker profile name to use (from ~/.bone/worker_profiles/). "
+                "The profile sets provider, model, and display_name for the worker.",
+            },
+        },
+        "required": [],
+    },
+    tier="core",
+    tags=["swarm", "pool", "admin", "spawn"],
+    category="swarm",
+)
+def spawn_swarm_worker(
+    count: int = 1,
+    profile: Optional[str] = None,
+    confirmed: bool = False,
+    chat_manager: Any = None,
+) -> str:
+    """Spawn worker terminals that auto-join the swarm.
+
+    When count > 10 the first call will return an error asking for confirmation.
+    Re-call with confirmed=True after getting user approval.
+    """
+    ok, error = _require_swarm_admin(chat_manager)
+    if not ok:
+        return f"exit_code=1\n{error}"
+
+    if count < 1:
+        return "exit_code=1\ncount must be at least 1"
+
+    server = chat_manager.swarm_server
+
+    def _confirm(n: int) -> bool:
+        return confirmed
+
+    try:
+        from core.terminal_spawn import build_and_spawn_workers
+        spawned, errors = build_and_spawn_workers(
+            server, count, profile or "", confirm=_confirm
+        )
+    except ValueError as e:
+        return f"exit_code=1\n{e}"
+    except RuntimeError as e:
+        return f"exit_code=1\n{e}"
+    except Exception as e:
+        return f"exit_code=1\nFailed to spawn workers: {e}"
+
+    parts = [f"exit_code=0", f"Requested {spawned} worker terminal(s)."]
+    if profile:
+        parts.append(f"Profile: {profile}")
+    parts.append("Use /swarm status to confirm workers connected and are idle.")
+    parts.append("If a worker startup fails, its terminal stays open with the error.")
+    if errors:
+        parts.append(f"{len(errors)} spawn(s) failed:")
+        for err in errors:
+            parts.append(f"  {err}")
+    return "\n".join(parts)
