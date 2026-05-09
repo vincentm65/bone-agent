@@ -555,6 +555,19 @@ def build_swarm_admin_prompt(variant: str | None = None, active_skills_section: 
     if mode_content:
         result += "\n\n" + mode_content
 
+    # Append activity label guidance for dispatch_swarm_task
+    result += (
+
+        "\n\n### Activity labels\n"
+        "- **Generate a concise `activity_label` (3-6 words) for every task you dispatch.** "
+        "Think of it as a toolbar headline that tells the user what the worker is doing right now.\n"
+        "- When calling `dispatch_swarm_task`, always provide an `activity_label` — a short 3-6 word "
+        "phrase describing what the worker will do. This is displayed in the toolbar so the user can "
+        "see what each worker is working on at a glance. "
+        'Examples: `"fixing login redirect bug"`, `"adding unit tests for auth"`, '
+        '`"refactoring database layer"`.'
+    )
+
     if active_skills_section.strip():
         result += "\n\n" + active_skills_section.strip()
 

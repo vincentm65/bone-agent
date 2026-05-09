@@ -270,6 +270,11 @@ class SwarmServer:
                 await websocket.close(1008, "Invalid auth token")
                 return
 
+            # Extract identity payload
+            display_name = msg.get("display_name", "")
+            model = msg.get("model", "")
+            provider = msg.get("provider", "")
+
             # Assign worker ID and register (under lock)
             with self._lock:
                 self._worker_counter += 1
@@ -280,6 +285,10 @@ class SwarmServer:
                     "websocket": websocket,
                     "status": "idle",
                     "current_task_id": None,
+                    "display_name": display_name or "",
+                    "model": model or "",
+                    "provider": provider or "",
+                    "current_activity": "",
                 }
 
                 # Store event for notification history
@@ -365,6 +374,7 @@ class SwarmServer:
 
                             self._workers[worker_id]["status"] = "idle"
                             self._workers[worker_id]["current_task_id"] = None
+                            self._workers[worker_id]["current_activity"] = ""
 
                             intervention_note = " (user intervened)" if user_intervened else ""
 
@@ -385,6 +395,7 @@ class SwarmServer:
                                 "kind": "completion",
                                 "task_id": task_id,
                                 "worker_id": worker_id,
+                                "display_name": self._workers[worker_id].get("display_name", ""),
                                 "status": status,
                                 "summary": summary,
                             })
@@ -492,6 +503,7 @@ class SwarmServer:
                             "task_id": task_id,
                             "call_id": call_id,
                             "worker_id": worker_id_msg,
+                            "display_name": self._workers[worker_id_msg].get("display_name", ""),
                             "command": command,
                             "command_preview": command_preview,
                             "reason": msg.get("reason", ""),
@@ -589,6 +601,7 @@ class SwarmServer:
 
                 self._workers[worker_id]["status"] = "dispatched"
                 self._workers[worker_id]["current_task_id"] = task["task_id"]
+                self._workers[worker_id]["current_activity"] = task.get("activity_label", "")
 
             # Send outside the lock to avoid blocking on websocket I/O.
             sent = await self._send_to_worker_async(
@@ -598,6 +611,7 @@ class SwarmServer:
                     "task_id": task["task_id"],
                     "prompt": task["prompt"],
                     "write_scope": task.get("write_scope", []),
+                    "activity_label": task.get("activity_label", ""),
                 },
             )
 
@@ -647,7 +661,8 @@ class SwarmServer:
 
     def submit_task(self, prompt: str, write_scope: list[str] | None = None,
                     task_id: str | None = None,
-                    plan_index: int | None = None) -> dict:
+                    plan_index: int | None = None,
+                    activity_label: str | None = None) -> dict:
         """Submit a task to the server queue.
 
         If idle workers are available, the task is dispatched immediately.
@@ -667,6 +682,7 @@ class SwarmServer:
             "prompt": prompt,
             "write_scope": write_scope or [],
             "plan_index": plan_index,
+            "activity_label": activity_label or "",
         }
         with self._lock:
             self._task_queue.append(task)
@@ -964,6 +980,10 @@ class SwarmServer:
                 workers_info[wid] = {
                     "status": w["status"],
                     "current_task_id": w["current_task_id"],
+                    "display_name": w.get("display_name", ""),
+                    "model": w.get("model", ""),
+                    "provider": w.get("provider", ""),
+                    "current_activity": w.get("current_activity", ""),
                 }
 
             tasks_info = {}

@@ -15,8 +15,14 @@ _WORKER_PATTERN = re.compile(r"^worker-(\d+)$", re.IGNORECASE)
 # Worker label
 # ---------------------------------------------------------------------------
 
-def format_worker_label(worker_id: str) -> str:
-    """Return a user-friendly label, e.g. 'worker-01' -> 'Worker 1'."""
+def format_worker_label(worker_id: str, winfo: dict | None = None) -> str:
+    """Return a user-friendly label for a worker.
+
+    If worker info dict is provided and has a display_name, use that.
+    Otherwise fall back to 'Worker N' from the worker_id pattern.
+    """
+    if winfo and winfo.get("display_name"):
+        return winfo["display_name"]
     m = _WORKER_PATTERN.match(worker_id)
     if m:
         return f"Worker {int(m.group(1))}"
@@ -75,24 +81,40 @@ def format_swarm_toolbar_lines(
 
     # Worker lines — compact, one line per worker, no prompt previews.
     for wid, winfo in workers.items():
-        label = format_worker_label(wid)
+        label = format_worker_label(wid, winfo)
+        model = winfo.get("model", "")
+        if model:
+            label = f"{label} ({model})"
+
         status = winfo.get("status", "unknown")
         task_id = winfo.get("current_task_id")
+        activity = winfo.get("current_activity", "")
 
         if status == "idle":
             lines.append(f"{label} - idle")
         elif status == "running":
-            if task_id:
+            if activity:
+                lines.append(f"{label} - working - {activity}")
+            elif task_id:
                 lines.append(f"{label} - working - {task_id}")
             else:
                 lines.append(f"{label} - working")
         elif status == "blocked":
             if wid in pending_approval_worker_ids:
                 lines.append(f"{label} - pending approval")
+            elif activity:
+                lines.append(f"{label} - blocked - {activity}")
             elif task_id:
                 lines.append(f"{label} - blocked - {task_id}")
             else:
                 lines.append(f"{label} - blocked")
+        elif status == "dispatched":
+            if activity:
+                lines.append(f"{label} - starting - {activity}")
+            elif task_id:
+                lines.append(f"{label} - starting - {task_id}")
+            else:
+                lines.append(f"{label} - starting")
         else:
             # Unknown or other status — include task id if present.
             base = f"{label} - {status}"
@@ -277,8 +299,16 @@ def format_swarm_status(snapshot: dict, mode: str = "human") -> str:
         for wid, winfo in workers.items():
             status = winfo.get("status", "unknown")
             task_id = winfo.get("current_task_id") or "none"
-            label = format_worker_label(wid)
-            lines.append(f"  {label}: {status}, task={task_id}")
+            model = winfo.get("model", "")
+            activity = winfo.get("current_activity", "")
+            label = format_worker_label(wid, winfo)
+            detail_parts = [status]
+            if model:
+                detail_parts.append(f"model={model}")
+            if activity:
+                detail_parts.append(f"activity={activity}")
+            detail_parts.append(f"task={task_id}")
+            lines.append(f"  {label}: {', '.join(detail_parts)}")
 
     # Tasks
     tasks = snapshot.get("tasks", {})
@@ -288,9 +318,10 @@ def format_swarm_status(snapshot: dict, mode: str = "human") -> str:
         for tid, tinfo in tasks.items():
             status = tinfo.get("status", "unknown")
             worker_id = tinfo.get("worker_id") or "unassigned"
+            worker_info = workers.get(worker_id)
             prompt = tinfo.get("prompt", "")
             prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
-            label = format_worker_label(worker_id)
+            label = format_worker_label(worker_id, worker_info)
             lines.append(f"  {tid}: {status}, agent={label}, prompt={prompt_preview}")
 
     # Pending tasks (queued)
@@ -311,6 +342,7 @@ def format_swarm_status(snapshot: dict, mode: str = "human") -> str:
             task_id = approval.get("task_id", "unknown")
             call_id = approval.get("call_id", "unknown")
             worker_id = approval.get("worker_id", "unknown")
+            worker_info = workers.get(worker_id)
             command = approval.get("command", "")
             command_preview = command[:200] + "..." if len(command) > 200 else command
             task_prompt = approval.get("task_prompt", "")
@@ -318,7 +350,7 @@ def format_swarm_status(snapshot: dict, mode: str = "human") -> str:
             task_status = approval.get("task_status", "unknown")
             worker_status = approval.get("worker_status", "unknown")
 
-            w_label = format_worker_label(worker_id)
+            w_label = format_worker_label(worker_id, worker_info)
 
             if mode == "agent" or mode == "detailed":
                 # Agent/detailed mode — full structured block for each approval

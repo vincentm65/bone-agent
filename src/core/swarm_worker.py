@@ -13,6 +13,7 @@ WebSocket server to receive task assignments and send results back.
 import logging
 import os
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -40,6 +41,7 @@ from core.chat_manager import ChatManager
 ADMIN_STOP_SENTINEL = 130    # Admin sent stop_worker or pending work
 AGENT_DONE_SENTINEL = 999    # Agent thread completed during inputhook
 from core.swarm_client import SwarmClient
+from core.worker_names import generate_worker_name
 from llm.prompts import build_swarm_worker_prompt
 from utils.settings import swarm_settings
 from ui.banner import display_startup_banner
@@ -454,6 +456,9 @@ class SwarmWorkerRunner:
         cron_job_id: Optional[str] = None,
         cron_allowlist: Any = None,
         cron_interactive: bool = False,
+        display_name: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
     ):
         self.swarm_name = swarm_name
         self.repo_root = Path(repo_root)
@@ -485,6 +490,12 @@ class SwarmWorkerRunner:
         self._spinner_timer: threading.Timer | None = None
         self._deferred_user_input: str | None = None
 
+        # Worker identity
+        self.display_name = display_name or f"{generate_worker_name()}_{secrets.token_hex(2)}"
+        self.model = model or ""
+        self.provider = provider or ""
+        self._current_activity = ""
+
     @property
     def worker_id(self) -> str:
         return self._client.worker_id if self._client else "unknown"
@@ -503,6 +514,9 @@ class SwarmWorkerRunner:
                 port=port,
                 auth_token=self._auth_token,
                 on_message=self._handle_client_message,
+                display_name=self.display_name,
+                model=self.model,
+                provider=self.provider,
             )
             if self._client.connect():
                 self.console.print(f"[dim]Connected as {self.worker_id}[/dim]")
@@ -723,12 +737,14 @@ class SwarmWorkerRunner:
         session = self._prompt_session
 
         try:
+            self._current_activity = ""
             self._clear_terminal_for_next_task()
             self._print_task_header(task_dispatch)
 
             # Setup task context
             self._task_id = task_dispatch["task_id"]
             self._write_scope = list(task_dispatch.get("write_scope") or [])
+            self._current_activity = task_dispatch.get("activity_label", "")
             prompt = task_dispatch["prompt"]
 
             # Bug 3 fix: reset cancellation state from any prior task.
@@ -817,6 +833,7 @@ class SwarmWorkerRunner:
                     final_content = "Task completed with no output."
 
             # Send completion summary
+            self._current_activity = ""
             if not self._killed:
                 sent = self.send_completion_summary(
                     message=final_content,

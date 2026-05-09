@@ -45,6 +45,12 @@ def _require_swarm_admin(chat_manager: Any) -> tuple[bool, str]:
                 "type": "integer",
                 "description": "Zero-based index into the task list plan that this dispatch corresponds to. Used for status bar tracking.",
             },
+            "activity_label": {
+                "type": "string",
+                "description": "A short 3-6 word label describing what the worker will be doing. "
+                "Displayed in the toolbar instead of the task ID. "
+                "Examples: 'fixing login redirect', 'adding pagination to API', 'refactoring auth module'.",
+            },
         },
         "required": ["prompt"],
     },
@@ -56,6 +62,7 @@ def dispatch_swarm_task(
     prompt: str,
     write_scope: Optional[List[str]] = None,
     plan_index: Optional[int] = None,
+    activity_label: Optional[str] = None,
     chat_manager: Any = None,
     repo_root: Path = None,
 ) -> str:
@@ -65,6 +72,7 @@ def dispatch_swarm_task(
         prompt: The task prompt to send to a worker.
         write_scope: Expected file paths the worker will edit.
         plan_index: Zero-based index into the task list plan. Used for status bar tracking.
+        activity_label: Short 3-6 word label for the worker activity, shown in toolbar.
         chat_manager: The current chat manager instance (injected by orchestrator).
         repo_root: Repository root path (injected by orchestrator).
 
@@ -83,7 +91,7 @@ def dispatch_swarm_task(
 
     server = chat_manager.swarm_server
     try:
-        result = server.submit_task(prompt, write_scope=write_scope or [], plan_index=plan_index)
+        result = server.submit_task(prompt, write_scope=write_scope or [], plan_index=plan_index, activity_label=activity_label)
     except Exception as e:
         return f"exit_code=1\nFailed to dispatch task: {e}"
 
@@ -105,6 +113,9 @@ def dispatch_swarm_task(
         f"  URL: {conn_info['url']}",
         f"  Auth token: {conn_info['auth_token']}",
     ]
+
+    if activity_label:
+        parts.insert(1, f"Activity: {activity_label}")
 
     if write_scope:
         parts.extend(f"- {path}" for path in write_scope)

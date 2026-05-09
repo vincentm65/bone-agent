@@ -4,6 +4,8 @@ Used by both the main loop (raw_input==130 path) and the background inbox
 poller thread, plus the agentic orchestrator for mid-turn injection.
 """
 
+import re
+
 
 def _build_auto_turn_item(extra: dict) -> str:
     """Build a concise synthetic prompt for one pending swarm work item.
@@ -18,6 +20,11 @@ def _build_auto_turn_item(extra: dict) -> str:
     kind = extra.get("kind", "")
     task_id = extra.get("task_id", "-")
     worker_id = extra.get("worker_id", "-")
+    display_name = extra.get("display_name", "")
+    _m = re.match(r'worker-(\d+)', worker_id)
+    worker_label = display_name if display_name else (
+        f"Worker {int(_m.group(1))}" if _m else worker_id
+    )
 
     # ── Command approval ──────────────────────────────────────────────
     if extra.get("status") == "approval_pending":
@@ -26,7 +33,7 @@ def _build_auto_turn_item(extra: dict) -> str:
         reason = str(extra.get("reason", "")).strip()
         parts = [
             "[AUTO-TURN] Worker needs command approval.",
-            f"Task {task_id}  ·  Call {call_id}  ·  Worker {worker_id}",
+            f"Task {task_id}  ·  Call {call_id}  ·  Worker {worker_label}",
         ]
         if command:
             parts.append(f"Command: {command}")
@@ -47,7 +54,7 @@ def _build_auto_turn_item(extra: dict) -> str:
             parts = ["[AUTO-TURN] Task FAILED — action required."]
         else:
             parts = ["[AUTO-TURN] Task completed."]
-        parts.append(f"Task {task_id}  ·  Worker {worker_id}")
+        parts.append(f"Task {task_id}  ·  Worker {worker_label}")
         if status and status != "completed":
             parts.append(f"Status: {status}")
         if summary:
@@ -89,6 +96,7 @@ def _inbox_to_auto_turn_extra(item: dict) -> dict | None:
             "kind": result_kind,
             "task_id": item.get("task_id", "-"),
             "worker_id": item.get("worker_id", "-"),
+            "display_name": item.get("display_name", ""),
             "status": status,
             "summary": item.get("summary", ""),
             "files": "",
@@ -101,6 +109,7 @@ def _inbox_to_auto_turn_extra(item: dict) -> dict | None:
             "task_id": item.get("task_id", "-"),
             "call_id": item.get("call_id", "-"),
             "worker_id": item.get("worker_id", "-"),
+            "display_name": item.get("display_name", ""),
             "command_preview": item.get("command_preview", ""),
             "reason": item.get("reason", ""),
         }

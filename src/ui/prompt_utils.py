@@ -211,20 +211,33 @@ def _get_worker_status_text(chat_manager, worker_runner, include_progress: bool 
 
     # Worker-specific identity line
     worker_id = _escape_html(str(getattr(worker_runner, 'worker_id', '?')))
+    display_name = _escape_html(str(getattr(worker_runner, 'display_name', '')))
+    model = _escape_html(str(getattr(worker_runner, 'model', '')))
     swarm_name = _escape_html(str(getattr(worker_runner, 'swarm_name', '')))
     client = getattr(worker_runner, '_client', None)
     is_connected = getattr(client, 'is_connected', False) if client else False
     conn = "connected" if is_connected else "disconnected"
     busy = getattr(worker_runner, '_busy', None)
     task_id = getattr(worker_runner, '_task_id', '')
+    activity = _escape_html(str(getattr(worker_runner, '_current_activity', '')))
     if busy and busy.is_set() and task_id:
         state_str = f"working on {_escape_html(str(task_id))}"
+        if activity:
+            state_str = f"working on {activity}"
     elif busy and busy.is_set():
         state_str = "working"
     else:
         state_str = "idle"
 
-    worker_line = f"Worker {worker_id} | {conn} | {state_str} | {swarm_name}"
+    # Build label: prefer display_name over worker_id
+    if display_name:
+        name_part = display_name
+        if model:
+            name_part = f"{display_name} ({model})"
+    else:
+        name_part = f"Worker {worker_id}"
+
+    worker_line = f"{name_part} | {conn} | {state_str} | {swarm_name}"
     worker_html = _style_line(worker_line, "#aaaaaa", width)
 
     # Prepend progress_above (spinner / active tool) when present

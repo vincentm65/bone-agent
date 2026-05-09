@@ -40,6 +40,9 @@ class SwarmClient:
         on_worker_id: Optional[Callable[[str], None]] = None,
         on_message: Optional[Callable[[dict], None]] = None,
         on_disconnect: Optional[Callable[[], None]] = None,
+        display_name: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
     ):
         """Initialize the swarm client.
 
@@ -57,6 +60,10 @@ class SwarmClient:
         self.port = port
         self.base_url = f"ws://{host}:{port}/{swarm_name}"
         self._auth_token = auth_token
+
+        self._display_name = display_name
+        self._model = model
+        self._provider = provider
 
         self._on_worker_id = on_worker_id
         self._on_message = on_message
@@ -134,7 +141,15 @@ class SwarmClient:
 
             async with websockets.connect(self.base_url) as ws:
                 self._ws = ws
-                await ws.send(json.dumps({"type": "worker_hello", "token": self._auth_token}))
+                hello_msg = {"type": "worker_hello", "token": self._auth_token}
+                # Add identity fields if provided
+                if self._display_name:
+                    hello_msg["display_name"] = self._display_name
+                if self._model:
+                    hello_msg["model"] = self._model
+                if self._provider:
+                    hello_msg["provider"] = self._provider
+                await ws.send(json.dumps(hello_msg))
                 response = await ws.recv()
                 resp = json.loads(response)
                 self._worker_id = resp.get("worker_id", "unknown")
