@@ -255,9 +255,14 @@ def _handle_update(chat_manager, console, debug_mode_container, args, cron_sched
 
 _CRON_ADD_EXAMPLES = [
     "[dim]  /cron add morning_brief weekdays at 8am Give me a morning briefing[/dim]",
-    "[dim]  /cron add cleanup every 1 hour Clean up temp files[/dim]",
+    "[dim]  /cron add cleanup \"every 1 hour\" \"Clean up temp files\"[/dim]",
     "[dim]  /cron add news daily at 5am Draft an email with AI news[/dim]",
 ]
+
+_SCHEDULE_HELP = (
+    "[dim]Schedule formats: every N minutes|hours|days, daily at HH:MM, "
+    "weekdays at HH:MM, <dayname> at HH:MM, or bare HH:MM[/dim]"
+)
 
 
 def _print_cron_add_usage(console, prefix=None):
@@ -265,6 +270,8 @@ def _print_cron_add_usage(console, prefix=None):
     if prefix:
         console.print(prefix)
     console.print("[red]Usage: /cron add <id> <schedule> <command>[/red]")
+    console.print(_SCHEDULE_HELP)
+    console.print("[dim]Tip: quote the schedule or command if they contain spaces[/dim]")
     console.print("[dim]Examples:[/dim]")
     for line in _CRON_ADD_EXAMPLES:
         console.print(line)
@@ -325,7 +332,8 @@ def _cron_add(console, sub_args, cron_config, notify_scheduler):
 
     if schedule is None:
         attempted = " ".join(tokens[1:min(len(tokens), 7)])
-        _print_cron_add_usage(console, prefix=f"[red]Cannot parse schedule: '{attempted}'[/red]")
+        console.print(f"[red]Cannot parse schedule: '{attempted}'[/red]")
+        console.print(_SCHEDULE_HELP)
         return CommandResult(status="handled")
 
     command = " ".join(tokens[cmd_start:])

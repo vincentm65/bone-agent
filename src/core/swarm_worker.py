@@ -688,13 +688,17 @@ class SwarmWorkerRunner:
         task_id = task_dispatch.get("task_id", "-")
         prompt = task_dispatch.get("prompt", "")
         write_scope = task_dispatch.get("write_scope") or []
+        task_type = task_dispatch.get("task_type", "implementation")
 
         self.console.print()
-        self.console.print(f"[bold #5F9EA0]Swarm task {task_id}[/bold #5F9EA0]")
+        type_tag = " [dim](research — read-only)[/dim]" if task_type == "research" else ""
+        self.console.print(f"[bold #5F9EA0]Swarm task {task_id}{type_tag}[/bold #5F9EA0]")
         if write_scope:
             self.console.print("[dim]Write scope:[/dim]")
             for path in write_scope:
                 self.console.print(f"  {path}")
+        elif task_type == "research":
+            self.console.print("[dim]Write scope: none (read-only)[/dim]")
         self.console.print("[dim]Delegated prompt:[/dim]")
         self.console.print(prompt, markup=False)
         self.console.print()
@@ -758,7 +762,7 @@ class SwarmWorkerRunner:
             # orchestrator still holds its snapshot — refresh it.
             self.chat_manager.clear_agent_cancel()
             if self.__orchestrator is not None:
-                self.__orchestrator._cancel_event = self.chat_manager.get_agent_cancel_event()
+                self.__orchestrator.set_cancel_event(self.chat_manager.get_agent_cancel_event())
 
             # Reset tool-call budget for the new task
             self.orchestrator.tool_calls_count = 0
@@ -876,7 +880,7 @@ class SwarmWorkerRunner:
             # Bug 3 fix: reset cancellation state from any prior task.
             self.chat_manager.clear_agent_cancel()
             if self.__orchestrator is not None:
-                self.__orchestrator._cancel_event = self.chat_manager.get_agent_cancel_event()
+                self.__orchestrator.set_cancel_event(self.chat_manager.get_agent_cancel_event())
 
             # Reset tool-call budget for the new task (was missing for local tasks)
             self.orchestrator.tool_calls_count = 0

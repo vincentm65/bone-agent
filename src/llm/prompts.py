@@ -356,7 +356,7 @@ def _main_sections(variant: str) -> list[tuple[str, callable]]:
     Static .md sections, dynamic builders, and hardcoded sections all
     live here — single source of truth for ordering.
     """
-    return [
+    sections = [
         ("intro", lambda: _static(variant, "intro.md")),
         ("context", _build_context_section),
         ("tone_and_style", lambda: _static(variant, "tone_and_style.md")),
@@ -364,6 +364,12 @@ def _main_sections(variant: str) -> list[tuple[str, callable]]:
         ("trust_subagent_context", lambda: _static(variant, "trust_subagent_context.md")),
         ("context_reliability", lambda: _static(variant, "context_reliability.md")),
         ("skills", lambda: _static(variant, "skills.md")),
+    ]
+
+    if variant != "micro":
+        sections.append(("cron", lambda: _static(variant, "cron.md")))
+
+    sections.extend([
         ("conversational_tool_calling", lambda: _static(variant, "conversational_tool_calling.md")),
         ("professional_objectivity", lambda: _static(variant, "professional_objectivity.md")),
         ("think_before_acting", lambda: _static(variant, "think_before_acting.md")),
@@ -382,7 +388,9 @@ def _main_sections(variant: str) -> list[tuple[str, callable]]:
         ("memory_system", _build_memory_section),
         ("obsidian", lambda: _build_vault_section(variant)),
         ("mode", lambda: MODE_SECTION),
-    ]
+    ])
+
+    return sections
 
 
 def _sub_agent_sections(variant: str) -> list[tuple[str, callable]]:

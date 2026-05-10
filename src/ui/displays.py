@@ -84,15 +84,14 @@ def show_cron_help_table(console):
     table.add_column("Command", no_wrap=True)
     table.add_column("Description")
 
-    table.add_row("[bold #5F9EA0]/cron list[/bold #5F9EA0]", "Show all cron jobs (default)")
-    table.add_row("[bold #5F9EA0]/cron add[/bold #5F9EA0] <id> <schedule> <cmd>", "Add a new cron job")
+    table.add_row("[bold #5F9EA0]/cron[/bold #5F9EA0]", "Show all cron jobs")
+    table.add_row("[bold #5F9EA0]/cron add[/bold #5F9EA0] <id> <schedule> <command>", "Add a new cron job")
     table.add_row("[bold #5F9EA0]/cron remove[/bold #5F9EA0] <id>", "Remove a cron job")
-    table.add_row("[bold #5F9EA0]/cron enable[/bold #5F9EA0] <id>", "Enable a cron job")
-    table.add_row("[bold #5F9EA0]/cron disable[/bold #5F9EA0] <id>", "Disable a cron job")
-    table.add_row("[bold #5F9EA0]/cron run[/bold #5F9EA0] <id>", "Run a job immediately (interactive)")
-    table.add_row("[bold #5F9EA0]/cron allowlist[/bold #5F9EA0] [list|add|remove|clear]", "Manage allowed commands for a job")
+    table.add_row("[bold #5F9EA0]/cron enable|disable[/bold #5F9EA0] <id>", "Toggle a cron job on/off")
+    table.add_row("[bold #5F9EA0]/cron run[/bold #5F9EA0] <id>", "Test-run a job now (builds allowlist)")
+    table.add_row("[bold #5F9EA0]/cron allowlist[/bold #5F9EA0] [list|add|remove|clear]", "Manage pre-approved commands per job")
 
-    console.print(Panel(table, title="[bold #5F9EA0]Commands[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
+    console.print(Panel(table, title="[bold #5F9EA0]/cron Commands[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
 
     # Schedule formats section
     console.print()
@@ -100,12 +99,18 @@ def show_cron_help_table(console):
     sched_table.add_column("Format")
     sched_table.add_column("Example")
 
-    sched_table.add_row("every <n> <unit>", "every 5 minutes, every 1 hour, every 3 days")
+    sched_table.add_row("every N minutes|hours|days", "every 5 minutes, every 1 hour, every 3 days")
     sched_table.add_row("daily at <time>", "daily at 8am, daily at 17:30")
-    sched_table.add_row("<day>s at <time>", "weekdays at 9am, mondays at 10:30pm")
+    sched_table.add_row("weekdays at <time>", "weekdays at 9am")
+    sched_table.add_row("<dayname> at <time>", "mondays at 10:30pm, fridays at 5pm")
     sched_table.add_row("<time>", "08:00, 17:30")
 
     console.print(Panel(sched_table, title="[bold #5F9EA0]Schedule Formats[/bold #5F9EA0]", border_style="grey23", padding=(0, 2)))
+
+    # Tips
+    console.print()
+    console.print("[dim]Tip: You can also ask the agent to create cron jobs — it writes directly to[/dim]")
+    console.print("[dim]~/.bone/cron/jobs.yaml. Test new jobs with /cron run to approve commands.[/dim]")
     console.print("")
 
 

@@ -409,6 +409,7 @@ class SwarmServer:
                                 "display_name": self._workers[worker_id].get("display_name", ""),
                                 "status": status,
                                 "summary": summary,
+                                "task_type": self._tasks[task_id].get("task_type", "implementation"),
                             })
                             skip_dispatch = False
                     if skip_dispatch:
@@ -623,6 +624,7 @@ class SwarmServer:
                     "prompt": task["prompt"],
                     "write_scope": task.get("write_scope", []),
                     "activity_label": task.get("activity_label", ""),
+                    "task_type": task.get("task_type", "implementation"),
                 },
             )
 
@@ -673,7 +675,8 @@ class SwarmServer:
     def submit_task(self, prompt: str, write_scope: list[str] | None = None,
                     task_id: str | None = None,
                     plan_index: int | None = None,
-                    activity_label: str | None = None) -> dict:
+                    activity_label: str | None = None,
+                    task_type: str | None = None) -> dict:
         """Submit a task to the server queue.
 
         If idle workers are available, the task is dispatched immediately.
@@ -683,6 +686,9 @@ class SwarmServer:
             prompt: The task prompt text.
             write_scope: Expected files the worker will edit.
             task_id: Optional task ID (auto-generated if not provided).
+            plan_index: Zero-based plan index for status bar tracking.
+            activity_label: Short activity label for toolbar display.
+            task_type: "research" (read-only) or "implementation" (default, may edit).
 
         Returns:
             Dict with task_id, status, and either worker_id or queue_position.
@@ -694,6 +700,7 @@ class SwarmServer:
             "write_scope": write_scope or [],
             "plan_index": plan_index,
             "activity_label": activity_label or "",
+            "task_type": task_type or "implementation",
         }
         with self._lock:
             self._task_queue.append(task)
@@ -1005,6 +1012,7 @@ class SwarmServer:
                     "summary": t.get("summary", "")[:200],  # Truncate for display
                     "plan_index": t.get("plan_index"),
                     "prompt": t.get("prompt", "")[:80],
+                    "task_type": t.get("task_type", "implementation"),
                 }
 
             pending_approvals = []

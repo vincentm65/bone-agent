@@ -260,6 +260,19 @@ class AgenticOrchestrator:
         """
         return self._cancel_event.is_set()
 
+    def set_cancel_event(self, event):
+        """Replace the orchestrator's cancel event.
+
+        External callers use this to wire the orchestrator into a parent
+        cancel signal (e.g., ``sub_agent`` connects inner orchestrators
+        to the parent's cancel event) or to refresh the event reference
+        after ``chat_manager.clear_agent_cancel()`` allocates a new event
+        for the next turn (swarm workers).  Accepting the event directly
+        avoids coupling call sites to the private ``_cancel_event``
+        attribute.
+        """
+        self._cancel_event = event
+
     def _get_console(self):
         """Get the console for output, respecting parallel execution context.
 

@@ -79,6 +79,14 @@ def format_swarm_toolbar_lines(
         req.get("worker_id", "") for req in approval_requests
     }
 
+    # Build task_type lookup from tasks snapshot for activity labels
+    tasks_info = snapshot.get("tasks", {})
+    task_type_map: dict[str, str] = {}
+    for tid, tinfo in tasks_info.items():
+        tt = tinfo.get("task_type", "implementation")
+        if tt == "research":
+            task_type_map[tid] = tt
+
     # --- Sorting ---
     max_visible = max(1, int(max_visible or 1))
     total = len(workers)
@@ -122,29 +130,32 @@ def format_swarm_toolbar_lines(
         task_id = winfo.get("current_task_id")
         activity = winfo.get("current_activity", "")
 
+        # Research tag for active tasks
+        research_tag = " [research]" if (task_id and task_type_map.get(task_id)) else ""
+
         if status == "idle":
             lines.append(f"{label} - idle")
         elif status == "running":
             if activity:
-                lines.append(f"{label} - working - {activity}")
+                lines.append(f"{label}{research_tag} - working - {activity}")
             elif task_id:
-                lines.append(f"{label} - working - {task_id}")
+                lines.append(f"{label}{research_tag} - working - {task_id}")
             else:
                 lines.append(f"{label} - working")
         elif status == "blocked":
             if wid in pending_approval_worker_ids:
                 lines.append(f"{label} - pending approval")
             elif activity:
-                lines.append(f"{label} - blocked - {activity}")
+                lines.append(f"{label}{research_tag} - blocked - {activity}")
             elif task_id:
-                lines.append(f"{label} - blocked - {task_id}")
+                lines.append(f"{label}{research_tag} - blocked - {task_id}")
             else:
                 lines.append(f"{label} - blocked")
         elif status == "dispatched":
             if activity:
-                lines.append(f"{label} - starting - {activity}")
+                lines.append(f"{label}{research_tag} - starting - {activity}")
             elif task_id:
-                lines.append(f"{label} - starting - {task_id}")
+                lines.append(f"{label}{research_tag} - starting - {task_id}")
             else:
                 lines.append(f"{label} - starting")
         else:

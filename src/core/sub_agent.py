@@ -243,6 +243,15 @@ def run_sub_agent(
         force_parallel_execution=True  # Enable parallel execution for read-only tools
     )
 
+    # Wire the inner orchestrator's cancel event to the parent's subagent
+    # cancel event.  By default the inner orchestrator snapshots
+    # temp_chat_manager.get_agent_cancel_event() — a fresh event that is
+    # never set.  Replacing it with the parent's subagent cancel event
+    # makes the inner loop's _cancel_requested() checks (top of while,
+    # between tools, before/after LLM calls) all respond to Ctrl+C.
+    if cancel_event is not None:
+        orchestrator.set_cancel_event(cancel_event)
+
     # Wrap orchestrator._get_llm_response to check hard token limit and
     # wrap client.chat_completion once (outside the loop) to inject live
     # token feedback as a system message — avoids per-call monkey-patching

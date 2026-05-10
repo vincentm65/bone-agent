@@ -51,6 +51,16 @@ def _require_swarm_admin(chat_manager: Any) -> tuple[bool, str]:
                 "Displayed in the toolbar instead of the task ID. "
                 "Examples: 'fixing login redirect', 'adding pagination to API', 'refactoring auth module'.",
             },
+            "task_type": {
+                "type": "string",
+                "enum": ["implementation", "research"],
+                "description": (
+                    "Type of task being dispatched. "
+                    "'research' tasks are read-only — workers explore the codebase and report findings "
+                    "with file paths, line numbers, and architecture summaries. "
+                    "'implementation' tasks (default) may edit files within the declared write scope."
+                ),
+            },
         },
         "required": ["prompt"],
     },
@@ -63,6 +73,7 @@ def dispatch_swarm_task(
     write_scope: Optional[List[str]] = None,
     plan_index: Optional[int] = None,
     activity_label: Optional[str] = None,
+    task_type: Optional[str] = None,
     chat_manager: Any = None,
     repo_root: Path = None,
 ) -> str:
@@ -73,6 +84,7 @@ def dispatch_swarm_task(
         write_scope: Expected file paths the worker will edit.
         plan_index: Zero-based index into the task list plan. Used for status bar tracking.
         activity_label: Short 3-6 word label for the worker activity, shown in toolbar.
+        task_type: "research" for read-only exploration, "implementation" for edits (default).
         chat_manager: The current chat manager instance (injected by orchestrator).
         repo_root: Repository root path (injected by orchestrator).
 
@@ -89,9 +101,20 @@ def dispatch_swarm_task(
     if not prompt or not prompt.strip():
         return "exit_code=1\nprompt must not be empty."
 
+    # Normalize task_type — default to "implementation" if not specified
+    effective_task_type = task_type or "implementation"
+    if effective_task_type not in ("research", "implementation"):
+        return "exit_code=1\ntask_type must be 'research' or 'implementation'."
+
     server = chat_manager.swarm_server
     try:
-        result = server.submit_task(prompt, write_scope=write_scope or [], plan_index=plan_index, activity_label=activity_label)
+        result = server.submit_task(
+            prompt,
+            write_scope=write_scope or [],
+            plan_index=plan_index,
+            activity_label=activity_label,
+            task_type=effective_task_type,
+        )
     except Exception as e:
         return f"exit_code=1\nFailed to dispatch task: {e}"
 
@@ -107,6 +130,7 @@ def dispatch_swarm_task(
         f"Task: {result['task_id']}",
         f"Status: {result['status']}",
         f"Agent: {agent}",
+        f"Type: {effective_task_type}",
         "Write scope:",
         "",
         "Connection info for new workers:",

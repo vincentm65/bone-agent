@@ -50,10 +50,19 @@ def _build_auto_turn_item(extra: dict) -> str:
         status = extra.get("status", "completed")
         summary = str(extra.get("summary", "")).strip()
         files = extra.get("files", "")
+        task_type = extra.get("task_type", "implementation")
+        is_research = task_type == "research"
+
         if kind == "action_required_completion" or status == "failed":
-            parts = ["[AUTO-TURN] Task FAILED — action required."]
+            if is_research:
+                parts = ["[AUTO-TURN] Research task FAILED — action required."]
+            else:
+                parts = ["[AUTO-TURN] Task FAILED — action required."]
         else:
-            parts = ["[AUTO-TURN] Task completed."]
+            if is_research:
+                parts = ["[AUTO-TURN] Research completed."]
+            else:
+                parts = ["[AUTO-TURN] Task completed."]
         parts.append(f"Task {task_id}  ·  Worker {worker_label}")
         if status and status != "completed":
             parts.append(f"Status: {status}")
@@ -61,12 +70,21 @@ def _build_auto_turn_item(extra: dict) -> str:
             parts.append(f"Summary: {summary}")
         if files:
             parts.append(f"Files: {files}")
-        parts.extend([
-            "",
-            "1. Call complete_task() if the result is acceptable.",
-            "2. Dispatch a revision task if changes are needed.",
-            "3. Dispatch the next incomplete task from the task list.",
-        ])
+
+        if is_research:
+            parts.extend([
+                "",
+                "1. Review the research findings above.",
+                "2. Dispatch more research if coverage gaps remain.",
+                "3. When all research is complete, create the implementation task list and dispatch implementation tasks.",
+            ])
+        else:
+            parts.extend([
+                "",
+                "1. Call complete_task() if the result is acceptable.",
+                "2. Dispatch a revision task if changes are needed.",
+                "3. Dispatch the next incomplete task from the task list.",
+            ])
         return "\n".join(parts)
 
     # ── Fallback ──────────────────────────────────────────────────────
@@ -89,6 +107,7 @@ def _inbox_to_auto_turn_extra(item: dict) -> dict | None:
     # ── Completion → auto_continue_completion ─────────────────────────
     if kind == "completion":
         status = item.get("status", "")
+        task_type = item.get("task_type", "implementation")
         result_kind = "auto_continue_completion"
         if status == "failed":
             result_kind = "action_required_completion"
@@ -100,6 +119,7 @@ def _inbox_to_auto_turn_extra(item: dict) -> dict | None:
             "status": status,
             "summary": item.get("summary", ""),
             "files": "",
+            "task_type": task_type,
         }
 
     # ── Approval → approval_pending ───────────────────────────────────
