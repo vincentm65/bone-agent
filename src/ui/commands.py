@@ -13,7 +13,7 @@ from ui.sub_agent_panel import SubAgentPanel
 from ui.banner import display_startup_banner
 from ui.setting_selector import SettingSelector, SettingCategory, SettingOption
 
-from utils.settings import MonokaiDarkBGStyle, context_settings, get_local_model_server_settings, left_align_headings, tool_settings, swarm_settings
+from utils.settings import MonokaiDarkBGStyle, context_settings, left_align_headings, tool_settings, swarm_settings
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -778,51 +778,6 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
     return _setting_selector_handoff(chat_manager, selector, _config_continuation)
 
 
-def _local_server_setting_options(model_path: str):
-    """Build editable local llama-server settings for one model."""
-    effective = get_local_model_server_settings(model_path)
-    overrides = config_manager.get_local_model_settings(model_path) if model_path else {}
-
-    def value(key):
-        return overrides.get(key, getattr(effective, key))
-
-    return [
-        SettingOption(key="ngl_layers", text="GPU layers", value=value("ngl_layers"), input_type="number"),
-        SettingOption(key="ctx_size", text="Context size", value=value("ctx_size"), input_type="number"),
-        SettingOption(key="n_predict", text="Max prediction tokens", value=value("n_predict"), input_type="number"),
-        SettingOption(key="threads", text="Threads", value=value("threads"), input_type="number"),
-        SettingOption(key="batch_size", text="Batch size", value=value("batch_size"), input_type="number"),
-        SettingOption(key="ubatch_size", text="Micro-batch size", value=value("ubatch_size"), input_type="number"),
-        SettingOption(key="rope_scale", text="RoPE scale", value=value("rope_scale"), input_type="float", step=0.1),
-        SettingOption(key="flash_attn", text="Flash attention", value=value("flash_attn"), input_type="boolean"),
-        SettingOption(key="no_mmap", text="Disable mmap", value=value("no_mmap"), input_type="boolean"),
-        SettingOption(key="mlock", text="Memory lock", value=value("mlock"), input_type="boolean"),
-        SettingOption(key="cache_type_k", text="K cache type", value=value("cache_type_k"), input_type="text"),
-        SettingOption(key="cache_type_v", text="V cache type", value=value("cache_type_v"), input_type="text"),
-        SettingOption(key="fit", text="Fit model", value=value("fit"), input_type="boolean"),
-        SettingOption(key="fit_ctx", text="Fit context", value=value("fit_ctx"), input_type="number"),
-        SettingOption(key="fit_target", text="Fit target", value=value("fit_target"), input_type="number"),
-        SettingOption(key="n_parallel", text="Parallel slots", value=value("n_parallel"), input_type="number"),
-        SettingOption(key="reasoning_budget", text="Reasoning budget", value="" if value("reasoning_budget") is None else value("reasoning_budget"), input_type="text"),
-        SettingOption(key="health_check_timeout_sec", text="Health timeout seconds", value=value("health_check_timeout_sec"), input_type="number"),
-        SettingOption(key="health_check_interval_sec", text="Health interval seconds", value=value("health_check_interval_sec"), input_type="float", step=0.1),
-    ]
-
-
-def _coerce_local_server_setting(key: str, value):
-    int_keys = {"ngl_layers", "ctx_size", "n_predict", "threads", "batch_size", "ubatch_size", "fit_ctx", "fit_target", "n_parallel", "health_check_timeout_sec"}
-    float_keys = {"rope_scale", "health_check_interval_sec"}
-    if key == "reasoning_budget":
-        if value is None or value == "":
-            return None
-        return int(value)
-    if key in int_keys:
-        return int(value)
-    if key in float_keys:
-        return float(value)
-    return value
-
-
 def _handle_clear(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
     """Handle clear/reset command."""
     # Display conversation cost for the previous chat
@@ -913,12 +868,6 @@ def _build_provider_editor_selector(console, provider):
 
     provider_label = config.get_provider_display_name(provider)
     categories = [SettingCategory(title=f"{provider_label} Settings", settings=settings)]
-    if provider == "local" and current_model:
-        config_manager.init_local_model_settings(current_model)
-        categories.append(SettingCategory(
-            title=f"Local Server Settings ({current_model})",
-            settings=_local_server_setting_options(current_model),
-        ))
 
     return SettingSelector(
         categories=categories,
@@ -973,23 +922,6 @@ def _apply_provider_changes(chat_manager, console, provider, changes):
                 change_lines.append(f"  Cost: ${cost_in:.2f}/${cost_out:.2f} per 1M tokens")
             except Exception as e:
                 console.print(f"[red]Failed to set pricing: {e}[/red]")
-
-    if provider == "local":
-        local_setting_keys = {
-            "ngl_layers", "ctx_size", "n_predict", "threads", "batch_size", "ubatch_size",
-            "rope_scale", "flash_attn", "no_mmap", "mlock", "cache_type_k", "cache_type_v",
-            "fit", "fit_ctx", "fit_target", "n_parallel", "reasoning_budget",
-            "health_check_timeout_sec", "health_check_interval_sec",
-        }
-        local_changes = {key: _coerce_local_server_setting(key, value) for key, value in changes.items() if key in local_setting_keys}
-        target_model = changes.get("model") or current_model
-        if target_model and target_model != current_model:
-            config_manager.init_local_model_settings(target_model)
-        if target_model and local_changes:
-            existing_settings = config_manager.get_local_model_settings(target_model)
-            existing_settings.update(local_changes)
-            config_manager.save_local_model_settings(target_model, existing_settings)
-            change_lines.append(f"  Local server settings: {len(local_changes)} updated")
 
     config_manager.set_provider(provider)
     chat_manager.reload_config()
@@ -1152,8 +1084,6 @@ def _handle_model(chat_manager, console, debug_mode_container, args, cron_schedu
             model = result["model"]
             try:
                 backup_path = config_manager.set_model(current_provider, model)
-                if current_provider == "local":
-                    config_manager.init_local_model_settings(model)
                 console.print(f"[green]Model set to '{model}' for {current_provider} provider[/green]")
                 if backup_path:
                     console.print(f"[dim]Saved to config.json (backup: {backup_path.name})[/dim]")
@@ -1177,8 +1107,6 @@ def _handle_model(chat_manager, console, debug_mode_container, args, cron_schedu
     # Set model for current provider
     try:
         backup_path = config_manager.set_model(current_provider, model)
-        if current_provider == "local":
-            config_manager.init_local_model_settings(model)
         console.print(f"[green]Model set to '{model}' for {current_provider} provider[/green]")
         if backup_path:
             console.print(f"[dim]Saved to config.json (backup: {backup_path.name})[/dim]")

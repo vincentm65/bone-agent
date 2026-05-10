@@ -53,26 +53,13 @@ BONE_PROXY_API_KEY: ""
 BONE_PROXY_MODEL: "openai/gpt-4o-mini"
 BONE_PROXY_API_BASE: "https://api.vmcode.dev"
 
-# -- Local Models (llama.cpp) -------------------------------------------------
+# -- Local Models (OpenAI-compatible endpoint) --------------------------------
+# Point to any local inference server: llama.cpp, vLLM, Ollama, etc.
 
-LOCAL_MODEL_PATH: "/path/to/your/model.gguf"
-LOCAL_SERVER_PATH: "/path/to/llama.cpp/build/bin/llama-server"
-
-SERVER_SETTINGS:
-  ngl_layers: 30
-  ctx_size: 8192
-  n_predict: 8192
-  rope_scale: 1.0
-  health_check_timeout_sec: 120
-  health_check_interval_sec: 1.0
-
-# Optional per-model overrides. Keys are model paths/filenames; omitted values
-# fall back to SERVER_SETTINGS above. New models start with an empty object.
-LOCAL_MODEL_SETTINGS:
-  "/path/to/your/model.gguf":
-    ctx_size: 32768
-    ngl_layers: 99
-    threads: 8
+LLM_API_KEY: ""
+LLM_MODEL: ""
+LLM_API_BASE: "http://127.0.0.1:8080"
+LLM_ENDPOINT: "/v1/chat/completions"
 
 # -- Tool Settings ------------------------------------------------------------
 

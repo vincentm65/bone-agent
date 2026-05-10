@@ -1,5 +1,4 @@
 import os
-import platform
 from pathlib import Path
 import yaml
 
@@ -35,22 +34,6 @@ ENV_API_KEYS = [
     'CODEX_PLAN_API_KEY',
     'DEEPSEEK_API_KEY',
 ]
-
-# Detect platform for llama.cpp paths
-_IS_WINDOWS = platform.system() == "Windows"
-_IS_LINUX = platform.system() == "Linux"
-
-# Set llama.cpp paths based on platform
-if _IS_WINDOWS:
-    _LLAMA_SERVER_NAME = "llama-server.exe"
-    _LLAMA_BUILD_DIR = "build"
-elif _IS_LINUX:
-    _LLAMA_SERVER_NAME = "llama-server"
-    _LLAMA_BUILD_DIR = "build-linux"
-else:
-    # Fallback for macOS or other platforms
-    _LLAMA_SERVER_NAME = "llama-server"
-    _LLAMA_BUILD_DIR = "build"
 
 def _load_config():
     """Load config from YAML file, with environment variable overrides for API keys.
@@ -135,24 +118,17 @@ def _get_provider_registry():
 
     _provider_registry_cache = {
         "local": {
-            "type": "local",
-            "api_key": None,
-            "model": _CONFIG.get("LOCAL_MODEL_PATH", ""),
-            "api_model": "model",
-            "api_base": "http://127.0.0.1:8080",
-            "endpoint": "/v1/chat/completions",
+            "type": "api",
+            "api_key": _CONFIG.get("LLM_API_KEY", ""),
+            "model": _CONFIG.get("LLM_MODEL", ""),
+            "api_base": _CONFIG.get("LLM_API_BASE", "http://127.0.0.1:8080"),
+            "endpoint": _CONFIG.get("LLM_ENDPOINT", "/v1/chat/completions"),
             "error_prefix": "local server",
             "config_keys": {
-                "LOCAL_MODEL_PATH": "",
-                "LOCAL_SERVER_PATH": str(
-                    Path(__file__).resolve().parents[2] /
-                    f"llama.cpp/{_LLAMA_BUILD_DIR}/bin/{_LLAMA_SERVER_NAME}"
-                ),
-                "LOCAL_MODEL_SETTINGS": {},
-            },
-            "extra": {
-                "host": "127.0.0.1",
-                "port": 8080,
+                "LLM_API_KEY": "",
+                "LLM_API_BASE": "http://127.0.0.1:8080",
+                "LLM_ENDPOINT": "/v1/chat/completions",
+                "LLM_MODEL": "",
             },
             "default_temperature": 0.1,
             "default_top_p": 0.9,

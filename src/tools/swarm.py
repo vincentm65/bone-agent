@@ -5,6 +5,8 @@ from typing import Any, List, Optional
 
 from .helpers.base import tool
 
+ADMIN_SWARM_TOOL_NAMES = frozenset({"dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "spawn_swarm_worker"})
+
 def _require_swarm_admin(chat_manager: Any) -> tuple[bool, str]:
     if not chat_manager:
         return False, "Cannot access swarm: no chat manager available."
@@ -124,7 +126,6 @@ def dispatch_swarm_task(
         chat_manager._swarm_task_plan_map[result["task_id"]] = plan_index
 
     agent = result.get("worker_id") or "queued"
-    conn_info = server.connection_info
     parts = [
         "exit_code=0",
         f"Task: {result['task_id']}",
@@ -132,10 +133,6 @@ def dispatch_swarm_task(
         f"Agent: {agent}",
         f"Type: {effective_task_type}",
         "Write scope:",
-        "",
-        "Connection info for new workers:",
-        f"  URL: {conn_info['url']}",
-        f"  Auth token: {conn_info['auth_token']}",
     ]
 
     if activity_label:

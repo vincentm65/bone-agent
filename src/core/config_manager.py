@@ -136,29 +136,6 @@ class ConfigManager:
 
         return self._extract_model_pricing(model, config=config_data)
 
-    def get_local_model_settings(self, model_path: str) -> Dict[str, Any]:
-        """Read per-model local llama-server overrides."""
-        config_data = self.load()
-        return dict((config_data.get('LOCAL_MODEL_SETTINGS', {}) or {}).get(model_path, {}) or {})
-
-    def save_local_model_settings(self, model_path: str, settings: Dict[str, Any]) -> Optional[Path]:
-        """Save per-model local llama-server overrides."""
-        config_data = self.load(force_reload=True)
-        if 'LOCAL_MODEL_SETTINGS' not in config_data or config_data['LOCAL_MODEL_SETTINGS'] is None:
-            config_data['LOCAL_MODEL_SETTINGS'] = {}
-        config_data['LOCAL_MODEL_SETTINGS'][model_path] = dict(settings or {})
-        return self.save(config_data, create_backup=False)
-
-    def init_local_model_settings(self, model_path: str) -> Dict[str, Any]:
-        """Create an empty per-model settings entry if missing."""
-        config_data = self.load(force_reload=True)
-        if 'LOCAL_MODEL_SETTINGS' not in config_data or config_data['LOCAL_MODEL_SETTINGS'] is None:
-            config_data['LOCAL_MODEL_SETTINGS'] = {}
-        if model_path not in config_data['LOCAL_MODEL_SETTINGS']:
-            config_data['LOCAL_MODEL_SETTINGS'][model_path] = {}
-            self.save(config_data, create_backup=False)
-        return dict(config_data['LOCAL_MODEL_SETTINGS'][model_path] or {})
-
     def set_model(self, provider_name: str, model: str) -> Optional[Path]:
         """Set model for a specific provider.
 
@@ -171,7 +148,7 @@ class ConfigManager:
         """
         # Map provider names to their config keys
         provider_keys = {
-            'local': 'LOCAL_MODEL_PATH',
+            'local': 'LLM_MODEL',
             'bone': 'BONE_PROXY_MODEL',
             'codex': 'CODEX_PLAN_MODEL',
             'openrouter': 'OPENROUTER_MODEL',

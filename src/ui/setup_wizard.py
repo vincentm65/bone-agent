@@ -26,7 +26,7 @@ WIZARD_PROVIDERS = [
     ("glm", "GLM (Zhipu AI)", "api"),
     ("kimi", "Kimi (Moonshot AI)", "api"),
     ("minimax", "MiniMax", "api"),
-    ("local", "Local model (llama.cpp)", "local"),
+    ("local", "Local model (self-hosted)", "local"),
 ]
 
 # API providers that need a key (skip bone free tier and local)

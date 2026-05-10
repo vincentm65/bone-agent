@@ -1,5 +1,7 @@
 """Web search using DuckDuckGo (no API key required)."""
 
+import queue
+import threading
 import time
 import requests
 from readability import Document
@@ -14,6 +16,10 @@ _DEFAULT_FETCH_COUNT = 3
 _MAX_CONTENT_LENGTH = 8000
 # HTTP timeout for page fetching (seconds)
 _FETCH_TIMEOUT = 10
+# Timeout for the initial DuckDuckGo result lookup (seconds).  Page fetching
+# already has a requests timeout; the DDGS lookup needs its own guard because
+# it can otherwise block the agent turn indefinitely on a stalled network call.
+_SEARCH_TIMEOUT = 20
 # Delay between page fetches to avoid rate limiting (seconds)
 _FETCH_DELAY = 1.0
 # User agent for page fetching
@@ -118,6 +124,33 @@ def _fetch_page_content(url):
         return "", "parse error"
 
 
+def _run_ddg_text_search(query, num_results):
+    """Run DDGS.text with a hard caller-visible timeout."""
+    result_queue = queue.Queue(maxsize=1)
+
+    def _worker():
+        try:
+            with DDGS() as ddgs:
+                result_queue.put(("ok", list(ddgs.text(query, max_results=num_results))))
+        except Exception as exc:
+            result_queue.put(("error", exc))
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+    try:
+        status, payload = result_queue.get(timeout=_SEARCH_TIMEOUT)
+    except queue.Empty as exc:
+        raise LLMConnectionError(
+            "DuckDuckGo search timed out",
+            details={"query": query, "timeout_seconds": _SEARCH_TIMEOUT},
+        ) from exc
+
+    if status == "error":
+        raise payload
+    return payload
+
+
 def run_web_search(arguments, console, panel_updater=None):
     """Execute web search using DuckDuckGo and return formatted results.
 
@@ -153,8 +186,7 @@ def run_web_search(arguments, console, panel_updater=None):
         num_results = 5
 
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=num_results))
+        results = _run_ddg_text_search(query, num_results)
 
         if not results:
             return "results_found=0\nNo results found.\n\n"

@@ -3,16 +3,13 @@
 import os
 import json
 import logging
-import subprocess
-import time
-import uuid
-import requests
 import threading
+import uuid
 
 logger = logging.getLogger(__name__)
 
 import queue
-from typing import Optional, IO, Any
+from typing import Optional, Any
 
 from llm.client import LLMClient
 from llm.config import get_providers, get_provider_config, get_provider_display_name, reload_config
@@ -21,7 +18,7 @@ from core.skills import render_active_skills_section
 from core.swarm_auto_turn import drain_inbox_to_prompts as _drain_inbox_to_prompts
 from pathlib import Path
 from llm.token_tracker import TokenTracker
-from utils.settings import context_settings, get_local_model_server_settings
+from utils.settings import context_settings
 from utils.logger import MarkdownConversationLogger
 from utils.user_message_logger import UserMessageLogger
 from utils.result_parsers import extract_exit_code, extract_metadata_from_result
@@ -48,8 +45,7 @@ class ChatManager:
         self.conversation_id = str(uuid.uuid4())
         self.client.conversation_id = self.conversation_id
         self.messages = SanitizedMessageList()
-        self.server_process: Optional[subprocess.Popen] = None
-        self._log_file: Optional[IO] = None  # Track llama_server log file handle
+
         self.approve_mode = "safe"
         self.token_tracker = TokenTracker()
         self.context_token_estimate = 0
@@ -1475,11 +1471,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             return f"Invalid provider. Use /provider to list. Available: {available}"
 
         previous_provider = self.client.provider
-        had_local_server = previous_provider == "local" and self.server_process is not None
-
-        # Terminate server if switching away from local
-        if previous_provider == "local" and provider_name != "local":
-            self.cleanup()
 
         if self.client.switch_provider(provider_name):
             self.token_tracker.reset_all()
@@ -1488,27 +1479,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             self.context_token_estimate = self.token_tracker.current_context_tokens
             if self.markdown_logger:
                 self.markdown_logger.start_session()
-            if provider_name == "local":
-                server = self.start_server_if_needed()
-                if server:
-                    self.server_process = server
-                elif not self.server_process:
-                    # Failed to start server - revert
-                    self.client.switch_provider(previous_provider)
-                    if had_local_server:
-                        restored_server = self.start_server_if_needed()
-                        if restored_server:
-                            self.server_process = restored_server
-                        elif not self.server_process:
-                            return "Failed to start local server. Failed to restore previous local provider."
-                    self.token_tracker.reset_all()
-                    self.token_tracker.reset_conversation()
-                    self._update_context_tokens()
-                    self.context_token_estimate = self.token_tracker.current_context_tokens
-                    previous_label = get_provider_display_name(previous_provider)
-                    return f"Failed to start local server. Reverted to {previous_label} provider."
-                provider_label = get_provider_display_name(provider_name)
-                return f"Switched to {provider_label} provider (server ready)."
             provider_label = get_provider_display_name(provider_name)
             return f"Switched to {provider_label} provider."
         return "Provider switch failed."
@@ -1533,104 +1503,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             str: Result message.
         """
         return self.switch_provider(provider_name)
-
-    def start_server_if_needed(self):
-        """Start local server if using local provider and not already running.
-
-        Returns:
-            subprocess.Popen: Server process or None
-        """
-        if self.client.provider == "local" and not self.server_process:
-            return self._start_local_server()
-        return None
-
-    def _start_local_server(self):
-        """Start llama-server process and wait for health check.
-
-        Returns:
-            subprocess.Popen: Server process or None if failed
-        """
-        from llm.config import get_provider_config, _CONFIG
-
-        local_config = get_provider_config("local")
-        server_path = _CONFIG.get("LOCAL_SERVER_PATH", local_config["config_keys"]["LOCAL_SERVER_PATH"])
-        model_path = local_config.get("model", "")
-        host = local_config["extra"]["host"]
-        port = local_config["extra"]["port"]
-        model_server_settings = get_local_model_server_settings(model_path)
-
-        args = [
-            server_path,
-            "-m", model_path,
-            "-ngl", str(model_server_settings.ngl_layers),
-            "--threads", str(model_server_settings.threads),
-            "--batch-size", str(model_server_settings.batch_size),
-            "--ubatch-size", str(model_server_settings.ubatch_size),
-            "--flash-attn", "on" if model_server_settings.flash_attn else "off",
-            "--split-mode", "none",
-            "--ctx-size", str(model_server_settings.ctx_size),
-            "--n-predict", str(model_server_settings.n_predict),
-            "--rope-scale", str(model_server_settings.rope_scale),
-            "--host", host,
-            "--port", str(port),
-            "--jinja",
-        ]
-
-        if model_server_settings.reasoning_budget is not None:
-            args.extend(["--reasoning-budget", str(model_server_settings.reasoning_budget)])
-
-        if model_server_settings.no_mmap:
-            args.append("--no-mmap")
-        if model_server_settings.mlock:
-            args.append("--mlock")
-        if model_server_settings.cache_type_k:
-            args.extend(["-ctk", model_server_settings.cache_type_k])
-        if model_server_settings.cache_type_v:
-            args.extend(["-ctv", model_server_settings.cache_type_v])
-        if model_server_settings.fit:
-            args.extend(["--fit", "on"])
-        if model_server_settings.fit_ctx > 0:
-            args.extend(["--fit-ctx", str(model_server_settings.fit_ctx)])
-        if model_server_settings.fit_target > 0:
-            args.extend(["--fit-target", str(model_server_settings.fit_target)])
-        if model_server_settings.n_parallel > 0:
-            args.extend(["--parallel", str(model_server_settings.n_parallel)])
-
-        # Restrict to RTX 5070 Ti only (GPU 0)
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = "0"
-
-        # Log stderr to file for debugging
-        log_path = Path(__file__).resolve().parents[2] / "llama_server.log"
-        self._log_file = open(log_path, "w")
-
-        process = subprocess.Popen(
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=self._log_file,
-            env=env,
-        )
-
-        health_url = f"http://{host}:{port}/health"
-        for i in range(model_server_settings.health_check_timeout_sec):
-            try:
-                r = requests.get(health_url, timeout=2)
-                if r.status_code == 200:
-                    data = r.json()
-                    if data.get("status") == "ok":
-                        return process
-            except Exception:
-                pass
-            time.sleep(model_server_settings.health_check_interval_sec)
-
-        # Server failed health check - clean up resources
-        if process:
-            process.terminate()
-            process.wait()
-        if self._log_file:
-            self._log_file.close()
-            self._log_file = None
-        return None
 
     def cycle_approve_mode(self, mode: str | None = None) -> str:
         """Cycle to next approval mode, or set to a specific mode.
@@ -1909,19 +1781,3 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         if enabled == current_state:
             return current_state
         return self.toggle_logging()
-
-    def cleanup(self):
-        """Terminate server process if running."""
-        # End conversation session on cleanup
-        if self.markdown_logger:
-            self.markdown_logger.end_session()
-
-        if self.server_process:
-            self.server_process.terminate()
-            self.server_process.wait()
-            self.server_process = None
-
-        # Close log file handle if open
-        if self._log_file:
-            self._log_file.close()
-            self._log_file = None

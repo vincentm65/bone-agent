@@ -463,10 +463,6 @@ def main():
     atexit.register(_stop_swarm_server)
     # Start server if needed
     console.print("[yellow]Initializing...[/yellow]")
-    chat_manager.server_process = chat_manager.start_server_if_needed()
-    if not chat_manager.server_process and chat_manager.client.provider == "local":
-        console.print("[red]Failed to start local server![/red]")
-        return
 
     display_startup_banner(chat_manager.approve_mode, clear_screen=True)
 
@@ -911,7 +907,6 @@ def main():
                         chat_manager.swarm_server.stop()
                         chat_manager.swarm_admin_mode = False
                         chat_manager.swarm_server = None
-                    chat_manager.cleanup()
                     handoff_to_worker = True
 
                     import json as _json
@@ -1169,7 +1164,9 @@ def main():
             # Stop background inbox poller
             chat_manager.stop_swarm_inbox_poller()
 
-            chat_manager.cleanup()
+        chat_manager.end_conversation()
+
+        if not handoff_to_worker:
             console.print("[yellow]Goodbye![/yellow]")
 
 

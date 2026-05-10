@@ -589,16 +589,16 @@ class SwarmServer:
 
     async def _dispatch_queued_tasks_async(self) -> None:
         """Dispatch queued tasks to idle workers from the server event loop."""
-        while self._task_queue and self.idle_workers:
-            # Capture task + worker under lock, then release for the send.
+        while True:
+            # Exit conditions live inside the lock so queue state and worker
+            # availability are checked against the same synchronized snapshot.
             with self._lock:
                 if not self._task_queue:
                     break
-                task = self._task_queue.pop(0)
                 worker_id = self._next_idle_worker_id()
                 if not worker_id:
-                    self._task_queue.insert(0, task)
                     break
+                task = self._task_queue.pop(0)
 
                 self._tasks[task["task_id"]] = {
                     "prompt": task["prompt"],
@@ -717,16 +717,17 @@ class SwarmServer:
                 "queue_position": len(self._task_queue),
             }
 
-    def approve(self, task_id: str, call_id: str, guidance: str = "") -> bool:
-        """Approve a pending command approval.
+    def _resolve_approval(self, task_id: str, call_id: str, approved: bool, guidance: str = "") -> bool:
+        """Resolve a pending command approval.
 
         Args:
             task_id: The task ID.
             call_id: The command call ID.
-            guidance: Optional guidance for the worker.
+            approved: Whether the approval is granted or denied.
+            guidance: Guidance or reason for the resolution.
 
         Returns:
-            True when a pending approval was found and approved.
+            True when a pending approval was found and resolved.
         """
         with self._lock:
             key = (task_id, call_id)
@@ -742,11 +743,12 @@ class SwarmServer:
             ws = pending.get("websocket")
 
         # Send response to the worker outside the lock (blocks on event loop).
+        action = "approval" if approved else "denial"
         response = {
             "type": "approval_response",
             "task_id": task_id,
             "call_id": call_id,
-            "approved": True,
+            "approved": approved,
             "guidance": guidance,
         }
         if ws:
@@ -756,19 +758,34 @@ class SwarmServer:
                     self._loop,
                 ).result(timeout=10)
             except Exception as e:
-                logger.warning("Failed to send approval response to worker %s: %s", worker_id, e)
+                logger.warning("Failed to send %s response to worker %s: %s", action, worker_id, e)
 
         # Worker resumes the same running task after receiving the response.
         # Status revert and event storage always execute, even if the send failed.
+        status = "approved" if approved else "denied"
+        verb = "Approved" if approved else "Denied"
         with self._lock:
             if worker_id in self._workers:
                 self._workers[worker_id]["status"] = "running"
 
             self._store_event(
-                f"Approved {task_id}/{call_id} (worker {worker_id})",
-                extra={"kind": "approval_resolved", "task_id": task_id, "call_id": call_id, "worker_id": worker_id, "status": "approved"},
+                f"{verb} {task_id}/{call_id} (worker {worker_id})",
+                extra={"kind": "approval_resolved", "task_id": task_id, "call_id": call_id, "worker_id": worker_id, "status": status},
             )
         return True
+
+    def approve(self, task_id: str, call_id: str, guidance: str = "") -> bool:
+        """Approve a pending command approval.
+
+        Args:
+            task_id: The task ID.
+            call_id: The command call ID.
+            guidance: Optional guidance for the worker.
+
+        Returns:
+            True when a pending approval was found and approved.
+        """
+        return self._resolve_approval(task_id, call_id, approved=True, guidance=guidance)
 
     def deny(self, task_id: str, call_id: str, reason: str = "") -> bool:
         """Deny a pending command approval.
@@ -781,46 +798,7 @@ class SwarmServer:
         Returns:
             True when a pending approval was found and denied.
         """
-        with self._lock:
-            key = (task_id, call_id)
-            pending = self._pending_approvals.pop(key, None)
-            if pending is None:
-                self._store_event(
-                    f"No pending approval for {task_id}/{call_id}",
-                    extra={"kind": "warning", "task_id": task_id, "call_id": call_id},
-                )
-                return False
-
-            worker_id = pending["worker_id"]
-            ws = pending.get("websocket")
-
-        # Send response to the worker outside the lock (blocks on event loop).
-        response = {
-            "type": "approval_response",
-            "task_id": task_id,
-            "call_id": call_id,
-            "approved": False,
-            "guidance": reason,
-        }
-        if ws:
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    ws.send(json.dumps(response)),
-                    self._loop,
-                ).result(timeout=10)
-            except Exception as e:
-                logger.warning("Failed to send denial response to worker %s: %s", worker_id, e)
-
-        # Status revert and event storage always execute, even if the send failed.
-        with self._lock:
-            if worker_id in self._workers:
-                self._workers[worker_id]["status"] = "running"
-
-            self._store_event(
-                f"Denied {task_id}/{call_id} (worker {worker_id})",
-                extra={"kind": "approval_resolved", "task_id": task_id, "call_id": call_id, "worker_id": worker_id, "status": "denied"},
-            )
-        return True
+        return self._resolve_approval(task_id, call_id, approved=False, guidance=reason)
 
     def stop_worker(self, worker_id: str) -> None:
         """Send stop_worker to a specific worker.

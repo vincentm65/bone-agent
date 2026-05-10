@@ -731,11 +731,18 @@ class SwarmWorkerRunner:
         elif item.source == "local" and item.kind == "task":
             self._run_local_task(item.data)
 
-    def _run_admin_task(self, task_dispatch: dict) -> None:
-        """Execute an admin-assigned task and send completion back to server.
+    def _run_task_core(self, prompt: str, task_id: str, write_scope: list[str]) -> tuple[bool, str | None, bool]:
+        """Shared execution spine for both admin and local tasks.
 
-        Runs the orchestrator in a background thread while the main thread
-        drives a PTK prompt with live toolbar updates and progress spinner.
+        Handles busy flag, context reset, orchestrator setup, spinner,
+        agent thread lifecycle, session wait, KeyboardInterrupt,
+        ADMIN_STOP_SENTINEL, and cleanup.
+
+        Returns:
+            (completed_normally, error, interrupted):
+                completed_normally: False if ADMIN_STOP_SENTINEL was received
+                error: str or None
+                interrupted: True if user pressed Ctrl+C
         """
         from ui.prompt_utils import get_worker_toolbar_text
 
@@ -743,23 +750,13 @@ class SwarmWorkerRunner:
         session = self._prompt_session
 
         try:
-            self._current_activity = ""
-            self._clear_terminal_for_next_task()
-            self._print_task_header(task_dispatch)
-
-            # Setup task context
-            self._task_id = task_dispatch["task_id"]
-            self._write_scope = list(task_dispatch.get("write_scope") or [])
-            self._current_activity = task_dispatch.get("activity_label", "")
-            prompt = task_dispatch["prompt"]
+            self._task_id = task_id
+            self._write_scope = write_scope
 
             # Clear accumulated context from prior tasks before starting
             clear_worker_context(self.chat_manager)
 
-            # Bug 3 fix: reset cancellation state from any prior task.
-            # clear_agent_cancel() creates a fresh Event so the old (set)
-            # event is no longer referenced by chat_manager, but the cached
-            # orchestrator still holds its snapshot — refresh it.
+            # Reset cancellation state from any prior task
             self.chat_manager.clear_agent_cancel()
             if self.__orchestrator is not None:
                 self.__orchestrator.set_cancel_event(self.chat_manager.get_agent_cancel_event())
@@ -769,15 +766,6 @@ class SwarmWorkerRunner:
             self.orchestrator._current_task_id = self._task_id
             self.orchestrator._current_worker_id = self.worker_id
 
-            # Send task_started to server
-            self._client.send({
-                "type": "task_started",
-                "task_id": self._task_id,
-                "worker_id": self.worker_id,
-            })
-
-            self.console.print()
-
             # Run orchestrator in background thread with spinner
             completion_event = threading.Event()
             result_holder = {'interrupted': False, 'error': None}
@@ -790,9 +778,7 @@ class SwarmWorkerRunner:
             )
             agent_thread.start()
 
-            # Main thread runs PTK prompt with live toolbar. If the user sends
-            # a line while the agent is running, queue it as the next local
-            # prompt and keep waiting for the active task to finish.
+            # Main thread runs PTK prompt with live toolbar
             if session:
                 self._safe_console.set_app(session.app)
                 try:
@@ -808,54 +794,82 @@ class SwarmWorkerRunner:
             else:
                 raw_result = None
 
-            # Bug 2 fix: admin sent stop_worker during active task.
-            # The inputhook exits with result=ADMIN_STOP_SENTINEL when
-            # _admin_work_pending is set.  Cancel the agent thread and
-            # return without sending a completion summary.
+            # Admin sent stop_worker during active task
             if raw_result == ADMIN_STOP_SENTINEL:
                 self._cancel_and_join_agent(completion_event, agent_thread)
                 self._stop_progress_spinner()
-                return
+                return (False, None, False)
 
             self._stop_progress_spinner()
 
-            # Extract final response
             error = result_holder.get('error')
             user_intervened = result_holder.get('interrupted', False)
-
-            if error:
-                final_content = f"Error: {error}"
-                self.console.print(f"[red]Worker task failed: {error}[/red]", markup=False)
-            elif user_intervened:
-                final_content = "Task interrupted by user"
-                self.console.print("[yellow]Worker interrupted by user (Ctrl+C)[/yellow]")
-            else:
-                final_content = ""
-                for msg in reversed(self.chat_manager.messages):
-                    if msg.get("role") == "assistant" and msg.get("content"):
-                        final_content = msg["content"].strip()
-                        break
-                if not final_content:
-                    final_content = "Task completed with no output."
-
-            # Send completion summary
-            self._current_activity = ""
-            if not self._killed:
-                sent = self.send_completion_summary(
-                    message=final_content,
-                    status="failed" if error else "done",
-                    user_intervened=user_intervened,
-                )
-                if sent:
-                    self.console.print("[dim]Completion summary sent.[/dim]")
-                else:
-                    self.console.print("[red]Failed to send completion summary; swarm connection may be closed.[/red]")
-                    self._running = False
+            return (True, error, user_intervened)
         finally:
             self._safe_console.set_app(None)
             self._busy.clear()
             self._drain_stdin()
             self._enqueue_deferred_user_input()
+
+    def _run_admin_task(self, task_dispatch: dict) -> None:
+        """Execute an admin-assigned task and send completion back to server.
+
+        Runs the orchestrator in a background thread while the main thread
+        drives a PTK prompt with live toolbar updates and progress spinner.
+        """
+        self._current_activity = ""
+        self._clear_terminal_for_next_task()
+        self._print_task_header(task_dispatch)
+
+        prompt = task_dispatch["prompt"]
+        task_id = task_dispatch["task_id"]
+        write_scope = list(task_dispatch.get("write_scope") or [])
+        self._current_activity = task_dispatch.get("activity_label", "")
+
+        # Send task_started to server
+        self._client.send({
+            "type": "task_started",
+            "task_id": task_id,
+            "worker_id": self.worker_id,
+        })
+
+        self.console.print()
+
+        completed_normally, error, interrupted = self._run_task_core(prompt, task_id, write_scope)
+
+        if not completed_normally:
+            # ADMIN_STOP_SENTINEL — bail out before sending completion summary
+            return
+
+        # Extract final response
+        if error:
+            final_content = f"Error: {error}"
+            self.console.print(f"[red]Worker task failed: {error}[/red]", markup=False)
+        elif interrupted:
+            final_content = "Task interrupted by user"
+            self.console.print("[yellow]Worker interrupted by user (Ctrl+C)[/yellow]")
+        else:
+            final_content = ""
+            for msg in reversed(self.chat_manager.messages):
+                if msg.get("role") == "assistant" and msg.get("content"):
+                    final_content = msg["content"].strip()
+                    break
+            if not final_content:
+                final_content = "Task completed with no output."
+
+        # Send completion summary
+        self._current_activity = ""
+        if not self._killed:
+            sent = self.send_completion_summary(
+                message=final_content,
+                status="failed" if error else "done",
+                user_intervened=interrupted,
+            )
+            if sent:
+                self.console.print("[dim]Completion summary sent.[/dim]")
+            else:
+                self.console.print("[red]Failed to send completion summary; swarm connection may be closed.[/red]")
+                self._running = False
 
     def _run_local_task(self, prompt: str) -> None:
         """Execute a local task using the same executor as admin tasks.
@@ -865,93 +879,33 @@ class SwarmWorkerRunner:
         summary back to the server since local tasks don't have a
         server-side task_id.
         """
-        from ui.prompt_utils import get_worker_toolbar_text
+        task_id = f"local-{uuid.uuid4().hex[:8]}"
+        write_scope: list[str] = []
 
-        self._busy.set()
-        session = self._prompt_session
+        if hasattr(self.chat_manager, "approve_mode"):
+            display_startup_banner(self.chat_manager.approve_mode, clear_screen=True)
+        elif sys.stdout.isatty():
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
 
-        try:
-            self._task_id = f"local-{uuid.uuid4().hex[:8]}"
-            self._write_scope = []
+        self.console.print()
+        self.console.print(f"[bold #5F9EA0]Local task[/bold #5F9EA0]")
+        self.console.print("[dim]Delegated prompt:[/dim]")
+        self.console.print(prompt, markup=False)
+        self.console.print()
 
-            # Clear accumulated context from prior tasks before starting
-            clear_worker_context(self.chat_manager)
+        completed_normally, error, interrupted = self._run_task_core(prompt, task_id, write_scope)
 
-            # Bug 3 fix: reset cancellation state from any prior task.
-            self.chat_manager.clear_agent_cancel()
-            if self.__orchestrator is not None:
-                self.__orchestrator.set_cancel_event(self.chat_manager.get_agent_cancel_event())
+        if not completed_normally:
+            # ADMIN_STOP_SENTINEL — bail out before printing finished message
+            return
 
-            # Reset tool-call budget for the new task (was missing for local tasks)
-            self.orchestrator.tool_calls_count = 0
+        if error:
+            self.console.print(f"[red]Local task failed: {error}[/red]", markup=False)
+        elif interrupted:
+            self.console.print("[yellow]Worker interrupted by user (Ctrl+C)[/yellow]")
 
-            # Set task context for approval routing
-            self.orchestrator._current_task_id = self._task_id
-            self.orchestrator._current_worker_id = self.worker_id
-
-            if hasattr(self.chat_manager, "approve_mode"):
-                display_startup_banner(self.chat_manager.approve_mode, clear_screen=True)
-            elif sys.stdout.isatty():
-                sys.stdout.write("\033[2J\033[H")
-                sys.stdout.flush()
-
-            self.console.print()
-            self.console.print(f"[bold #5F9EA0]Local task[/bold #5F9EA0]")
-            self.console.print("[dim]Delegated prompt:[/dim]")
-            self.console.print(prompt, markup=False)
-            self.console.print()
-
-            # Run orchestrator in background thread with spinner
-            completion_event = threading.Event()
-            result_holder = {'interrupted': False, 'error': None}
-
-            self._start_progress_spinner()
-            agent_thread = threading.Thread(
-                target=self._run_agent_in_thread,
-                args=(prompt, completion_event, result_holder),
-                daemon=True,
-            )
-            agent_thread.start()
-
-            # Main thread runs PTK prompt with live toolbar. If the user sends
-            # a line while the agent is running, queue it as the next local
-            # prompt and keep waiting for the active task to finish.
-            if session:
-                self._safe_console.set_app(session.app)
-                try:
-                    raw_result = self._wait_for_agent_with_prompt(
-                        session,
-                        completion_event,
-                        lambda: get_worker_toolbar_text(self.chat_manager, self),
-                    )
-                except KeyboardInterrupt:
-                    result_holder['interrupted'] = True
-                    self._cancel_and_join_agent(completion_event, agent_thread)
-                    raw_result = None
-            else:
-                raw_result = None
-
-            # Bug 2 fix: admin sent stop_worker during active task.
-            if raw_result == ADMIN_STOP_SENTINEL:
-                self._cancel_and_join_agent(completion_event, agent_thread)
-                self._stop_progress_spinner()
-                return
-
-            self._stop_progress_spinner()
-
-            error = result_holder.get('error')
-            user_intervened = result_holder.get('interrupted', False)
-            if error:
-                self.console.print(f"[red]Local task failed: {error}[/red]", markup=False)
-            elif user_intervened:
-                self.console.print("[yellow]Worker interrupted by user (Ctrl+C)[/yellow]")
-
-            self.console.print("[dim]Local task finished.[/dim]")
-        finally:
-            self._safe_console.set_app(None)
-            self._busy.clear()
-            self._drain_stdin()
-            self._enqueue_deferred_user_input()
+        self.console.print("[dim]Local task finished.[/dim]")
 
     def _run_local_command(self, command: str) -> str | None:
         """Execute a local slash command. Returns the command status string."""

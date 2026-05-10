@@ -17,6 +17,7 @@ from tools import (
     create_file,
     TOOLS,
 )
+from tools.swarm import ADMIN_SWARM_TOOL_NAMES
 from utils.settings import tool_settings
 
 from llm.config import get_provider_config
@@ -294,11 +295,7 @@ class AgenticOrchestrator:
                     tool for tool in tools
                     if tool.get("function", {}).get("name") not in admin_blocked_tools
                 ]
-            blocked = {
-                "dispatch_swarm_task",
-                "handle_approval",
-                "kill_swarm_worker",
-            }
+            blocked = ADMIN_SWARM_TOOL_NAMES
             return [
                 tool for tool in tools
                 if tool.get("function", {}).get("name") not in blocked
@@ -623,7 +620,7 @@ class AgenticOrchestrator:
                 filtered_tool_ids.append(tool_call.get("id"))
                 continue
 
-            _admin_swarm_tools = {"dispatch_swarm_task", "handle_approval", "kill_swarm_worker"}
+            _admin_swarm_tools = ADMIN_SWARM_TOOL_NAMES
             if function_name in _admin_swarm_tools and not getattr(self.chat_manager, "swarm_admin_mode", False):
                 # Swarm tools are only available to the admin agent.
                 if self.debug_mode:

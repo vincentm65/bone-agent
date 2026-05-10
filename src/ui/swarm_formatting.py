@@ -323,6 +323,114 @@ def format_task_list_toolbar_line(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Private helpers for format_swarm_status
+# ---------------------------------------------------------------------------
+
+def _append_worker_status_lines(lines: list[str], workers: dict) -> None:
+    """Append per-worker detail lines to *lines*."""
+    if not workers:
+        return
+    lines.append("")
+    lines.append("Workers:")
+    for wid, winfo in sorted(workers.items(), key=lambda item: item[1].get("display_name", item[0])):
+        status = winfo.get("status", "unknown")
+        task_id = winfo.get("current_task_id") or "none"
+        model = winfo.get("model", "")
+        activity = winfo.get("current_activity", "")
+        label = format_worker_label(wid, winfo)
+        detail_parts = [status]
+        if model:
+            detail_parts.append(f"model={model}")
+        if activity:
+            detail_parts.append(f"activity={activity}")
+        detail_parts.append(f"task={task_id}")
+        lines.append(f"  {label}: {', '.join(detail_parts)}")
+
+
+def _append_task_status_lines(lines: list[str], tasks: dict, workers: dict) -> None:
+    """Append per-task detail lines to *lines*."""
+    if not tasks:
+        return
+    lines.append("")
+    lines.append("Tasks:")
+    for tid, tinfo in tasks.items():
+        status = tinfo.get("status", "unknown")
+        worker_id = tinfo.get("worker_id") or "unassigned"
+        worker_info = workers.get(worker_id)
+        prompt = tinfo.get("prompt", "")
+        prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
+        label = format_worker_label(worker_id, worker_info)
+        lines.append(f"  {tid}: {status}, agent={label}, prompt={prompt_preview}")
+
+
+def _append_pending_task_lines(lines: list[str], pending_tasks: list) -> None:
+    """Append queued (pending) task lines to *lines*."""
+    if not pending_tasks:
+        return
+    lines.append("")
+    lines.append("Pending tasks:")
+    for idx, task in enumerate(pending_tasks, start=1):
+        task_id = task.get("task_id", "unknown")
+        prompt = task.get("prompt", "")
+        prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
+        lines.append(f"  #{idx} {task_id}: prompt={prompt_preview}")
+
+
+def _append_approval_status_lines(
+    lines: list[str],
+    approval_requests: list,
+    workers: dict,
+    mode: str,
+) -> None:
+    """Append pending-approval lines to *lines*.
+
+    *mode* controls verbosity: ``"agent"``/``"detailed"`` produces a
+    structured block; human mode (default) gives a compact summary.
+    """
+    if not approval_requests:
+        return
+    lines.append("")
+    lines.append("Pending approvals:")
+    for approval in approval_requests:
+        task_id = approval.get("task_id", "unknown")
+        call_id = approval.get("call_id", "unknown")
+        worker_id = approval.get("worker_id", "unknown")
+        worker_info = workers.get(worker_id)
+        command = approval.get("command", "")
+        command_preview = command[:200] + "..." if len(command) > 200 else command
+        task_prompt = approval.get("task_prompt", "")
+        write_scope = approval.get("task_write_scope", [])
+        task_status = approval.get("task_status", "unknown")
+        worker_status = approval.get("worker_status", "unknown")
+
+        w_label = format_worker_label(worker_id, worker_info)
+
+        if mode in ("agent", "detailed"):
+            prompt_preview = (
+                task_prompt[:200] + "..."
+                if task_prompt and len(task_prompt) > 200
+                else (task_prompt or "<unknown>")
+            )
+            scope_str = ", ".join(write_scope) if write_scope else "<unknown>"
+
+            lines.append(f"  {task_id}/{call_id} from {w_label}:")
+            lines.append(f"    task_id={task_id}, call_id={call_id}, worker_id={w_label}")
+            lines.append(f"    command={command_preview}")
+            lines.append(f"    task_prompt={prompt_preview}")
+            lines.append(f"    write_scope={scope_str}")
+            lines.append(f"    task_status={task_status}, worker_status={worker_status}")
+        else:
+            command_short = command[:120] + "..." if len(command) > 120 else command
+            lines.append(f"  {task_id}/{call_id} from {w_label}: {command_short}")
+            lines.append(f"    Awaiting admin approval — the admin agent will handle this.")
+            lines.append(f"    To override manually: ask admin to approve or deny {task_id}/{call_id}.")
+
+
+# ---------------------------------------------------------------------------
+# Status snapshot formatter
+# ---------------------------------------------------------------------------
+
 def format_swarm_status(snapshot: dict, mode: str = "human") -> str:
     """Format a swarm server status snapshot as a human-readable string.
 
@@ -335,93 +443,20 @@ def format_swarm_status(snapshot: dict, mode: str = "human") -> str:
     """
     lines: list[str] = []
     header = snapshot.get("swarm_name", "unknown")
-
     worker_count = snapshot.get("worker_count", 0)
     idle = snapshot.get("idle_workers", 0)
     running = snapshot.get("running_tasks", 0)
     pending_tasks = snapshot.get("pending_tasks", [])
     approval_requests = snapshot.get("approval_requests", [])
+    workers = snapshot.get("workers", {})
+    tasks = snapshot.get("tasks", {})
 
     lines.append(f"Swarm: {header}  |  Workers: {worker_count} ({idle} idle, {running} running)")
     lines.append(f"Queue: {len(pending_tasks)} pending  |  Approvals: {len(approval_requests)} pending")
 
-    # Workers
-    workers = snapshot.get("workers", {})
-    if workers:
-        lines.append("")
-        lines.append("Workers:")
-        for wid, winfo in sorted(workers.items(), key=lambda item: item[1].get("display_name", item[0])):
-            status = winfo.get("status", "unknown")
-            task_id = winfo.get("current_task_id") or "none"
-            model = winfo.get("model", "")
-            activity = winfo.get("current_activity", "")
-            label = format_worker_label(wid, winfo)
-            detail_parts = [status]
-            if model:
-                detail_parts.append(f"model={model}")
-            if activity:
-                detail_parts.append(f"activity={activity}")
-            detail_parts.append(f"task={task_id}")
-            lines.append(f"  {label}: {', '.join(detail_parts)}")
-
-    # Tasks
-    tasks = snapshot.get("tasks", {})
-    if tasks:
-        lines.append("")
-        lines.append("Tasks:")
-        for tid, tinfo in tasks.items():
-            status = tinfo.get("status", "unknown")
-            worker_id = tinfo.get("worker_id") or "unassigned"
-            worker_info = workers.get(worker_id)
-            prompt = tinfo.get("prompt", "")
-            prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
-            label = format_worker_label(worker_id, worker_info)
-            lines.append(f"  {tid}: {status}, agent={label}, prompt={prompt_preview}")
-
-    # Pending tasks (queued)
-    if pending_tasks:
-        lines.append("")
-        lines.append("Pending tasks:")
-        for idx, task in enumerate(pending_tasks, start=1):
-            task_id = task.get("task_id", "unknown")
-            prompt = task.get("prompt", "")
-            prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
-            lines.append(f"  #{idx} {task_id}: prompt={prompt_preview}")
-
-    # Pending approvals
-    if approval_requests:
-        lines.append("")
-        lines.append("Pending approvals:")
-        for approval in approval_requests:
-            task_id = approval.get("task_id", "unknown")
-            call_id = approval.get("call_id", "unknown")
-            worker_id = approval.get("worker_id", "unknown")
-            worker_info = workers.get(worker_id)
-            command = approval.get("command", "")
-            command_preview = command[:200] + "..." if len(command) > 200 else command
-            task_prompt = approval.get("task_prompt", "")
-            write_scope = approval.get("task_write_scope", [])
-            task_status = approval.get("task_status", "unknown")
-            worker_status = approval.get("worker_status", "unknown")
-
-            w_label = format_worker_label(worker_id, worker_info)
-
-            if mode == "agent" or mode == "detailed":
-                # Agent/detailed mode — full structured block for each approval
-                prompt_preview = task_prompt[:200] + "..." if task_prompt and len(task_prompt) > 200 else (task_prompt or "<unknown>")
-                scope_str = ", ".join(write_scope) if write_scope else "<unknown>"
-
-                lines.append(f"  {task_id}/{call_id} from {w_label}:")
-                lines.append(f"    task_id={task_id}, call_id={call_id}, worker_id={w_label}")
-                lines.append(f"    command={command_preview}")
-                lines.append(f"    task_prompt={prompt_preview}")
-                lines.append(f"    write_scope={scope_str}")
-                lines.append(f"    task_status={task_status}, worker_status={worker_status}")
-            else:
-                # Human mode — compact summary line
-                command_short = command[:120] + "..." if len(command) > 120 else command
-                lines.append(f"  {task_id}/{call_id} from {w_label}: {command_short}")
-                lines.append(f"    Awaiting admin approval — the admin agent will handle this.")
-                lines.append(f"    To override manually: ask admin to approve or deny {task_id}/{call_id}.")
+    _append_worker_status_lines(lines, workers)
+    _append_task_status_lines(lines, tasks, workers)
+    _append_pending_task_lines(lines, pending_tasks)
+    _append_approval_status_lines(lines, approval_requests, workers, mode)
 
     return "\n".join(lines)
