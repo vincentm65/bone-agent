@@ -649,6 +649,76 @@ class SwarmWorkerRunner:
             danger_mode=danger_mode,
         )
 
+    def _handle_boundary_approval(
+        self,
+        path_arg: str,
+        access_reason: str,
+        function_name: str = "",
+        arguments: Optional[dict] = None,
+        context: Optional[dict] = None,
+    ) -> bool:
+        """Route worker filesystem boundary access requests to the swarm admin."""
+        task_id = self._task_id or ""
+        if not task_id or task_id.startswith("local-"):
+            if self.console:
+                self.console.print("[red]Filesystem access requires admin approval, but no swarm task is active.[/red]")
+            return False
+
+        call_id = f"access-{uuid.uuid4().hex[:6]}"
+        display_path = str(path_arg or "").strip()
+        command = f"Grant full filesystem access to this worker session (triggered by: {display_path})"
+        reason = str(access_reason or "").strip()
+
+        if self.console:
+            self.console.print(f"[yellow]Requesting admin access for {display_path}[/yellow]")
+
+        future = self._approval_awaiter.submit(call_id)
+        try:
+            sent = self._send_approval_request(
+                task_id=task_id,
+                worker_id=self.worker_id,
+                call_id=call_id,
+                command=command,
+                reason=reason,
+                cwd="",
+                preview=f"Tool: {function_name}",
+                approval_kind="filesystem_access",
+                path=display_path,
+            )
+        except Exception:
+            self._approval_awaiter.resolve(call_id, False, "Failed to send access request")
+            return False
+
+        if sent is False:
+            self._approval_awaiter.resolve(call_id, False, "Could not reach admin for access approval")
+            return False
+
+        try:
+            result = future.result(timeout=self.approval_timeout)
+        except _futures.TimeoutError:
+            self._approval_awaiter.resolve(call_id, False, f"Approval timeout ({self.approval_timeout}s)")
+            try:
+                self._send_approval_request(
+                    type="approval_cancelled",
+                    task_id=task_id,
+                    worker_id=self.worker_id,
+                    call_id=call_id,
+                    reason=f"Approval timeout ({self.approval_timeout}s)",
+                )
+            except Exception:
+                pass
+            return False
+
+        guidance = str(result.get("guidance") or "").strip()
+        if result.get("approved"):
+            if guidance and self.console:
+                self.console.print(f"[dim]Admin guidance: {guidance}[/dim]")
+            return True
+
+        if self.console:
+            self.console.print(f"[red]Filesystem access denied by admin: {guidance or 'Denied'}[/red]")
+        return False
+
     @property
     def orchestrator(self) -> Any:
         """Lazily build the orchestrator."""
@@ -669,6 +739,7 @@ class SwarmWorkerRunner:
                 edit_approval_handler=self._handle_edit_approval,
                 create_file_handler=self._handle_create_file,
                 command_approval_handler=self._handle_command_approval,
+                boundary_approval_handler=self._handle_boundary_approval,
                 command_approval_awaiter=self._approval_awaiter,
                 command_send_approval_fn=self._send_approval_request,
                 approval_timeout=self.approval_timeout,

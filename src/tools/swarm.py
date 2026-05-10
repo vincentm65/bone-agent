@@ -152,9 +152,9 @@ def dispatch_swarm_task(
 @tool(
     name="handle_approval",
     description=(
-        "Approve or deny a pending worker command that is waiting for admin approval. "
+        "Approve or deny a pending worker command or filesystem access request that is waiting for admin approval. "
         "Only works when the admin agent is in swarm admin mode. "
-        "Use this when a worker has requested approval to execute a command. "
+        "Use this when a worker has requested approval to execute a command or receive full filesystem access for its session. "
         "Set approved=True to approve, approved=False to deny (reason required for denial)."
     ),
     parameters={
@@ -166,7 +166,7 @@ def dispatch_swarm_task(
             },
             "call_id": {
                 "type": "string",
-                "description": "The command call ID to approve or deny.",
+                "description": "The pending approval call ID to approve or deny.",
             },
             "approved": {
                 "type": "boolean",
@@ -190,7 +190,7 @@ def handle_approval(
     reason: Optional[str] = None,
     chat_manager: Any = None,
 ) -> str:
-    """Approve or deny a pending worker command via the admin agent."""
+    """Approve or deny a pending worker approval via the admin agent."""
     ok, error = _require_swarm_admin(chat_manager)
     if not ok:
         return f"exit_code=1\n{error}"
@@ -209,18 +209,18 @@ def handle_approval(
         try:
             success = server.approve(task_id, call_id, guidance=reason or "")
         except Exception as e:
-            return f"exit_code=1\nFailed to approve command: {e}"
+            return f"exit_code=1\nFailed to approve request: {e}"
         if success:
-            return f"exit_code=0\nApproved command {task_id}/{call_id}."
+            return f"exit_code=0\nApproved request {task_id}/{call_id}."
         else:
             return f"exit_code=1\nNo pending approval found for {task_id}/{call_id}."
     else:
         try:
             success = server.deny(task_id, call_id, reason=reason or "Denied by admin.")
         except Exception as e:
-            return f"exit_code=1\nFailed to deny command: {e}"
+            return f"exit_code=1\nFailed to deny request: {e}"
         if success:
-            return f"exit_code=0\nDenied command {task_id}/{call_id}: {reason}."
+            return f"exit_code=0\nDenied request {task_id}/{call_id}: {reason}."
         else:
             return f"exit_code=1\nNo pending approval found for {task_id}/{call_id}."
 

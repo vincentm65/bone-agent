@@ -485,6 +485,8 @@ class SwarmServer:
                             "command": command,
                             "preview": msg.get("preview", ""),
                             "reason": msg.get("reason", ""),
+                            "approval_kind": msg.get("approval_kind", "command"),
+                            "path": msg.get("path", ""),
                             "websocket": websocket,
                         }
 
@@ -506,6 +508,8 @@ class SwarmServer:
                                 "status": "approval_pending",
                                 "command": command,
                                 "command_preview": command_preview,
+                                "approval_kind": msg.get("approval_kind", "command"),
+                                "path": msg.get("path", ""),
                             },
                         )
 
@@ -519,6 +523,8 @@ class SwarmServer:
                             "command": command,
                             "command_preview": command_preview,
                             "reason": msg.get("reason", ""),
+                            "approval_kind": msg.get("approval_kind", "command"),
+                            "path": msg.get("path", ""),
                         })
 
                 elif msg_type == "approval_cancelled":
@@ -1006,6 +1012,8 @@ class SwarmServer:
                     "command": pending.get("command", ""),
                     "reason": pending.get("reason", ""),
                     "preview": pending.get("preview", ""),
+                    "approval_kind": pending.get("approval_kind", "command"),
+                    "path": pending.get("path", ""),
                     "task_prompt": task.get("prompt", ""),
                     "task_write_scope": task.get("write_scope", []),
                     "task_status": task.get("status", "unknown"),

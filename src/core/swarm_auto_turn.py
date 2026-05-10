@@ -31,8 +31,14 @@ def _build_auto_turn_item(extra: dict) -> str:
         call_id = extra.get("call_id", "-")
         command = str(extra.get("command_preview", "")).strip()
         reason = str(extra.get("reason", "")).strip()
+        approval_kind = str(extra.get("approval_kind", "command")).strip()
+        request_label = (
+            "full filesystem access approval"
+            if approval_kind == "filesystem_access"
+            else "command approval"
+        )
         parts = [
-            "[AUTO-TURN] Worker needs command approval.",
+            f"[AUTO-TURN] Worker needs {request_label}.",
             f"Task {task_id}  ·  Call {call_id}  ·  Worker {worker_label}",
         ]
         if command:

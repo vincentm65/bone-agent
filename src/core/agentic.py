@@ -185,7 +185,7 @@ class AgenticOrchestrator:
     with tool calling, providing a cleaner, more maintainable structure.
     """
 
-    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, force_parallel_execution=False, cron_job_id=None, cron_allowlist=None, cron_interactive=False, edit_approval_handler=None, create_file_handler=None, command_approval_handler=None, command_approval_awaiter=None, command_send_approval_fn=None, approval_timeout=300):
+    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, force_parallel_execution=False, cron_job_id=None, cron_allowlist=None, cron_interactive=False, edit_approval_handler=None, create_file_handler=None, command_approval_handler=None, boundary_approval_handler=None, command_approval_awaiter=None, command_send_approval_fn=None, approval_timeout=300):
         """Initialize the orchestrator.
 
         Args:
@@ -204,6 +204,7 @@ class AgenticOrchestrator:
             edit_approval_handler: Optional override for edit approval (default: handle_edit_approval)
             create_file_handler: Optional override for create_file execution.
             command_approval_handler: Optional override for command approval; only set by swarm workers (default: None → uses inline suspend path)
+            boundary_approval_handler: Optional override for filesystem boundary approval; only set by swarm workers
             command_approval_awaiter: Optional ApprovalAwaiter for worker command approvals
             command_send_approval_fn: Optional callable to send approval_request to server
             approval_timeout: Timeout for command approval in seconds
@@ -223,6 +224,7 @@ class AgenticOrchestrator:
         self.edit_approval_handler = edit_approval_handler
         self.create_file_handler = create_file_handler
         self.command_approval_handler = command_approval_handler
+        self.boundary_approval_handler = boundary_approval_handler
         self.command_approval_awaiter = command_approval_awaiter
         self.command_send_approval_fn = command_send_approval_fn
         self.approval_timeout = approval_timeout
@@ -1517,11 +1519,20 @@ class AgenticOrchestrator:
                             "Full filesystem access requires a non-empty reason. "
                             "Retry this tool call with a reason explaining why access outside the project boundary is necessary."
                         )
-                    granted = self._boundary_prompt(
-                        path_arg, access_reason, thinking_indicator,
-                        tool_id=tool_id, function_name=function_name,
-                        tool=tool, arguments=arguments, context=context,
-                    )
+                    if self.boundary_approval_handler:
+                        granted = self.boundary_approval_handler(
+                            path_arg=path_arg,
+                            access_reason=access_reason,
+                            function_name=function_name,
+                            arguments=arguments,
+                            context=context,
+                        )
+                    else:
+                        granted = self._boundary_prompt(
+                            path_arg, access_reason, thinking_indicator,
+                            tool_id=tool_id, function_name=function_name,
+                            tool=tool, arguments=arguments, context=context,
+                        )
                     if granted:
                         set_full_filesystem_access(True)
                         # Retry with the boundary now lifted

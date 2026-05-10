@@ -325,6 +325,7 @@ class SelectionPanel(ToolbarInteraction):
         """Handle Enter in navigation mode: enter edit mode, confirm multi-select,
         or store single-select value and advance."""
         if self._is_custom_input_selected():
+            self._custom_input_texts[self.current_question_idx] = ""
             self._editing_custom_input = True
         elif self._is_multi_select():
             q_idx = self.current_question_idx
