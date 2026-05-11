@@ -1314,10 +1314,10 @@ class AgenticOrchestrator:
         try:
             args_str = tool_call["function"]["arguments"]
             if args_str is None:
-                return False, "Error: Tool arguments are missing."
+                return False, "exit_code=1\nError: Tool arguments are missing."
             arguments = json.loads(args_str)
         except (json.JSONDecodeError, TypeError):
-            return False, "Error: Invalid JSON arguments."
+            return False, "exit_code=1\nError: Invalid JSON arguments."
 
         # Create SubAgentPanel for sub_agent tool calls
         panel_to_use = self.panel_updater
@@ -1363,7 +1363,7 @@ class AgenticOrchestrator:
                     if function_name == "edit_file":
                         edit_path = arguments.get("path", "")
                         if not edit_path:
-                            return False, "Error: path is required for edit_file."
+                            return False, "exit_code=1\nError: path is required for edit_file."
 
                         # Normal edit: generate preview and request approval
                         result = tool.execute(arguments, context)
