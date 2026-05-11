@@ -26,6 +26,7 @@ from rich.theme import Theme
 from rich.text import Text
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import in_terminal, run_in_terminal
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.styles import Style
@@ -580,48 +581,58 @@ def main():
         pending_attachments.clear()
         event.app.invalidate()
 
-    @bindings.add('c-s-left')
+    swarm_nav_enabled = Condition(
+        lambda: (
+            not INPUT_BLOCKED.get('blocked', False)
+            and getattr(chat_manager, 'swarm_admin_mode', False)
+        )
+    )
+
+    @bindings.add('c-s-left', filter=swarm_nav_enabled)
     def swarm_status_page_previous(event):
         """Swarm status previous page (Ctrl+Shift+Left)."""
-        if INPUT_BLOCKED.get('blocked', False):
-            return
-        if not getattr(chat_manager, 'swarm_admin_mode', False):
-            return
         page = getattr(chat_manager, 'swarm_status_page', 0)
         chat_manager.swarm_status_page = max(0, page - 1)
         event.app.invalidate()
 
-    @bindings.add('c-s-right')
+    @bindings.add('c-s-right', filter=swarm_nav_enabled)
     def swarm_status_page_next(event):
         """Swarm status next page (Ctrl+Shift+Right)."""
-        if INPUT_BLOCKED.get('blocked', False):
-            return
-        if not getattr(chat_manager, 'swarm_admin_mode', False):
-            return
         page = getattr(chat_manager, 'swarm_status_page', 0)
         chat_manager.swarm_status_page = min(1, page + 1)
         event.app.invalidate()
 
-    @bindings.add('c-s-up')
+    @bindings.add('c-s-up', filter=swarm_nav_enabled)
+    @bindings.add('c-up', filter=swarm_nav_enabled)
+    @bindings.add('s-up', filter=swarm_nav_enabled)
+    @bindings.add('c-s-pageup', filter=swarm_nav_enabled)
+    @bindings.add('c-pageup', filter=swarm_nav_enabled)
+    @bindings.add('s-pageup', filter=swarm_nav_enabled)
     def swarm_worker_scroll_up(event):
-        """Scroll swarm worker list up (Ctrl+Shift+Up)."""
-        if INPUT_BLOCKED.get('blocked', False):
-            return
-        if not getattr(chat_manager, 'swarm_admin_mode', False):
-            return
+        """Scroll swarm worker list up."""
         scroll = getattr(chat_manager, 'swarm_worker_scroll', 0)
         chat_manager.swarm_worker_scroll = max(0, scroll - 1)
         event.app.invalidate()
 
-    @bindings.add('c-s-down')
+    @bindings.add('c-s-down', filter=swarm_nav_enabled)
+    @bindings.add('c-down', filter=swarm_nav_enabled)
+    @bindings.add('s-down', filter=swarm_nav_enabled)
+    @bindings.add('c-s-pagedown', filter=swarm_nav_enabled)
+    @bindings.add('c-pagedown', filter=swarm_nav_enabled)
+    @bindings.add('s-pagedown', filter=swarm_nav_enabled)
     def swarm_worker_scroll_down(event):
-        """Scroll swarm worker list down (Ctrl+Shift+Down)."""
-        if INPUT_BLOCKED.get('blocked', False):
-            return
-        if not getattr(chat_manager, 'swarm_admin_mode', False):
-            return
+        """Scroll swarm worker list down."""
         scroll = getattr(chat_manager, 'swarm_worker_scroll', 0)
-        chat_manager.swarm_worker_scroll = scroll + 1
+        server = getattr(chat_manager, 'swarm_server', None)
+        if server is None:
+            max_scroll = scroll + 1
+        else:
+            try:
+                snapshot = server.status_snapshot()
+                max_scroll = max(0, len(snapshot.get("workers", {})) - 6)
+            except Exception:
+                max_scroll = scroll + 1
+        chat_manager.swarm_worker_scroll = min(max_scroll, scroll + 1)
         event.app.invalidate()
 
     @bindings.add('c-v')

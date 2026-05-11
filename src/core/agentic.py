@@ -89,6 +89,21 @@ class SelectionSuspended(Exception):
         self.remaining_tool_calls = remaining_tool_calls or []
 
 
+def _is_swarm_auto_turn_input(user_input: str | list[dict[str, Any]]) -> bool:
+    """Return True when input is a synthetic swarm auto-turn prompt."""
+    if isinstance(user_input, str):
+        return user_input.lstrip().startswith("[AUTO-TURN]")
+    if isinstance(user_input, list):
+        for item in user_input:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                text = str(item.get("text") or "")
+                if text.lstrip().startswith("[AUTO-TURN]"):
+                    return True
+    return False
+
+
 class BoundaryApprovalSuspended(Exception):
     """Raised when a tool hits a path-boundary error and yields to the main prompt.
 
@@ -230,6 +245,7 @@ class AgenticOrchestrator:
         self.approval_timeout = approval_timeout
         self.tool_calls_count = 0
         self.empty_response_count = 0
+        self._swarm_dispatch_completed = False
         self.gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
         # Snapshot the cancel event for this turn.  The chat_manager's
         # event can be cleared when a new turn starts (Ctrl+C → new
@@ -327,6 +343,45 @@ class AgenticOrchestrator:
 
         return [tool for tool in tools if tool["function"]["name"] in effective_names]
 
+    def _is_after_successful_swarm_dispatch(self) -> bool:
+        """Return True when a blank assistant response can end admin dispatch."""
+        if not getattr(self.chat_manager, "swarm_admin_mode", False):
+            return False
+        if not getattr(self, "_swarm_dispatch_completed", False):
+            return False
+
+        last_user_index = -1
+        for index, msg in enumerate(self.chat_manager.messages):
+            if msg.get("role") == "user":
+                last_user_index = index
+
+        if last_user_index == -1:
+            return False
+
+        dispatch_tool_call_ids = {
+            tool_call.get("id")
+            for msg in self.chat_manager.messages[last_user_index + 1:]
+            if msg.get("role") == "assistant"
+            for tool_call in (msg.get("tool_calls") or [])
+            if tool_call.get("function", {}).get("name") == "dispatch_swarm_task"
+        }
+
+        for msg in reversed(self.chat_manager.messages):
+            if msg.get("role") == "tool":
+                if msg.get("tool_call_id") not in dispatch_tool_call_ids:
+                    continue
+                return self._is_successful_swarm_dispatch_result(
+                    str(msg.get("content") or "")
+                )
+            if msg.get("role") == "user":
+                return False
+        return False
+
+    @staticmethod
+    def _is_successful_swarm_dispatch_result(content: str) -> bool:
+        """Return True for the canonical successful dispatch_swarm_task output."""
+        return content.startswith("exit_code=0\n") and "Task:" in content
+
     def run(self, user_input: str | list[dict[str, Any]], thinking_indicator=None, allowed_tools=None, allow_active_plugins=False):
         """Main orchestration loop.
 
@@ -343,9 +398,10 @@ class AgenticOrchestrator:
         self._current_allowed_tools = allowed_tools
         self._current_allow_active_plugins = allow_active_plugins
 
-        # Clear completed task list on each new user turn.
+        # Clear the task list on normal user turns. Swarm auto-turns are
+        # synthetic follow-ups for the active plan, so they must preserve it.
         task_list = getattr(self.chat_manager, "task_list", None)
-        if task_list:
+        if task_list and not _is_swarm_auto_turn_input(user_input):
             task_list.clear()
             self.chat_manager.task_list_title = None
 
@@ -562,6 +618,10 @@ class AgenticOrchestrator:
             return True
 
         # Empty response with no tools
+        if self._is_after_successful_swarm_dispatch():
+            self._swarm_dispatch_completed = False
+            return True
+
         should_continue, self.empty_response_count = _handle_empty_response(
             self.empty_response_count, self.console
         )
@@ -819,6 +879,12 @@ class AgenticOrchestrator:
                 self.chat_manager.messages.append(tool_msg)
                 # Log tool result
                 self.chat_manager.log_message(tool_msg)
+                if (
+                    getattr(self.chat_manager, "swarm_admin_mode", False)
+                    and tool_call.get("function", {}).get("name") == "dispatch_swarm_task"
+                    and self._is_successful_swarm_dispatch_result(content_for_agent)
+                ):
+                    self._swarm_dispatch_completed = True
 
         # Compact completed tool blocks once after all tools complete
         self.chat_manager.compact_tool_results(skip_token_update=True)
@@ -1058,6 +1124,12 @@ class AgenticOrchestrator:
                     self.chat_manager.messages.append(tool_msg)
                     # Log tool result
                     self.chat_manager.log_message(tool_msg)
+                    if (
+                        getattr(self.chat_manager, "swarm_admin_mode", False)
+                        and tool_calls[result.call_index].get("function", {}).get("name") == "dispatch_swarm_task"
+                        and self._is_successful_swarm_dispatch_result(content_for_agent)
+                    ):
+                        self._swarm_dispatch_completed = True
 
                     self._check_swarm_completion(
                         tool_calls[result.call_index].get("function", {}).get("name", "")
