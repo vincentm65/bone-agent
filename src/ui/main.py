@@ -316,17 +316,30 @@ def _resume_orchestrator_with_live_toolbar(
         daemon=True,
     )
     agent_thread.start()
-    raw_input = session.prompt(
-        lambda: "",
-        bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
-        inputhook=_create_agent_done_inputhook(
-            completion_event,
-            on_complete=lambda: _stop_progress_spinner(chat_manager),
-        ),
-    )
-    _stop_progress_spinner(chat_manager)
-    safe_console.set_app(None)
-    return raw_input, result_holder
+    try:
+        raw_input = session.prompt(
+            lambda: "",
+            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+            inputhook=_create_agent_done_inputhook(
+                completion_event,
+                on_complete=lambda: _stop_progress_spinner(chat_manager),
+            ),
+        )
+        return raw_input, result_holder
+    except KeyboardInterrupt:
+        chat_manager.request_agent_cancel()
+        interaction = get_active_interaction(chat_manager)
+        if interaction is not None:
+            try:
+                interaction.cancel()
+            except Exception:
+                pass
+            clear_active_interaction(chat_manager)
+        completion_event.set()
+        return None, {"done": True, "cancelled": True}
+    finally:
+        _stop_progress_spinner(chat_manager)
+        safe_console.set_app(None)
 
 
 # ── Helper: inputhook for agent-done waiting ──────────────────────
@@ -415,6 +428,13 @@ def _handle_ctrl_c_bg_prompt(chat_manager, session, safe_console,
     In both cases the caller should ``continue`` the main loop afterward.
     """
     chat_manager.request_agent_cancel()
+    interaction = get_active_interaction(chat_manager)
+    if interaction is not None:
+        try:
+            interaction.cancel()
+        except Exception:
+            pass
+        clear_active_interaction(chat_manager)
     if chat_manager.progress.get_subagent_summary()["active"]:
         # Signal cancellation — the worker/subagent owns final panel state
         # and prints the command-specific cancel message (e.g. "Ask cancelled.").

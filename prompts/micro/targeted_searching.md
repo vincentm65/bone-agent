@@ -1,1 +1,0 @@
-Reuse results before searching again. `files_with_matches` first, then read. Combine patterns with `|`. Specific > generic: "def authenticate_user" not "auth". Good: one rg + reads. Bad: rg→read→rg→read→rg→read.

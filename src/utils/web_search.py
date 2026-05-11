@@ -2,7 +2,7 @@
 
 import queue
 import threading
-import time
+from concurrent.futures import ThreadPoolExecutor, wait
 import requests
 from readability import Document
 import html2text
@@ -20,8 +20,10 @@ _FETCH_TIMEOUT = 10
 # already has a requests timeout; the DDGS lookup needs its own guard because
 # it can otherwise block the agent turn indefinitely on a stalled network call.
 _SEARCH_TIMEOUT = 20
-# Delay between page fetches to avoid rate limiting (seconds)
-_FETCH_DELAY = 1.0
+# Extra grace period for the whole content-fetch phase. Individual HTTP requests
+# still use _FETCH_TIMEOUT; this prevents a batch of slow pages from freezing the
+# agent turn one URL at a time.
+_FETCH_BATCH_GRACE = 1.0
 # User agent for page fetching
 _USER_AGENT = "Mozilla/5.0 (compatible; bone-agent/1.0; +https://github.com/vincentm65/bone-agent-cli)"
 
@@ -151,6 +153,41 @@ def _run_ddg_text_search(query, num_results):
     return payload
 
 
+def _fetch_pages_concurrently(urls):
+    """Fetch a small batch of pages with a bounded wall-clock timeout.
+
+    Returns:
+        list[tuple[str, str | None]]: One (content, error_reason) tuple per URL,
+        preserving input order.
+    """
+    if not urls:
+        return []
+
+    results = [("", "timeout") for _ in urls]
+    executor = ThreadPoolExecutor(max_workers=len(urls), thread_name_prefix="web-fetch")
+    future_to_index = {
+        executor.submit(_fetch_page_content, url): idx
+        for idx, url in enumerate(urls)
+    }
+
+    done, not_done = wait(future_to_index, timeout=_FETCH_TIMEOUT + _FETCH_BATCH_GRACE)
+
+    for future in done:
+        idx = future_to_index[future]
+        try:
+            results[idx] = future.result()
+        except Exception:
+            results[idx] = ("", "parse error")
+
+    for future in not_done:
+        future.cancel()
+
+    # Do not wait for stuck network calls here; each request has its own timeout
+    # and the tool result can continue without serially blocking on every page.
+    executor.shutdown(wait=False, cancel_futures=True)
+    return results
+
+
 def run_web_search(arguments, console, panel_updater=None):
     """Execute web search using DuckDuckGo and return formatted results.
 
@@ -197,6 +234,12 @@ def run_web_search(arguments, console, panel_updater=None):
         pages_failed = 0
         failure_reasons = []  # Collect short failure codes for metadata
 
+        urls_to_fetch = [
+            result.get("href", "N/A")
+            for result in results[:fetch_count]
+        ]
+        fetched_pages = _fetch_pages_concurrently(urls_to_fetch) if fetch_count else []
+
         # Format results for model
         output_lines = []
         for idx, result in enumerate(results, 1):
@@ -210,7 +253,7 @@ def run_web_search(arguments, console, panel_updater=None):
 
             # Fetch full content for top results
             if fetch_content and idx <= fetch_count:
-                content, error_reason = _fetch_page_content(url)
+                content, error_reason = fetched_pages[idx - 1]
                 if content:
                     output_lines.append(f"\n--- Content ---\n{content}")
                     pages_fetched += 1
@@ -219,13 +262,6 @@ def run_web_search(arguments, console, panel_updater=None):
                     pages_failed += 1
                     if error_reason:
                         failure_reasons.append(error_reason)
-                        # Emit live status only for top-level searches; sub-agents
-                        # receive this through the returned metadata below.
-                        _emit_status(f"Failed: {error_reason}", console, panel_updater)
-
-                # Rate limiting: delay between fetches
-                if idx < fetch_count:
-                    time.sleep(_FETCH_DELAY)
 
             if idx < len(results):
                 output_lines.append("")

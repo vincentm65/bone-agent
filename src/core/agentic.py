@@ -263,6 +263,25 @@ class AgenticOrchestrator:
         """
         return self._cancel_event.is_set()
 
+    @staticmethod
+    def _is_user_cancel_result(result) -> bool:
+        """Return True when a tool result represents an explicit user cancel."""
+        text = str(result or "").strip().lower()
+        if text.startswith("exit_code=130"):
+            return True
+        cancel_markers = (
+            "operation canceled by user",
+            "operation cancelled by user",
+            "command canceled by user",
+            "command cancelled by user",
+            "user canceled selection",
+            "user cancelled selection",
+            "cancelled by user",
+            "canceled by user",
+            "access denied by user",
+        )
+        return any(marker in text for marker in cancel_markers)
+
     def set_cancel_event(self, event):
         """Replace the orchestrator's cancel event.
 
@@ -459,6 +478,8 @@ class AgenticOrchestrator:
                         value_str = str(value)
                         if "\n" in value_str and key != "original_error":
                             detail_lines.append(f"{key}: {value_str}")
+                        elif key == "original_error" and details.get("status_code"):
+                            detail_lines.append(f"{key}: {value_str[:1000]}")
                     detailed_error = str(e)
                     if detail_lines:
                         detailed_error += "\n\n" + "\n\n".join(detail_lines)
@@ -1504,6 +1525,9 @@ class AgenticOrchestrator:
                 if function_name == "sub_agent" and result_str.strip().startswith("exit_code=130"):
                     return True, None
 
+                if self._is_user_cancel_result(result_str):
+                    return True, result_str
+
                 if is_boundary_error(result_str):
                     path_arg = arguments.get("path", arguments.get("path_str", ""))
                     if not path_arg:
@@ -1688,6 +1712,9 @@ class AgenticOrchestrator:
         self.chat_manager.messages.append(tool_msg)
         self.chat_manager.log_message(tool_msg)
 
+        if self._is_user_cancel_result(tool_result_str):
+            return "done"
+
         # ---- Process remaining tool calls in the batch -------------------
         if self._process_remaining_tool_calls(exc.remaining_tool_calls, thinking_indicator):
             return "done"
@@ -1716,6 +1743,9 @@ class AgenticOrchestrator:
             return False
 
         for i, tool_call in enumerate(remaining):
+            if self._cancel_requested():
+                raise AgentTurnCancelled()
+
             tool_id = tool_call["id"]
             try:
                 should_exit, tool_result = self._process_single_tool_call(
@@ -1813,6 +1843,9 @@ class AgenticOrchestrator:
         self.chat_manager.messages.append(tool_msg)
         self.chat_manager.log_message(tool_msg)
 
+        if self._is_user_cancel_result(tool_result_str):
+            return "done"
+
         # Process remaining tool calls in the batch
         if self._process_remaining_tool_calls(exc.remaining_tool_calls, thinking_indicator):
             return "done"
@@ -1896,6 +1929,9 @@ class AgenticOrchestrator:
         }
         self.chat_manager.messages.append(tool_msg)
         self.chat_manager.log_message(tool_msg)
+
+        if self._is_user_cancel_result(tool_result_str):
+            return "done"
 
         # ---- Process remaining tool calls in the batch -------------------
         if self._process_remaining_tool_calls(exc.remaining_tool_calls, thinking_indicator):

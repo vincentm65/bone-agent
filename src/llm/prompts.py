@@ -16,28 +16,6 @@ from string import Template
 _PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 
 
-# Mode section for main agent
-
-MODE_SECTION = """## Current mode: Edit
-
-**Important:** Explain changes conceptually, show code only in edit tools
-
-Workflow:
-1. Analyze request and identify files to modify
-2. Generate a brief plan (what/where/why, no code)
-3. **Check for trade-offs** - If multiple valid approaches exist, use select_option to clarify
-4. Proceed with edits
-
-When the user asks for a plan (e.g. "plan this out", "what's involved", "before you start"):
-- Explore and understand requirements first
-- Propose a structured plan with bullet points: what changes, where, and why
-- Highlight trade-offs and ambiguities using select_option
-- End with a summary of the proposed changes
-- Ask: 'Do you approve this plan?' before proceeding with edits
-
-Show code only when using `edit_file`/`create_file` tools. Keep text explanations concise."""
-
-
 # Sub-agent specific sections (research-focused, read-only tools passed via function calling)
 
 SUB_AGENT_SECTIONS = {
@@ -133,18 +111,6 @@ Do not manufacture issues or inflate severity. If nothing is wrong, say so in th
 
 
 # Builder functions to compose prompts from sections
-
-# Mapping of prompt section keys to the tool names they depend on.
-# If ALL listed tools are disabled, the section is omitted from the prompt.
-# Sections not listed have no tool dependency and are always included.
-SECTION_TOOL_DEPS = {
-    "trust_subagent_context": ["sub_agent"],
-    "when_to_use_sub_agent": ["sub_agent"],
-    "ask_questions": ["select_option"],
-    "editing_pattern": ["edit_file"],
-    "task_lists_pattern": ["create_task_list", "complete_task", "show_task_list", "edit_file"],
-    "temp_folder": ["create_file"],
-}
 
 
 def _build_memory_section() -> str | None:
@@ -283,29 +249,12 @@ def _static(name: str) -> str:
     return ""
 
 
-def _should_include_section(section_key: str) -> bool:
-    """Check whether a prompt section should be included based on tool availability.
-
-    A section is skipped only when ALL of its dependent tools are disabled.
-    Uses lazy import to avoid circular dependency with tools module.
-    """
-    deps = SECTION_TOOL_DEPS.get(section_key)
-    if not deps:
-        return True
-    from tools.helpers.base import ToolRegistry
-    return not all(ToolRegistry.is_disabled(t) for t in deps)
-
-
 def _build_prompt_to_list(sections: list[tuple[str, callable]]) -> list[str]:
     """Build prompt as a list of section strings from (key, content_fn) pairs.
-
-    Skips sections that fail _should_include_section (tool deps)
-    or whose content_fn returns None/empty.
+    Skips sections whose content_fn returns None/empty.
     """
     result = []
     for key, content_fn in sections:
-        if not _should_include_section(key):
-            continue
         content = content_fn()
         if content:
             result.append(content)
@@ -321,60 +270,22 @@ def _build_prompt(sections: list[tuple[str, callable]]) -> str:
 
 
 def _main_sections() -> list[tuple[str, callable]]:
-    """Return (key, content_fn) pairs for the main agent prompt.
-
-    Order in this list = order in the final prompt.
-    Static .md sections, dynamic builders, and hardcoded sections all
-    live here — single source of truth for ordering.
-    """
-    sections = [
-        ("intro", lambda: _static("intro.md")),
+    """Return (key, content_fn) pairs for the main agent prompt."""
+    return [
         ("context", _build_context_section),
-        ("tone_and_style", lambda: _static("tone_and_style.md")),
-        ("communication_style", lambda: _static("communication_style.md")),
-        ("trust_subagent_context", lambda: _static("trust_subagent_context.md")),
-        ("context_reliability", lambda: _static("context_reliability.md")),
         ("skills", lambda: _static("skills.md")),
         ("cron", lambda: _static("cron.md")),
-        ("conversational_tool_calling", lambda: _static("conversational_tool_calling.md")),
-        ("professional_objectivity", lambda: _static("professional_objectivity.md")),
-        ("think_before_acting", lambda: _static("think_before_acting.md")),
-        ("batch_independent_calls", lambda: _static("batch_independent_calls.md")),
-        ("code_references", lambda: _static("code_references.md")),
-        ("exploration_pattern", lambda: _static("exploration_pattern.md")),
-        ("targeted_searching", lambda: _static("targeted_searching.md")),
-        ("editing_pattern", lambda: _static("editing_pattern.md")),
-        ("task_lists_pattern", lambda: _static("task_lists_pattern.md")),
-        ("casual_interactions", lambda: _static("casual_interactions.md")),
-        ("ask_questions", lambda: _static("ask_questions.md")),
-        ("tool_preferences", lambda: _static("tool_preferences.md")),
-        ("when_to_use_sub_agent", lambda: _static("when_to_use_sub_agent.md")),
-        ("error_handling", lambda: _static("error_handling.md")),
-        ("temp_folder", lambda: _static("temp_folder.md")),
         ("memory_system", _build_memory_section),
         ("obsidian", _build_vault_section),
-        ("mode", lambda: MODE_SECTION),
+        ("temp_folder", lambda: _static("temp_folder.md")),
     ]
-
-    return sections
 
 
 def _sub_agent_sections() -> list[tuple[str, callable]]:
-    """Return (key, content_fn) pairs for the sub-agent prompt.
-
-    response_format is placed explicitly after code_references.
-    """
+    """Return (key, content_fn) pairs for the sub-agent prompt."""
     return [
-        ("intro", lambda: _static("intro.md")),
         ("context", _build_context_section),
-        ("tone_and_style", lambda: _static("tone_and_style.md")),
-        ("communication_style", lambda: _static("communication_style.md")),
-        ("trust_subagent_context", lambda: _static("trust_subagent_context.md")),
-        ("context_reliability", lambda: _static("context_reliability.md")),
         ("skills", lambda: _static("skills.md")),
-        ("exploration_pattern", lambda: _static("exploration_pattern.md")),
-        ("targeted_searching", lambda: _static("targeted_searching.md")),
-        ("tool_preferences", lambda: _static("tool_preferences.md")),
     ]
 
 
@@ -427,20 +338,14 @@ def build_sub_agent_prompt(sub_agent_type: str = "research", soft_limit_tokens: 
 
 
 # Admin-mode sections to suppress in swarm admin prompt
-_ADMIN_SUPPRESS_SECTIONS = {"editing_pattern", "task_lists_pattern", "temp_folder", "mode"}
+_ADMIN_SUPPRESS_SECTIONS: set[str] = set()
 
-# Worker-mode sections to suppress in swarm worker prompt.
-# Suppresses the default mode section (replaced by swarm_worker_mode.md)
-# and sub-agent delegation guidance (workers are leaf agents).
-_WORKER_SUPPRESS_SECTIONS = {"mode", "when_to_use_sub_agent"}
+# Worker-mode sections to suppress in swarm worker prompt
+_WORKER_SUPPRESS_SECTIONS: set[str] = set()
 
 
 def _admin_sections() -> list[tuple[str, callable]]:
-    """Return main sections for swarm admin prompt, suppressing edit/task/temp sections.
-
-    Keeps search/research guidance active so the admin can investigate
-    before writing worker prompts.
-    """
+    """Return main sections for swarm admin prompt with applicable sections suppressed."""
     all_sections = _main_sections()
     return [
         (key, fn) for key, fn in all_sections
@@ -449,11 +354,7 @@ def _admin_sections() -> list[tuple[str, callable]]:
 
 
 def _worker_sections() -> list[tuple[str, callable]]:
-    """Return main sections for swarm worker prompt, suppressing mode and sub-agent guidance.
-
-    Workers are leaf agents — they should not see edit-mode instructions
-    or sub-agent delegation guidance.
-    """
+    """Return main sections for swarm worker prompt with applicable sections suppressed."""
     all_sections = _main_sections()
     return [
         (key, fn) for key, fn in all_sections

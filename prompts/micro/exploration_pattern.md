@@ -1,1 +1,0 @@
-Known paths → `read_file`. Unknown → targeted `rg`. Batch reads. Multiple paths → `select_option`. Full file if <500 lines; 100-200 line chunks for larger. Check sizes with `list_directory`. Track `start_line` to avoid re-reading.

@@ -3,6 +3,8 @@
 import subprocess
 import shlex
 import os
+import signal
+import time
 from pathlib import Path
 from typing import Optional
 from rich.panel import Panel
@@ -120,7 +122,79 @@ def _prepare_execution_environment(repo_root, rg_exe_path):
     return env
 
 
-def _execute_direct_command(cmd_list, repo_root, env, debug_mode, console):
+def _cancel_requested(cancel_event):
+    return bool(cancel_event is not None and cancel_event.is_set())
+
+
+def _run_cancellable_process(cmd, repo_root, env, *, cancel_event=None):
+    is_windows = os.name == 'nt'
+    popen_kwargs = {}
+    if is_windows:
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        cwd=str(repo_root),
+        env=env,
+        **popen_kwargs,
+    )
+    deadline = time.monotonic() + tool_settings.command_timeout_sec
+
+    while True:
+        if _cancel_requested(cancel_event):
+            _terminate_process_tree(process, is_windows)
+            stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(
+                cmd,
+                130,
+                stdout=stdout,
+                stderr=(stderr or "") + "\nCommand canceled by user.",
+            )
+
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(cmd, process.returncode, stdout=stdout, stderr=stderr)
+
+        if time.monotonic() >= deadline:
+            _terminate_process_tree(process, is_windows)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(cmd, tool_settings.command_timeout_sec, output=stdout, stderr=stderr)
+
+        time.sleep(0.05)
+
+
+def _terminate_process_tree(process, is_windows):
+    try:
+        if is_windows:
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+    except Exception:
+        process.terminate()
+
+    try:
+        process.wait(timeout=1.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    try:
+        if is_windows:
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except Exception:
+        process.kill()
+
+
+def _execute_direct_command(cmd_list, repo_root, env, debug_mode, console, cancel_event=None):
     """Execute command directly (rg.exe) without PowerShell.
 
     Returns:
@@ -130,16 +204,7 @@ def _execute_direct_command(cmd_list, repo_root, env, debug_mode, console):
         console.print(f"[dim]→ Executing: {cmd_list}[/dim]")
         console.print(f"[dim]→ Working dir: {repo_root}[/dim]")
 
-    result = subprocess.run(
-        cmd_list,
-        capture_output=True,
-        text=True,
-        encoding='utf-8',
-        errors='replace',
-        timeout=tool_settings.command_timeout_sec,
-        cwd=str(repo_root),
-        env=env,
-    )
+    result = _run_cancellable_process(cmd_list, repo_root, env, cancel_event=cancel_event)
 
     if debug_mode and console:
         console.print(f"[dim]→ Exit code: {result.returncode}[/dim]")
@@ -147,7 +212,7 @@ def _execute_direct_command(cmd_list, repo_root, env, debug_mode, console):
     return result
 
 
-def _execute_shell_command(command, repo_root, env, debug_mode, console):
+def _execute_shell_command(command, repo_root, env, debug_mode, console, cancel_event=None):
     """Execute command via shell (PowerShell on Windows, /bin/sh on Unix/Linux).
 
     Returns:
@@ -167,16 +232,7 @@ def _execute_shell_command(command, repo_root, env, debug_mode, console):
         console.print(f"[dim]→ Executing via {shell_name}: {command}[/dim]")
         console.print(f"[dim]→ Working dir: {repo_root}[/dim]")
 
-    result = subprocess.run(
-        shell_cmd,
-        capture_output=True,
-        text=True,
-        encoding='utf-8',
-        errors='replace',
-        timeout=tool_settings.command_timeout_sec,
-        cwd=str(repo_root),
-        env=env,
-    )
+    result = _run_cancellable_process(shell_cmd, repo_root, env, cancel_event=cancel_event)
 
     if debug_mode and console:
         console.print(f"[dim]→ Exit code: {result.returncode}[/dim]")
@@ -184,7 +240,7 @@ def _execute_shell_command(command, repo_root, env, debug_mode, console):
     return result
 
 
-def run_shell_command(command, repo_root, rg_exe_path, console, debug_mode, gitignore_spec=None, max_matches=None):
+def run_shell_command(command, repo_root, rg_exe_path, console, debug_mode, gitignore_spec=None, max_matches=None, cancel_event=None):
     """Execute command via rg (direct) or shell (PowerShell on Windows, /bin/sh on Unix/Linux).
 
     Args:
@@ -207,12 +263,12 @@ def run_shell_command(command, repo_root, rg_exe_path, console, debug_mode, giti
         if not needs_shell:
             # Direct execution (rg)
             cmd_list = [str(executable)] + args
-            result = _execute_direct_command(cmd_list, repo_root, env, debug_mode, console)
+            result = _execute_direct_command(cmd_list, repo_root, env, debug_mode, console, cancel_event=cancel_event)
             # AI gets truncated results (via format_tool_result); user sees summary via _display_tool_feedback
             formatted_result = format_tool_result(result, command=command, is_rg=True, debug_mode=True, max_matches=max_matches)
         else:
             # Shell execution (PowerShell on Windows, /bin/sh on Unix/Linux)
-            result = _execute_shell_command(args, repo_root, env, debug_mode, console)
+            result = _execute_shell_command(args, repo_root, env, debug_mode, console, cancel_event=cancel_event)
             # AI gets full results; user sees summary via _display_tool_feedback
             formatted_result = format_tool_result(result, command=command, debug_mode=True)
 
@@ -302,7 +358,13 @@ def execute_command(
     # Execute command (approval workflow handled by orchestrator)
     try:
         return run_shell_command(
-            command, repo_root, rg_exe_path, console, debug_mode, gitignore_spec
+            command,
+            repo_root,
+            rg_exe_path,
+            console,
+            debug_mode,
+            gitignore_spec,
+            cancel_event=chat_manager.get_agent_cancel_event() if chat_manager else None,
         )
     except Exception as e:
         return f"exit_code=1\nCommand execution failed: {str(e)}"

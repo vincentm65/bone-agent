@@ -1,1 +1,0 @@
-Use native tools over `execute_command`: `rg` (search), `read_file` (read), `list_directory` (list), `create_file` (new file), `edit_file` (edit). Use `execute_command` for: git, rm/mv/cp/mkdir/chmod, pip/npm/pacman, ps/kill, systemctl, ping/curl/wget/ssh, make/cmake, tests.
