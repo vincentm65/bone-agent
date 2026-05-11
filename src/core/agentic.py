@@ -40,6 +40,35 @@ from exceptions import (
 )
 
 
+def _format_llm_detail_lines(error):
+    """Return user-visible detail lines for an LLM error.
+
+    Keep server-side failures concise: provider 5xx bodies are often noisy JSON
+    payloads and can contain Rich-looking markup that should not leak into the UI.
+    """
+    detail_lines = []
+    details = getattr(error, "details", {}) or {}
+    status_code = details.get("status_code")
+
+    try:
+        numeric_status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        numeric_status_code = None
+
+    show_original_error = status_code is not None and not (
+        numeric_status_code is not None and numeric_status_code >= 500
+    )
+
+    for key, value in details.items():
+        value_str = str(value)
+        if "\n" in value_str and key != "original_error":
+            detail_lines.append(f"{key}: {value_str}")
+        elif key == "original_error" and show_original_error:
+            detail_lines.append(f"{key}: {value_str[:1000]}")
+
+    return detail_lines
+
+
 class AgentTurnCancelled(Exception):
     """Raised when the current agent turn is cancelled by the user."""
     pass
@@ -481,14 +510,7 @@ class AgenticOrchestrator:
                     continue
                 else:
                     # Non-retryable error or final attempt exhausted
-                    detail_lines = []
-                    details = getattr(e, "details", {})
-                    for key, value in details.items():
-                        value_str = str(value)
-                        if "\n" in value_str and key != "original_error":
-                            detail_lines.append(f"{key}: {value_str}")
-                        elif key == "original_error" and details.get("status_code"):
-                            detail_lines.append(f"{key}: {value_str[:1000]}")
+                    detail_lines = _format_llm_detail_lines(e)
                     detailed_error = str(e)
                     if detail_lines:
                         detailed_error += "\n\n" + "\n\n".join(detail_lines)
