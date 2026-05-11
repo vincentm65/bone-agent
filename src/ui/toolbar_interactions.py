@@ -727,30 +727,63 @@ class CommandConfirmInteraction(ToolbarInteraction):
 _INTERACTION_ATTR = "_toolbar_interaction"
 
 
+def _interaction_is_done(interaction: Any) -> bool:
+    """Safely check whether *interaction* has finished.
+
+    Guards against exceptions from a broken ``is_done()`` so that
+    callers never raise while determining staleness.
+    """
+    try:
+        return bool(interaction.is_done())
+    except Exception:
+        return False
+
+
 def set_active_interaction(
     chat_manager: Any, interaction: ToolbarInteraction
 ) -> None:
-    """Store *interaction* as the active toolbar interaction."""
+    """Store *interaction* as the active toolbar interaction.
+
+    If a different interaction is already active it is cleaned up first
+    so that cancelled / timed-out interactions never linger.
+    """
+    old = getattr(chat_manager, _INTERACTION_ATTR, None)
+    if old is not None and old is not interaction:
+        try:
+            old.cleanup()
+        except Exception:
+            pass
     setattr(chat_manager, _INTERACTION_ATTR, interaction)
 
 
 def get_active_interaction(chat_manager: Any) -> Optional[ToolbarInteraction]:
-    """Return the active toolbar interaction, or None."""
-    return getattr(chat_manager, _INTERACTION_ATTR, None)
+    """Return the active toolbar interaction, or None.
+
+    Interactions that have already finished (``is_done()`` is True) are
+    automatically cleared so that prompt_toolkit ``Condition`` filters
+    based on this function do not stay true for stale interactions.
+    """
+    interaction = getattr(chat_manager, _INTERACTION_ATTR, None)
+    if interaction is not None and _interaction_is_done(interaction):
+        clear_active_interaction(chat_manager)
+        return None
+    return interaction
 
 
 def clear_active_interaction(chat_manager: Any) -> None:
-    """Remove the active interaction, calling its ``cleanup()`` hook."""
-    interaction = get_active_interaction(chat_manager)
+    """Remove the active interaction, calling its ``cleanup()`` hook.
+
+    Always leaves the attribute present (set to ``None``) so that
+    ``ChatManager``'s formal initialisation of ``_toolbar_interaction``
+    is respected and other direct accessors never see a missing attribute.
+    """
+    interaction = getattr(chat_manager, _INTERACTION_ATTR, None)
     if interaction is not None:
         try:
             interaction.cleanup()
         except Exception:
             pass
-    try:
-        delattr(chat_manager, _INTERACTION_ATTR)
-    except AttributeError:
-        pass
+    setattr(chat_manager, _INTERACTION_ATTR, None)
 
 
 # ---------------------------------------------------------------------------
@@ -762,11 +795,18 @@ def render_active_interaction(chat_manager: Any) -> Optional[str]:
 
     Returns None when there is no active interaction, so callers can fall
     through to the standard toolbar text.
+
+    If the interaction's ``render()`` raises an exception the interaction
+    is cleared so the toolbar recovers on the next refresh.
     """
     interaction = get_active_interaction(chat_manager)
     if interaction is None:
         return None
-    return interaction.render()
+    try:
+        return interaction.render()
+    except Exception:
+        clear_active_interaction(chat_manager)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +819,11 @@ def dispatch_toolbar_key(event: Any, chat_manager: Any) -> bool:
     Returns True if the event was consumed (caller should not process
     further).
 
+    If ``handle_key()`` raises an exception the interaction is cancelled
+    and cleared.  The key is still considered consumed (returns True) so
+    the UI does not crash and the key does not bleed into normal prompt
+    input.
+
     Usage inside a prompt_toolkit key binding::
 
         if dispatch_toolbar_key(event, chat_manager):
@@ -787,7 +832,15 @@ def dispatch_toolbar_key(event: Any, chat_manager: Any) -> bool:
     interaction = get_active_interaction(chat_manager)
     if interaction is None:
         return False
-    return interaction.handle_key(event)
+    try:
+        return interaction.handle_key(event)
+    except Exception:
+        try:
+            interaction.cancel()
+        except Exception:
+            pass
+        clear_active_interaction(chat_manager)
+        return True
 
 
 # ---------------------------------------------------------------------------

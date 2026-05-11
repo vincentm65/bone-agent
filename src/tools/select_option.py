@@ -71,6 +71,29 @@ class SelectionPanel(ToolbarInteraction):
             return options[opt_idx].get("value") == CUSTOM_INPUT_SENTINEL
         return False
 
+    def _selected_multi_values(self, q_idx: int = None) -> list:
+        """Return selected values for a multi-select question.
+
+        Includes checked option values (in option order) plus any custom
+        input text.  Returns an empty list when nothing is selected.
+        """
+        if q_idx is None:
+            q_idx = self.current_question_idx
+        options = self.questions[q_idx].get("options", [])
+        checked = self._checked_indices.get(q_idx, set())
+        values = []
+        for i in sorted(checked):
+            if i < len(options) and options[i].get("value") != CUSTOM_INPUT_SENTINEL:
+                values.append(options[i].get("value"))
+        # Custom input is confirmed by pressing Enter while editing the
+        # sentinel option. The sentinel itself is intentionally not checkable,
+        # so include non-empty custom text directly instead of requiring a
+        # checked sentinel index.
+        custom_text = self._custom_input_texts.get(q_idx, "").strip()
+        if custom_text:
+            values.append(custom_text)
+        return values
+
     # ------------------------------------------------------------------
     # ToolbarInteraction interface
     # ------------------------------------------------------------------
@@ -318,12 +341,17 @@ class SelectionPanel(ToolbarInteraction):
         """Handle keys while editing custom input text."""
         if key_name == "escape":
             self._editing_custom_input = False
+            self._custom_input_texts.pop(self.current_question_idx, None)
             return True
         elif key_name == "enter":
             typed = self._custom_input_texts.get(self.current_question_idx, "").strip()
             if not typed:
                 return True  # stay in editing mode
-            self.selections[self.current_question_idx] = typed
+            q_idx = self.current_question_idx
+            if self._is_multi_select(q_idx):
+                self.selections[q_idx] = self._selected_multi_values(q_idx)
+            else:
+                self.selections[q_idx] = typed
             self._editing_custom_input = False
             self._advance_or_finish()
             return True
@@ -363,14 +391,10 @@ class SelectionPanel(ToolbarInteraction):
             self._editing_custom_input = True
         elif self._is_multi_select():
             q_idx = self.current_question_idx
-            checked = self._checked_indices.get(q_idx, set())
-            if not checked:
-                return  # nothing checked — ignore Enter
-            options = self.questions[q_idx].get("options", [])
-            checked_values = [
-                options[i].get("value") for i in checked if i < len(options)
-            ]
-            self.selections[q_idx] = checked_values
+            selection = self._selected_multi_values(q_idx)
+            if not selection:
+                return  # nothing selected — ignore Enter
+            self.selections[q_idx] = selection
             self._advance_or_finish()
         else:
             options = self.questions[self.current_question_idx].get("options", [])

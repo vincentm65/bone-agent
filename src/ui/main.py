@@ -770,19 +770,25 @@ def main():
                             daemon=True,
                         )
                         agent_thread.start()
-                        raw_input = _prompt_with_erase_when_done(
-                            session,
-                            lambda: "",
-                            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
-                            inputhook=_create_agent_done_inputhook(
-                                completion_event,
-                                on_complete=lambda: _stop_progress_spinner(chat_manager),
-                            ),
-                        )
-                        _stop_progress_spinner(chat_manager)  # idempotent fallback
-                        safe_console.set_app(None)
-                        INPUT_BLOCKED['blocked'] = False
-                        _drain_stdin(session)
+                        try:
+                            raw_input = _prompt_with_erase_when_done(
+                                session,
+                                lambda: "",
+                                bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+                                inputhook=_create_agent_done_inputhook(
+                                    completion_event,
+                                    on_complete=lambda: _stop_progress_spinner(chat_manager),
+                                ),
+                            )
+                        except KeyboardInterrupt:
+                            _handle_ctrl_c_bg_prompt(
+                                chat_manager, session, safe_console,
+                                agent_thread, completion_event,
+                                cancel_msg="Swarm auto-turn cancelled.",
+                                idle_msg="Swarm auto-turn interrupted (Ctrl+C). Press Ctrl+C again to exit.",
+                            )
+                            continue
+                        _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
                     # Else: non-tools path.  Auto-turns need tools to process
                     # approvals and completions; skip with a warning if disabled.
                     else:

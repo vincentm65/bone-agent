@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Connection/read timeouts (seconds)
 _CONNECT_TIMEOUT = 10
-_READ_TIMEOUT = 300
+_READ_TIMEOUT = 600
 
 
 class StreamWrapper:

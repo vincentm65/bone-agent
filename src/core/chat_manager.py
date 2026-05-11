@@ -27,7 +27,6 @@ from utils.terminal_sanitize import SanitizedMessageList
 
 # Token counting constants
 MESSAGE_OVERHEAD_TOKENS = 4  # Approximate tokens for JSON structure: braces, quotes, colons, commas
-CHAR_BASED_OVERHEAD = 20    # Character overhead for JSON structure in character-based estimation
 
 # Action labels for context management notifications (used by ensure_context_fits)
 _ACTION_LABELS = {
@@ -35,6 +34,12 @@ _ACTION_LABELS = {
     "history_compaction": "compacted history",
     "emergency_truncation": "emergency truncation (oldest messages dropped)",
 }
+
+# Module-level cache for the tiktoken encoder (cl100k_base only).
+# If cl100k_base is unavailable (e.g. first-use download interrupted),
+# p50k_base is used temporarily without caching so cl100k_base is retried
+# on the next call.
+_tiktoken_encoder_cache = None
 
 class ChatManager:
     """Manages chat state, messages, and provider switching."""
@@ -227,6 +232,9 @@ class ChatManager:
         self._update_context_tokens()
         self.context_token_estimate = self.token_tracker.current_context_tokens
 
+        # Reset compaction cooldown baseline on fresh start / session reset.
+        self._reset_compaction_cooldown()
+
     def _build_system_prompt(self) -> str:
         """Build system prompt."""
         active_skills_section = render_active_skills_section(self.loaded_skills)
@@ -295,26 +303,12 @@ class ChatManager:
                 tools = TOOLS()
 
         if tools:
-            # Use character-based approximation for Anthropic (tiktoken doesn't support Claude)
-            if self.client.provider == "anthropic":
-                tools_json = json.dumps(tools)
-                tool_tokens = len(tools_json) // 4
-            else:
-                try:
-                    import tiktoken
-                    model = getattr(self.client, "model", "") or ""
-                    try:
-                        enc = tiktoken.encoding_for_model(model)
-                    except Exception:
-                        enc = tiktoken.get_encoding("cl100k_base")
-
-                    # Encode tools list as JSON (which is how it's sent to the API)
-                    tools_json = json.dumps(tools)
-                    tool_tokens = len(enc.encode(tools_json))
-                except Exception:
-                    # Fallback: character-based approximation
-                    tools_json = json.dumps(tools)
-                    tool_tokens = len(tools_json) // 4
+            # Serialize tools to JSON (the API payload form) and use the shared
+            # provider-aware estimator.  This is accurate for all providers
+            # (tiktoken is used when available, including as an approximation for
+            # Anthropic, with a conservative byte-aware fallback).
+            tools_json = json.dumps(tools)
+            tool_tokens = self._estimate_tokens_for_text(tools_json)
 
             total_tokens = message_tokens + tool_tokens
         else:
@@ -375,62 +369,87 @@ class ChatManager:
 
         return ''.join(p or '' for p in parts)
 
-    def _count_tokens(self, messages) -> int:
-        """Count tokens accurately using tiktoken for OpenAI, character-based for Anthropic.
+    # -- Payload-based token estimation helpers --------------------------------
 
-        Counts everything the AI receives:
-        - All message types: user, assistant, system, tool
-        - All fields: role, content, tool_calls (id, type, function, name, arguments)
-        - Tool messages: tool_call_id + content
+    @staticmethod
+    def _serialize_message_payload(msg) -> str:
+        """Serialize a message dict into a compact JSON string that approximates
+        the actual API payload structure.
+
+        Uses ``json.dumps(…, ensure_ascii=False, separators=(",", ":"),
+        default=str)`` so that field names, JSON structure, and escaping are
+        captured without inflating non-ASCII characters into ``\\uXXXX``.
 
         Args:
-            messages: List of messages to count tokens for
+            msg: Message dict.
 
         Returns:
-            int: Estimated token count
+            str: Compact JSON string of the message.
         """
-        # Use character-based approximation for Anthropic (tiktoken doesn't support Claude)
-        if self.client.provider == "anthropic":
-            return self._count_tokens_char_based(messages)
+        return json.dumps(msg, ensure_ascii=False, separators=(",", ":"), default=str)
 
+    @staticmethod
+    def _estimate_tokens_for_text(text: str) -> int:
+        """Conservative, provider-aware token estimator for arbitrary text.
+
+        Strategy:
+        1. Try *tiktoken* for all providers (including Anthropic as an
+           approximation — far safer than char÷4 for CJK/emoji).
+        2. Fallback: use ``max(len(text) // 4, len(text.encode("utf-8")) // 4)``
+           so that CJK/emoji bytes are never catastrophically undercounted.
+
+        The tiktoken encoder is cached at module level after the first
+        successful lookup so it is not recreated on every call.
+        """
+        global _tiktoken_encoder_cache
         try:
             import tiktoken
-            model = getattr(self.client, "model", "") or ""
-            try:
-                enc = tiktoken.encoding_for_model(model)
-            except Exception:
-                enc = tiktoken.get_encoding("cl100k_base")
-
-            # Collect text from all messages and encode
-            total = 0
-            for msg in messages:
-                text = self._collect_message_text(msg)
-                total += len(enc.encode(text))
-                total += MESSAGE_OVERHEAD_TOKENS
-
-            return total
-
+            if _tiktoken_encoder_cache is None:
+                try:
+                    _tiktoken_encoder_cache = tiktoken.get_encoding("cl100k_base")
+                except Exception as exc:
+                    logger.warning("cl100k_base encoder unavailable, trying p50k_base: %s", exc)
+                    try:
+                        enc = tiktoken.get_encoding("p50k_base")
+                        return len(enc.encode(text))  # use but don't cache
+                    except Exception:
+                        pass  # fall through to outer except → byte-aware fallback
+            return len(_tiktoken_encoder_cache.encode(text))
         except Exception:
-            # Fallback to character-based estimation
-            return self._count_tokens_char_based(messages)
+            # Conservative fallback: never undercount high-token-density text.
+            return max(len(text) // 4, len(text.encode("utf-8")) // 4)
 
-    def _count_tokens_char_based(self, messages) -> int:
-        """Count tokens using character-based approximation (for Anthropic).
+    @classmethod
+    def _estimate_tokens_for_payload(cls, payload: str) -> int:
+        """Estimate tokens for a pre-serialized JSON payload string.
 
-        Uses ~4 characters per token as a rough estimate.
+        Thin wrapper around :meth:`_estimate_tokens_for_text` kept for
+        readability at call-sites.
+        """
+        return cls._estimate_tokens_for_text(payload)
+
+    def _count_tokens(self, messages) -> int:
+        """Count tokens by serializing each message to its API payload form.
+
+        Uses :meth:`_serialize_message_payload` + :meth:`_estimate_tokens_for_payload`
+        so that structure, field names, and non-ASCII content are all accounted for.
+        Works for all providers — tiktoken is used when available (including as an
+        approximation for Anthropic), with a conservative byte-aware fallback.
 
         Args:
-            messages: List of messages to count tokens for
+            messages: List of messages to count tokens for.
 
         Returns:
-            int: Estimated token count
+            int: Estimated token count.
         """
         total = 0
         for msg in messages:
-            text = self._collect_message_text(msg)
-            total += (len(text) + CHAR_BASED_OVERHEAD) // 4
-
+            payload = self._serialize_message_payload(msg)
+            total += self._estimate_tokens_for_payload(payload)
+            total += MESSAGE_OVERHEAD_TOKENS
         return total
+
+
 
 
     def _build_summary_prompt(self, messages) -> str:
@@ -750,11 +769,11 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             return f"{first}, and {parts[-1]}."
 
     def _estimate_message_tokens(self, msg) -> int:
-        """Lightweight per-message token estimate for boundary calculation.
+        """Per-message token estimate for boundary calculation.
 
-        Uses character-based estimation (~4 chars/token) to avoid the overhead
-        of full tiktoken encoding during boundary walks. Good enough for
-        determining where to split the uncompacted tail.
+        Serializes the message to its API payload form and uses the shared
+        provider-aware estimator so that structure, field names, and non-ASCII
+        content are all accounted for. Used during compaction boundary walks.
 
         Args:
             msg: Message dict
@@ -762,8 +781,8 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         Returns:
             Estimated token count for this message
         """
-        text = self._collect_message_text(msg)
-        return (len(text) + CHAR_BASED_OVERHEAD) // 4
+        payload = self._serialize_message_payload(msg)
+        return self._estimate_tokens_for_payload(payload)
 
     def _find_in_flight_boundary(self):
         """Find the index where in-flight tool blocks begin.
@@ -851,6 +870,27 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
         return boundary
 
+    def _mark_compaction_baseline(self):
+        """Record current context tokens as the post-compaction cooldown baseline.
+
+        Used by the growth gate in compact_tool_results() to prevent
+        back-to-back compactions that churn the message prefix and defeat
+        ephemeral prompt caching.  Call after any successful
+        context-reduction event (tool compaction, history compaction).
+
+        Callers must ensure token tracking is up-to-date (via
+        ``_update_context_tokens()``) before calling this method.
+        """
+        self._tokens_at_last_compaction = self.token_tracker.current_context_tokens
+
+    def _reset_compaction_cooldown(self):
+        """Reset the compaction cooldown baseline (e.g. on session reset).
+
+        Sets the baseline to 0 so the growth gate will accept the first
+        post-reset compaction once the warmup threshold is crossed.
+        """
+        self._tokens_at_last_compaction = 0
+
     def compact_tool_results(self, skip_token_update=False,
                               uncompacted_tail_tokens=None, min_tool_blocks=None):
         """Replace completed tool-result blocks with summaries using token-budget tail.
@@ -900,9 +940,15 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
             # Growth gate: skip if context hasn't grown enough since last compaction.
             if self._tokens_at_last_compaction > 0:
-                growth = current - self._tokens_at_last_compaction
-                if growth < tc.compaction_growth_threshold:
-                    return
+                # Defensive: if the baseline is stale (e.g. history compaction
+                # reduced context below it), reset to current so growth is
+                # measured from an accurate anchor going forward.
+                if current < self._tokens_at_last_compaction:
+                    self._tokens_at_last_compaction = current
+                else:
+                    growth = current - self._tokens_at_last_compaction
+                    if growth < tc.compaction_growth_threshold:
+                        return
 
         # Find completed tool-result blocks
         blocks = self._find_tool_blocks()
@@ -990,12 +1036,8 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         self.messages = SanitizedMessageList(new_messages)
         if not skip_token_update:
             self._update_context_tokens()
-
-        # Update cooldown gate with post-compaction token count.
-        # Force a token update regardless of skip_token_update so the
-        # gate always has an accurate baseline.
-        self._update_context_tokens()
-        self._tokens_at_last_compaction = self.token_tracker.current_context_tokens
+            # Update cooldown gate with post-compaction token count.
+            self._mark_compaction_baseline()
 
     # ===== AI-Based History Compaction =====
 
@@ -1135,6 +1177,10 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
         # Update context estimate (keeps cumulative API usage intact)
         self.context_token_estimate = tokens_after
+
+        # Refresh compaction cooldown baseline so future routine
+        # tool compactions anchor growth from this new, lower context.
+        self._mark_compaction_baseline()
 
         # Notify only for manual trigger
         if console and trigger == "manual":

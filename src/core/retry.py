@@ -7,8 +7,17 @@ from exceptions import LLMResponseError
 # Timeout retry constants
 RETRY_MAX_ATTEMPTS = 3
 RETRY_DELAYS = (2, 4)  # exponential backoff per attempt
-RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+# Full keyword list for errors without HTTP status codes (network-level exceptions)
 RETRYABLE_ERROR_KEYWORDS = (
+    "timeout", "timed out", "connectionerror", "connection refused",
+    "connection reset", "connection aborted", "name or service not known",
+    "network error", "network unreachable", "no route to host", "eof occurred",
+)
+# Stricter keyword list for errors that DO have an unrecognized status code.
+# Excludes generic phrases like "network error" that may appear in arbitrary
+# HTTP response bodies, while keeping transport-level signals.
+RETRYABLE_STATUS_ERROR_KEYWORDS = (
     "timeout", "timed out", "connectionerror", "connection refused",
     "connection reset", "connection aborted", "name or service not known",
     "network unreachable", "no route to host", "eof occurred",
@@ -19,13 +28,16 @@ NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 405, 422}
 def is_retryable_error(error):
     """Check if an LLMConnectionError is retryable.
 
-    Retryable conditions:
-    - Timeout or connection-level errors (network unreachable, DNS failure, etc.)
-    - HTTP 429 (rate limited), 502, 503, 504 (server errors)
-
-    Non-retryable conditions:
-    - HTTP 400, 401, 403, 405, 422 (client/auth errors)
-    - LLMResponseError (malformed response data)
+    Decision order:
+    1. LLMResponseError → never retryable (parsing failure).
+    2. Explicit HTTP status code:
+       - Non-retryable set (400, 401, 403, 405, 422) → False.
+       - Retryable set (429, 500, 502, 503, 504) → True.
+    3. Unrecognized status code: keyword-match against the stricter
+       RETRYABLE_STATUS_ERROR_KEYWORDS to avoid false positives from
+       generic phrases like "network error" in response bodies.
+    4. No status code (pure network/transport error): keyword-match
+       against the full RETRYABLE_ERROR_KEYWORDS.
 
     Args:
         error: Exception instance (typically LLMConnectionError)
@@ -45,11 +57,17 @@ def is_retryable_error(error):
             return False
         if status_code in RETRYABLE_STATUS_CODES:
             return True
+        # Unrecognized status code: use stricter keywords to avoid
+        # false positives from generic phrases in response bodies.
+        keywords = RETRYABLE_STATUS_ERROR_KEYWORDS
+    else:
+        # No status code: likely a transport-level error; use full keywords.
+        keywords = RETRYABLE_ERROR_KEYWORDS
 
     # For network-level errors, check the original error message
     original_error = details.get("original_error", "")
     original_lower = original_error.lower()
-    return any(keyword in original_lower for keyword in RETRYABLE_ERROR_KEYWORDS)
+    return any(keyword in original_lower for keyword in keywords)
 
 
 def wait_with_cancel_message(console, delay_seconds):
