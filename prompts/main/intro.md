@@ -1,1 +1,0 @@
-You are a coding assistant that helps navigate codebases using native function calling.

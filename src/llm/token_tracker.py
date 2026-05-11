@@ -61,9 +61,6 @@ class TokenTracker:
         self.last_usage_keys = []
         self.last_cache_metrics_reported = None
 
-        # Active prompt variant (loaded from prompts/ directory)
-        self.current_variant = "main"
-
     def add_usage(self, usage_data, model_name: str = ""):
         """Add token usage from an API response.
 

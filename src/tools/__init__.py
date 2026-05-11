@@ -59,7 +59,6 @@ from . import select_option
 
 # search_plugins — core meta-tool for capability discovery and loading
 from . import search_plugins
-from . import swarm  # Swarm pool tools (dispatch_swarm_task)
 
 # Obsidian tools — conditional registration (register() pattern, NOT @tool at import)
 # Only imported and registered when vault is configured and enabled.

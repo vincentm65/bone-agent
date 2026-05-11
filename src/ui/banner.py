@@ -50,7 +50,10 @@ def display_startup_banner(approve_mode: str, *, clear_screen: bool = False):
     provider_config = config.get_provider_config(config.LLM_PROVIDER)
     if config.LLM_PROVIDER == "local":
         model_path = provider_config.get("model") or ""
-        model_name = os.path.basename(model_path) if model_path else "None"
+        if model_path:
+            model_name = os.path.basename(model_path)
+        else:
+            model_name = config.detect_local_model() or "None"
     else:
         model_name = provider_config.get("model") or "None"
 

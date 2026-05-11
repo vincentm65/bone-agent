@@ -2,8 +2,7 @@
 
 # Modular prompt composition for native function calling
 #
-# All prompt sections are loaded from file-based variants under prompts/<variant>/.
-# Each variant directory contains individual .md files for each section.
+# Prompt sections are loaded from prompts/micro/*.md files.
 # Section ordering is defined programmatically in _main_sections() and
 # _sub_agent_sections() — no manifest files needed.
 
@@ -187,13 +186,12 @@ def _build_memory_section() -> str | None:
         return None
 
 
-def _build_vault_section(variant: str = "main") -> str | None:
+def _build_vault_section() -> str | None:
     """Build the Obsidian vault section for the system prompt.
 
-    Loads obsidian.md from prompts/<variant>/ and substitutes dynamic values
+    Loads obsidian.md from prompts/micro/ and substitutes dynamic values
     (vault root, project folder, excluded folders) using string.Template.
-    If project exists, also loads and appends obsidian_project.md from the
-    same variant directory.
+    If project exists, also loads and appends obsidian_project.md.
 
     Returns None if vault is not active.
     """
@@ -228,8 +226,8 @@ def _build_vault_section(variant: str = "main") -> str | None:
 
     excluded = obsidian_settings.exclude_folders
 
-    # Load base obsidian template from variant directory
-    base_path = _PROMPTS_DIR / variant / "obsidian.md"
+    # Load base obsidian template
+    base_path = _PROMPTS_DIR / "micro" / "obsidian.md"
     if not base_path.is_file():
         logger.warning(
             "Obsidian template not found at %s — vault section omitted", base_path
@@ -253,7 +251,7 @@ def _build_vault_section(variant: str = "main") -> str | None:
 
     # Append project-specific section if project exists
     if project_exists:
-        project_path = _PROMPTS_DIR / variant / "obsidian_project.md"
+        project_path = _PROMPTS_DIR / "micro" / "obsidian_project.md"
         if project_path.is_file():
             project_content = project_path.read_text(encoding="utf-8").strip()
             formatted = formatted + "\n\n" + project_content
@@ -276,22 +274,13 @@ def _build_context_section() -> str:
     )
 
 
-def _static(variant: str, name: str) -> str:
-    """Load a static .md section from prompts/<variant>/."""
-    path = _PROMPTS_DIR / variant / name
+def _static(name: str) -> str:
+    """Load a static .md section from prompts/micro/."""
+    path = _PROMPTS_DIR / "micro" / name
     if path.is_file():
         return path.read_text(encoding="utf-8").strip()
     logger.warning("Section file not found: %s — prompt section '%s' omitted", path, name)
     return ""
-
-
-def _resolve_variant() -> str:
-    """Resolve the prompt variant from settings, falling back to 'main'."""
-    try:
-        from utils.settings import prompt_settings
-        return prompt_settings.variant
-    except Exception:
-        return "main"
 
 
 def _should_include_section(section_key: str) -> bool:
@@ -331,25 +320,7 @@ def _build_prompt(sections: list[tuple[str, callable]]) -> str:
     return "\n\n".join(_build_prompt_to_list(sections))
 
 
-def _variant_available(variant: str) -> bool:
-    """Check if a variant directory exists.
-
-    Raises OSError if directory permissions prevent access.
-    """
-    return (_PROMPTS_DIR / variant).is_dir()
-
-
-def _list_variants() -> list[str]:
-    """List available prompt variants (directories under prompts/)."""
-    if not _PROMPTS_DIR.is_dir():
-        return []
-    return sorted(
-        d.name for d in _PROMPTS_DIR.iterdir()
-        if d.is_dir()
-    )
-
-
-def _main_sections(variant: str) -> list[tuple[str, callable]]:
+def _main_sections() -> list[tuple[str, callable]]:
     """Return (key, content_fn) pairs for the main agent prompt.
 
     Order in this list = order in the final prompt.
@@ -357,107 +328,69 @@ def _main_sections(variant: str) -> list[tuple[str, callable]]:
     live here — single source of truth for ordering.
     """
     sections = [
-        ("intro", lambda: _static(variant, "intro.md")),
+        ("intro", lambda: _static("intro.md")),
         ("context", _build_context_section),
-        ("tone_and_style", lambda: _static(variant, "tone_and_style.md")),
-        ("communication_style", lambda: _static(variant, "communication_style.md")),
-        ("trust_subagent_context", lambda: _static(variant, "trust_subagent_context.md")),
-        ("context_reliability", lambda: _static(variant, "context_reliability.md")),
-        ("skills", lambda: _static(variant, "skills.md")),
-    ]
-
-    if variant != "micro":
-        sections.append(("cron", lambda: _static(variant, "cron.md")))
-
-    sections.extend([
-        ("conversational_tool_calling", lambda: _static(variant, "conversational_tool_calling.md")),
-        ("professional_objectivity", lambda: _static(variant, "professional_objectivity.md")),
-        ("think_before_acting", lambda: _static(variant, "think_before_acting.md")),
-        ("batch_independent_calls", lambda: _static(variant, "batch_independent_calls.md")),
-        ("code_references", lambda: _static(variant, "code_references.md")),
-        ("exploration_pattern", lambda: _static(variant, "exploration_pattern.md")),
-        ("targeted_searching", lambda: _static(variant, "targeted_searching.md")),
-        ("editing_pattern", lambda: _static(variant, "editing_pattern.md")),
-        ("task_lists_pattern", lambda: _static(variant, "task_lists_pattern.md")),
-        ("casual_interactions", lambda: _static(variant, "casual_interactions.md")),
-        ("ask_questions", lambda: _static(variant, "ask_questions.md")),
-        ("tool_preferences", lambda: _static(variant, "tool_preferences.md")),
-        ("when_to_use_sub_agent", lambda: _static(variant, "when_to_use_sub_agent.md")),
-        ("error_handling", lambda: _static(variant, "error_handling.md")),
-        ("temp_folder", lambda: _static(variant, "temp_folder.md")),
+        ("tone_and_style", lambda: _static("tone_and_style.md")),
+        ("communication_style", lambda: _static("communication_style.md")),
+        ("trust_subagent_context", lambda: _static("trust_subagent_context.md")),
+        ("context_reliability", lambda: _static("context_reliability.md")),
+        ("skills", lambda: _static("skills.md")),
+        ("cron", lambda: _static("cron.md")),
+        ("conversational_tool_calling", lambda: _static("conversational_tool_calling.md")),
+        ("professional_objectivity", lambda: _static("professional_objectivity.md")),
+        ("think_before_acting", lambda: _static("think_before_acting.md")),
+        ("batch_independent_calls", lambda: _static("batch_independent_calls.md")),
+        ("code_references", lambda: _static("code_references.md")),
+        ("exploration_pattern", lambda: _static("exploration_pattern.md")),
+        ("targeted_searching", lambda: _static("targeted_searching.md")),
+        ("editing_pattern", lambda: _static("editing_pattern.md")),
+        ("task_lists_pattern", lambda: _static("task_lists_pattern.md")),
+        ("casual_interactions", lambda: _static("casual_interactions.md")),
+        ("ask_questions", lambda: _static("ask_questions.md")),
+        ("tool_preferences", lambda: _static("tool_preferences.md")),
+        ("when_to_use_sub_agent", lambda: _static("when_to_use_sub_agent.md")),
+        ("error_handling", lambda: _static("error_handling.md")),
+        ("temp_folder", lambda: _static("temp_folder.md")),
         ("memory_system", _build_memory_section),
-        ("obsidian", lambda: _build_vault_section(variant)),
+        ("obsidian", _build_vault_section),
         ("mode", lambda: MODE_SECTION),
-    ])
+    ]
 
     return sections
 
 
-def _sub_agent_sections(variant: str) -> list[tuple[str, callable]]:
+def _sub_agent_sections() -> list[tuple[str, callable]]:
     """Return (key, content_fn) pairs for the sub-agent prompt.
 
-    The micro variant has a smaller set of sections than main.
     response_format is placed explicitly after code_references.
     """
-    # Base sections shared across all variants
-    base = [
-        ("intro", lambda: _static(variant, "intro.md")),
+    return [
+        ("intro", lambda: _static("intro.md")),
         ("context", _build_context_section),
-        ("tone_and_style", lambda: _static(variant, "tone_and_style.md")),
-        ("communication_style", lambda: _static(variant, "communication_style.md")),
+        ("tone_and_style", lambda: _static("tone_and_style.md")),
+        ("communication_style", lambda: _static("communication_style.md")),
+        ("trust_subagent_context", lambda: _static("trust_subagent_context.md")),
+        ("context_reliability", lambda: _static("context_reliability.md")),
+        ("skills", lambda: _static("skills.md")),
+        ("exploration_pattern", lambda: _static("exploration_pattern.md")),
+        ("targeted_searching", lambda: _static("targeted_searching.md")),
+        ("tool_preferences", lambda: _static("tool_preferences.md")),
     ]
 
-    # Micro variant has a different section set (no conversational_tool_calling,
-    # no professional_objectivity, no think_before_acting, etc.)
-    if variant == "micro":
-        middle = [
-            ("trust_subagent_context", lambda: _static(variant, "trust_subagent_context.md")),
-            ("context_reliability", lambda: _static(variant, "context_reliability.md")),
-            ("skills", lambda: _static(variant, "skills.md")),
-            ("exploration_pattern", lambda: _static(variant, "exploration_pattern.md")),
-            ("targeted_searching", lambda: _static(variant, "targeted_searching.md")),
-            ("tool_preferences", lambda: _static(variant, "tool_preferences.md")),
-        ]
-    else:
-        middle = [
-            ("skills", lambda: _static(variant, "skills.md")),
-            ("conversational_tool_calling", lambda: _static(variant, "conversational_tool_calling.md")),
-            ("professional_objectivity", lambda: _static(variant, "professional_objectivity.md")),
-            ("think_before_acting", lambda: _static(variant, "think_before_acting.md")),
-            ("batch_independent_calls", lambda: _static(variant, "batch_independent_calls.md")),
-            ("code_references", lambda: _static(variant, "code_references.md")),
-            ("response_format", lambda: SUB_AGENT_SECTIONS["response_format"]),
-            ("exploration_pattern", lambda: _static(variant, "exploration_pattern.md")),
-            ("targeted_searching", lambda: _static(variant, "targeted_searching.md")),
-            ("casual_interactions", lambda: _static(variant, "casual_interactions.md")),
-            ("temp_folder", lambda: _static(variant, "temp_folder.md")),
-        ]
 
-    return base + middle
-
-
-def build_system_prompt(variant: str | None = None, active_skills_section: str = "") -> str:
+def build_system_prompt(active_skills_section: str = "") -> str:
     """Build system prompt for main agent.
 
-    Loads section content from prompts/<variant>/. Order is defined by
-    _main_sections(). Raises FileNotFoundError if variant directory is missing.
+    Loads section content from prompts/micro/. Order is defined by
+    _main_sections().
 
     Args:
-        variant: Variant name (e.g. 'main', 'micro').
-            If None, reads from settings.
         active_skills_section: Optional rendered active-skills block to append.
 
     Returns:
         Complete system prompt string
     """
-    if variant is None:
-        variant = _resolve_variant()
-    if not _variant_available(variant):
-        raise FileNotFoundError(
-            f"Prompt variant '{variant}' not found: "
-            f"{_PROMPTS_DIR / variant} does not exist"
-        )
-    result = _build_prompt(_main_sections(variant))
+    result = _build_prompt(_main_sections())
     if active_skills_section.strip():
         result += "\n\n" + active_skills_section.strip()
     return result
@@ -474,14 +407,7 @@ def build_sub_agent_prompt(sub_agent_type: str = "research", soft_limit_tokens: 
     Returns:
         Complete system prompt string
     """
-    variant = _resolve_variant()
-    if not _variant_available(variant):
-        raise FileNotFoundError(
-            f"Sub-agent prompt variant '{variant}' not found: "
-            f"{_PROMPTS_DIR / variant} does not exist"
-        )
-
-    result = _build_prompt_to_list(_sub_agent_sections(variant))
+    result = _build_prompt_to_list(_sub_agent_sections())
 
     # Append parameterized sections (always last)
     if soft_limit_tokens is not None and hard_limit_tokens is not None:
@@ -509,57 +435,48 @@ _ADMIN_SUPPRESS_SECTIONS = {"editing_pattern", "task_lists_pattern", "temp_folde
 _WORKER_SUPPRESS_SECTIONS = {"mode", "when_to_use_sub_agent"}
 
 
-def _admin_sections(variant: str) -> list[tuple[str, callable]]:
+def _admin_sections() -> list[tuple[str, callable]]:
     """Return main sections for swarm admin prompt, suppressing edit/task/temp sections.
 
     Keeps search/research guidance active so the admin can investigate
     before writing worker prompts.
     """
-    all_sections = _main_sections(variant)
+    all_sections = _main_sections()
     return [
         (key, fn) for key, fn in all_sections
         if key not in _ADMIN_SUPPRESS_SECTIONS
     ]
 
 
-def _worker_sections(variant: str) -> list[tuple[str, callable]]:
+def _worker_sections() -> list[tuple[str, callable]]:
     """Return main sections for swarm worker prompt, suppressing mode and sub-agent guidance.
 
     Workers are leaf agents — they should not see edit-mode instructions
     or sub-agent delegation guidance.
     """
-    all_sections = _main_sections(variant)
+    all_sections = _main_sections()
     return [
         (key, fn) for key, fn in all_sections
         if key not in _WORKER_SUPPRESS_SECTIONS
     ]
 
 
-def build_swarm_admin_prompt(variant: str | None = None, active_skills_section: str = "") -> str:
+def build_swarm_admin_prompt(active_skills_section: str = "") -> str:
     """Build system prompt for swarm admin (orchestrator mode).
 
     Reuses main sections but suppresses editing/task-list/temp-folder
     guidance. Appends swarm_admin_mode.md as the final mode section.
 
     Args:
-        variant: Variant name ('main' or 'micro'). Defaults to settings.
         active_skills_section: Optional rendered active-skills block.
 
     Returns:
         Complete system prompt string
     """
-    if variant is None:
-        variant = _resolve_variant()
-    if not _variant_available(variant):
-        raise FileNotFoundError(
-            f"Prompt variant '{variant}' not found: "
-            f"{_PROMPTS_DIR / variant} does not exist"
-        )
-
-    result = _build_prompt(_admin_sections(variant))
+    result = _build_prompt(_admin_sections())
 
     # Append the swarm admin mode section as the final section
-    mode_content = _static(variant, "swarm_admin_mode.md")
+    mode_content = _static("swarm_admin_mode.md")
     if mode_content:
         result += "\n\n" + mode_content
 
@@ -582,31 +499,20 @@ def build_swarm_admin_prompt(variant: str | None = None, active_skills_section: 
     return result
 
 
-def build_swarm_worker_prompt(variant: str | None = None) -> str:
+def build_swarm_worker_prompt() -> str:
     """Build system prompt for swarm worker.
 
     Reuses main sections with mode and sub-agent guidance suppressed
     (workers are leaf agents). Appends swarm_worker_mode.md as the
     final mode section.
 
-    Args:
-        variant: Variant name ('main' or 'micro'). Defaults to settings.
-
     Returns:
         Complete system prompt string
     """
-    if variant is None:
-        variant = _resolve_variant()
-    if not _variant_available(variant):
-        raise FileNotFoundError(
-            f"Prompt variant '{variant}' not found: "
-            f"{_PROMPTS_DIR / variant} does not exist"
-        )
-
-    result = _build_prompt(_worker_sections(variant))
+    result = _build_prompt(_worker_sections())
 
     # Append the swarm worker mode section as the final section
-    mode_content = _static(variant, "swarm_worker_mode.md")
+    mode_content = _static("swarm_worker_mode.md")
     if mode_content:
         result += "\n\n" + mode_content
 

@@ -297,11 +297,7 @@ class AgenticOrchestrator:
                     tool for tool in tools
                     if tool.get("function", {}).get("name") not in admin_blocked_tools
                 ]
-            blocked = ADMIN_SWARM_TOOL_NAMES
-            return [
-                tool for tool in tools
-                if tool.get("function", {}).get("name") not in blocked
-            ]
+            return tools
 
         effective_names = set(allowed_tools)
         if allow_active_plugins:

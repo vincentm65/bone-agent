@@ -227,40 +227,22 @@ class ChatManager:
         self._update_context_tokens()
         self.context_token_estimate = self.token_tracker.current_context_tokens
 
-    def _build_system_prompt(self, variant: str | None = None) -> str:
-        """Build system prompt.
-
-        Args:
-            variant: Prompt variant name (e.g. 'main', 'micro').
-                     If None, reads from prompt_settings.
-        """
-        if variant is None:
-            from utils.settings import prompt_settings
-            variant = prompt_settings.variant
+    def _build_system_prompt(self) -> str:
+        """Build system prompt."""
         active_skills_section = render_active_skills_section(self.loaded_skills)
         if self.swarm_admin_mode:
-            return build_swarm_admin_prompt(variant, active_skills_section=active_skills_section)
-        return build_system_prompt(variant, active_skills_section=active_skills_section)
+            return build_swarm_admin_prompt(active_skills_section=active_skills_section)
+        return build_system_prompt(active_skills_section=active_skills_section)
 
-    def update_system_prompt(self, variant: str | None = None):
-        """Rebuild system prompt in-place (e.g. after hotswap or session reset).
-
-        Args:
-            variant: Prompt variant to use. If None, keeps current variant.
-                     Updates token_tracker.current_variant.
-        """
+    def update_system_prompt(self):
+        """Rebuild system prompt in-place (e.g. after hotswap or session reset)."""
         if not self.messages:
             raise RuntimeError("Cannot update system prompt: messages array is empty")
 
         if self.messages[0]["role"] != "system":
             raise RuntimeError(f"Cannot update system prompt: messages[0] has role '{self.messages[0]['role']}', expected 'system'")
 
-        if variant is None:
-            from utils.settings import prompt_settings
-            variant = prompt_settings.variant
-
-        self.messages[0]["content"] = self._build_system_prompt(variant)
-        self.token_tracker.current_variant = variant
+        self.messages[0]["content"] = self._build_system_prompt()
         self._update_context_tokens()
 
     def _load_agents_md(self) -> tuple[str, str]:

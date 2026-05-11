@@ -37,7 +37,7 @@ class SubAgentCancelled(Exception):
     pass
 
 
-def _format_messages_dump(messages) -> str:
+def _format_messages_dump(messages, reason: str = "Hard Limit Reached") -> str:
     """Format sub-agent message history as a markdown dump.
 
     Args:
@@ -47,9 +47,11 @@ def _format_messages_dump(messages) -> str:
         Markdown string with the full conversation context.
     """
     lines = [
-        "## Sub-Agent Context Dump (Hard Limit Reached)",
+        f"## Task too large for subagent, offloading to main agent ({reason})",
         "",
-        "The sub-agent exceeded its hard token limit. Below is the full, unabridged context of its investigation. No summary was produced.",
+        "The sub-agent could not safely continue. Below is the full, unabridged conversation history from its investigation so the main agent can pick up where it left off.",
+        "",
+        "Main agent instruction: Continue researching if more information is required to complete the task. If the available context is enough, answer now.",
         "",
         "---",
         "",
@@ -71,10 +73,6 @@ def _format_messages_dump(messages) -> str:
             lines.append(f"### Message {i} — {role}")
 
         if content:
-            # Truncate large content to avoid blowing out the main agent's context
-            max_chars = 4000
-            if len(content) > max_chars:
-                content = content[:max_chars] + f"\n\n... (truncated, {len(content) - max_chars:,} chars omitted)"
             lines.append(content)
         lines.append("")
     return "\n".join(lines)
@@ -442,8 +440,13 @@ def run_sub_agent(
     tt = temp_chat_manager.token_tracker
     delta_cost = tt.total_actual_cost + tt.total_estimated_cost
 
+    context_dumped = False
     if hard_limit_exceeded and sub_agent_settings.dump_context_on_hard_limit:
-        result = _format_messages_dump(temp_chat_manager.messages)
+        result = _format_messages_dump(temp_chat_manager.messages, "Hard Limit Reached")
+        context_dumped = True
+    elif billed_limit_exceeded and sub_agent_settings.dump_context_on_hard_limit:
+        result = _format_messages_dump(temp_chat_manager.messages, "Token Budget Exhausted")
+        context_dumped = True
     else:
         # Extract final response (last assistant message with content)
         final_content = ""
@@ -485,4 +488,5 @@ def run_sub_agent(
         "billed_limit_exceeded": billed_limit_exceeded,
         "billed_hard_limit_tokens": sub_agent_settings.billed_hard_limit_tokens,
         "billed_total_tokens": tt.conv_total_tokens,
+        "context_dumped": context_dumped,
     }

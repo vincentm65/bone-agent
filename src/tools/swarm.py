@@ -1,9 +1,15 @@
-"""Swarm pool tools for admin agent task dispatch."""
+"""Swarm pool tools for admin agent task dispatch.
+
+Tools are NOT registered at import time — they're registered on demand
+via register() when swarm admin mode activates, and unregistered via
+unregister() when the swarm closes. This avoids ~990 tokens of schema
+overhead in normal (non-swarm) sessions.
+"""
 
 from pathlib import Path
 from typing import Any, List, Optional
 
-from .helpers.base import tool
+from .helpers.base import tool, ToolRegistry
 
 ADMIN_SWARM_TOOL_NAMES = frozenset({"dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "spawn_swarm_worker"})
 
@@ -20,56 +26,6 @@ def _require_swarm_admin(chat_manager: Any) -> tuple[bool, str]:
     return True, ""
 
 
-@tool(
-    name="dispatch_swarm_task",
-    description=(
-        "Dispatch a task to workers in an active swarm pool. "
-        "Only works when the admin agent is in swarm admin mode "
-        "(after starting a swarm with the swarm protocol). "
-        "The task will be queued or dispatched to an idle worker. "
-        "Returns task_id, status, assigned agent (or queued state), write scope, and prompt sent."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "description": "The task prompt to send to a worker. "
-                "Describe what the worker should do.",
-            },
-            "write_scope": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "List of file paths the worker is expected to edit or create. "
-                "Used for write-scope validation on the worker side.",
-            },
-            "plan_index": {
-                "type": "integer",
-                "description": "Zero-based index into the task list plan that this dispatch corresponds to. Used for status bar tracking.",
-            },
-            "activity_label": {
-                "type": "string",
-                "description": "A short 3-6 word label describing what the worker will be doing. "
-                "Displayed in the toolbar instead of the task ID. "
-                "Examples: 'fixing login redirect', 'adding pagination to API', 'refactoring auth module'.",
-            },
-            "task_type": {
-                "type": "string",
-                "enum": ["implementation", "research"],
-                "description": (
-                    "Type of task being dispatched. "
-                    "'research' tasks are read-only — workers explore the codebase and report findings "
-                    "with file paths, line numbers, and architecture summaries. "
-                    "'implementation' tasks (default) may edit files within the declared write scope."
-                ),
-            },
-        },
-        "required": ["prompt"],
-    },
-    tier="core",
-    tags=["swarm", "pool", "admin", "dispatch"],
-    category="swarm",
-)
 def dispatch_swarm_task(
     prompt: str,
     write_scope: Optional[List[str]] = None,
@@ -149,40 +105,6 @@ def dispatch_swarm_task(
     return "\n".join(parts)
 
 
-@tool(
-    name="handle_approval",
-    description=(
-        "Approve or deny a pending worker command or filesystem access request that is waiting for admin approval. "
-        "Only works when the admin agent is in swarm admin mode. "
-        "Use this when a worker has requested approval to execute a command or receive full filesystem access for its session. "
-        "Set approved=True to approve, approved=False to deny (reason required for denial)."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "task_id": {
-                "type": "string",
-                "description": "The task ID associated with the pending approval.",
-            },
-            "call_id": {
-                "type": "string",
-                "description": "The pending approval call ID to approve or deny.",
-            },
-            "approved": {
-                "type": "boolean",
-                "description": "True to approve the command, False to deny it.",
-            },
-            "reason": {
-                "type": "string",
-                "description": "Reason for the decision. Required for denials, optional for approvals.",
-            },
-        },
-        "required": ["task_id", "call_id", "approved"],
-    },
-    tier="core",
-    tags=["swarm", "pool", "admin", "approval"],
-    category="swarm",
-)
 def handle_approval(
     task_id: str,
     call_id: str,
@@ -225,30 +147,6 @@ def handle_approval(
             return f"exit_code=1\nNo pending approval found for {task_id}/{call_id}."
 
 
-@tool(
-    name="kill_swarm_worker",
-    description=(
-        "Permanently kill and remove a worker from the swarm pool. "
-        "Use when a worker is rogue, stuck, or needs to be forcefully stopped — "
-        "the worker is removed immediately, pending approvals are cancelled, "
-        "and its active task (if any) is marked killed. "
-        "The worker cannot rejoin unless a new process is started manually. "
-        "Only works when the admin agent is in swarm admin mode."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "worker_id": {
-                "type": "string",
-                "description": "The worker ID to permanently kill and remove from the pool.",
-            },
-        },
-        "required": ["worker_id"],
-    },
-    tier="core",
-    tags=["swarm", "pool", "admin", "kill"],
-    category="swarm",
-)
 def kill_swarm_worker(
     worker_id: str,
     chat_manager: Any = None,
@@ -273,33 +171,6 @@ def kill_swarm_worker(
         return f"exit_code=1\nWorker {worker_id} not found in the swarm pool."
 
 
-@tool(
-    name="spawn_swarm_worker",
-    description=(
-        "Spawn new terminal windows that launch bone workers and join the swarm. "
-        "Only works when the admin agent is in swarm admin mode. "
-        "Each spawned terminal opens a new bone process in worker mode that "
-        "connects to the swarm server automatically."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "count": {
-                "type": "integer",
-                "description": "Number of worker terminals to spawn. Default 1.",
-            },
-            "profile": {
-                "type": "string",
-                "description": "Worker profile name to use (from ~/.bone/worker_profiles/). "
-                "The profile sets provider, model, and display_name for the worker.",
-            },
-        },
-        "required": [],
-    },
-    tier="core",
-    tags=["swarm", "pool", "admin", "spawn"],
-    category="swarm",
-)
 def spawn_swarm_worker(
     count: int = 1,
     profile: Optional[str] = None,
@@ -345,3 +216,167 @@ def spawn_swarm_worker(
         for err in errors:
             parts.append(f"  {err}")
     return "\n".join(parts)
+
+
+# =============================================================================
+# On-demand registration / unregistration
+# =============================================================================
+
+_SWARM_TOOL_DEFS = [
+    {
+        "name": "dispatch_swarm_task",
+        "fn": dispatch_swarm_task,
+        "description": (
+            "Dispatch a task to workers in an active swarm pool. "
+            "Only works when the admin agent is in swarm admin mode "
+            "(after starting a swarm with the swarm protocol). "
+            "The task will be queued or dispatched to an idle worker. "
+            "Returns task_id, status, assigned agent (or queued state), write scope, and prompt sent."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "The task prompt to send to a worker. "
+                    "Describe what the worker should do.",
+                },
+                "write_scope": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of file paths the worker is expected to edit or create. "
+                    "Used for write-scope validation on the worker side.",
+                },
+                "plan_index": {
+                    "type": "integer",
+                    "description": "Zero-based index into the task list plan that this dispatch corresponds to. Used for status bar tracking.",
+                },
+                "activity_label": {
+                    "type": "string",
+                    "description": "A short 3-6 word label describing what the worker will be doing. "
+                    "Displayed in the toolbar instead of the task ID. "
+                    "Examples: 'fixing login redirect', 'adding pagination to API', 'refactoring auth module'.",
+                },
+                "task_type": {
+                    "type": "string",
+                    "enum": ["implementation", "research"],
+                    "description": (
+                        "Type of task being dispatched. "
+                        "'research' tasks are read-only — workers explore the codebase and report findings "
+                        "with file paths, line numbers, and architecture summaries. "
+                        "'implementation' tasks (default) may edit files within the declared write scope."
+                    ),
+                },
+            },
+            "required": ["prompt"],
+        },
+        "tags": ["swarm", "pool", "admin", "dispatch"],
+        "category": "swarm",
+    },
+    {
+        "name": "handle_approval",
+        "fn": handle_approval,
+        "description": (
+            "Approve or deny a pending worker command or filesystem access request that is waiting for admin approval. "
+            "Only works when the admin agent is in swarm admin mode. "
+            "Use this when a worker has requested approval to execute a command or receive full filesystem access for its session. "
+            "Set approved=True to approve, approved=False to deny (reason required for denial)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task ID associated with the pending approval.",
+                },
+                "call_id": {
+                    "type": "string",
+                    "description": "The pending approval call ID to approve or deny.",
+                },
+                "approved": {
+                    "type": "boolean",
+                    "description": "True to approve the command, False to deny it.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Reason for the decision. Required for denials, optional for approvals.",
+                },
+            },
+            "required": ["task_id", "call_id", "approved"],
+        },
+        "tags": ["swarm", "pool", "admin", "approval"],
+        "category": "swarm",
+    },
+    {
+        "name": "kill_swarm_worker",
+        "fn": kill_swarm_worker,
+        "description": (
+            "Permanently kill and remove a worker from the swarm pool. "
+            "Use when a worker is rogue, stuck, or needs to be forcefully stopped — "
+            "the worker is removed immediately, pending approvals are cancelled, "
+            "and its active task (if any) is marked killed. "
+            "The worker cannot rejoin unless a new process is started manually. "
+            "Only works when the admin agent is in swarm admin mode."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "worker_id": {
+                    "type": "string",
+                    "description": "The worker ID to permanently kill and remove from the pool.",
+                },
+            },
+            "required": ["worker_id"],
+        },
+        "tags": ["swarm", "pool", "admin", "kill"],
+        "category": "swarm",
+    },
+    {
+        "name": "spawn_swarm_worker",
+        "fn": spawn_swarm_worker,
+        "description": (
+            "Spawn new terminal windows that launch bone workers and join the swarm. "
+            "Only works when the admin agent is in swarm admin mode. "
+            "Each spawned terminal opens a new bone process in worker mode that "
+            "connects to the swarm server automatically."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "description": "Number of worker terminals to spawn. Default 1.",
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Worker profile name to use (from ~/.bone/worker_profiles/). "
+                    "The profile sets provider, model, and display_name for the worker.",
+                },
+            },
+            "required": [],
+        },
+        "tags": ["swarm", "pool", "admin", "spawn"],
+        "category": "swarm",
+    },
+]
+
+
+def register() -> None:
+    """Register all swarm tools. Called when swarm admin mode activates."""
+    from .helpers.base import ToolDefinition
+    for spec in _SWARM_TOOL_DEFS:
+        ToolRegistry.register(ToolDefinition(
+            name=spec["name"],
+            description=spec["description"],
+            parameters=spec["parameters"],
+            handler=spec["fn"],
+            tier="core",
+            tags=spec.get("tags", []),
+            category=spec.get("category", ""),
+        ))
+
+
+def unregister() -> None:
+    """Unregister all swarm tools. Called when swarm admin mode deactivates."""
+    for name in ADMIN_SWARM_TOOL_NAMES:
+        ToolRegistry.unregister(name)

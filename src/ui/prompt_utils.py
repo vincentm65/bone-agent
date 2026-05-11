@@ -10,6 +10,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
 from llm.config import get_provider_config, APPROVE_MODE_LABELS, STATUS_BAR_SETTINGS
+import llm.config as _llm_config
 from ui.toolbar_interactions import (
     dispatch_toolbar_key,
     get_active_interaction,
@@ -82,6 +83,12 @@ def _build_status_line(chat_manager, approval_value: str, width: int) -> tuple[s
     """
     provider_name = chat_manager.client.provider
     model = get_provider_config(provider_name).get("model", "Unknown")
+
+    # Auto-detect model from running local server when config model is empty
+    if provider_name == "local" and (not model or model == "Unknown"):
+        detected = _llm_config.detect_local_model()
+        if detected:
+            model = detected
 
     tokens_curr = chat_manager.token_tracker.current_context_tokens
     tokens_in = chat_manager.token_tracker.total_prompt_tokens

@@ -1,5 +1,7 @@
 """Interactive selection tool for presenting multiple-choice questions to the user."""
 
+import shutil
+import textwrap
 from html import escape as _html_escape
 from typing import Optional, List, Dict, Any
 
@@ -148,9 +150,7 @@ class SelectionPanel(ToolbarInteraction):
             if is_custom and self._editing_custom_input:
                 typed = _html_escape(self._custom_input_texts.get(q_idx, ""))
                 display = typed if typed else text
-                lines.append(
-                    f'<style fg="white" bold="true">{self._CURSOR}{display}</style>'
-                )
+                self._render_wrapped(lines, display, self._CURSOR, "white", bold=True)
             elif multi and not is_custom:
                 marker = "\u25c9" if checked else "\u25cb"
                 lines.append(
@@ -175,9 +175,43 @@ class SelectionPanel(ToolbarInteraction):
                 if is_custom:
                     typed = _html_escape(self._custom_input_texts.get(q_idx, ""))
                     display = typed if typed else text
+                    self._render_wrapped(lines, display, "  ", "gray")
                 else:
                     display = text
-                lines.append(f'<style fg="gray">  {display}</style>')
+                    lines.append(f'<style fg="gray">  {display}</style>')
+
+    @staticmethod
+    def _toolbar_width() -> int:
+        """Return a conservative visible width for toolbar lines."""
+        try:
+            return max(20, shutil.get_terminal_size(fallback=(80, 24)).columns - 1)
+        except Exception:
+            return 79
+
+    def _render_wrapped(self, lines, display, prefix, color, *, bold=False):
+        """Render a long string wrapped to the toolbar width."""
+        width = self._toolbar_width()
+        prefix_len = len(prefix)
+        available = max(20, width - prefix_len)
+
+        if len(display) <= available:
+            tag = f'fg="{color}"'
+            if bold:
+                tag += ' bold="true"'
+            lines.append(f'<style {tag}>{prefix}{display}</style>')
+            return
+
+        # Wrap the text, first line gets the prefix, continuation lines are indented
+        wrapped = textwrap.wrap(display, available)
+        if not wrapped:
+            return
+        tag = f'fg="{color}"'
+        if bold:
+            tag += ' bold="true"'
+        lines.append(f'<style {tag}>{prefix}{wrapped[0]}</style>')
+        indent = " " * prefix_len
+        for segment in wrapped[1:]:
+            lines.append(f'<style {tag}>{indent}{segment}</style>')
 
     def handle_key(self, event) -> bool:
         """Handle a key event forwarded from the prompt_toolkit application."""

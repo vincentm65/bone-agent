@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 # Global ConfigManager instance
 config_manager = ConfigManagerClass()
 
+SUBAGENT_OVERFLOW_CONTINUATION = (
+    "Continue the task from the subagent history above. "
+    "Continue researching if more information is required to complete the task. "
+    "If the available context is enough, answer now."
+)
+
 
 def _setting_selector_handoff(chat_manager, selector, continuation):
     """Store selector + continuation on chat_manager for main-loop handoff.
@@ -893,12 +899,18 @@ def _apply_provider_changes(chat_manager, console, provider, changes):
 
     change_lines = []
 
-    if "model" in changes and changes["model"]:
-        try:
-            config_manager.set_model(provider, changes["model"])
-            change_lines.append(f"  Model: {changes['model']}")
-        except Exception as e:
-            console.print(f"[red]Failed to set model: {e}[/red]")
+    if "model" in changes:
+        new_model = changes["model"]
+        # Allow clearing model for local provider (enables auto-detection)
+        if new_model or provider == "local":
+            try:
+                config_manager.set_model(provider, new_model)
+                if new_model:
+                    change_lines.append(f"  Model: {new_model}")
+                else:
+                    change_lines.append(f"  Model: (auto-detect from server)")
+            except Exception as e:
+                console.print(f"[red]Failed to set model: {e}[/red]")
 
     if "api_key" in changes and changes["api_key"]:
         api_key_input = changes["api_key"]
@@ -962,6 +974,9 @@ def _handle_provider(chat_manager, console, debug_mode_container, args, cron_sch
 
         cfg = config.get_provider_config(provider)
         model = cfg.get('model') or cfg.get('api_model') or ''
+        # Auto-detect model from running local server
+        if provider == "local" and not model:
+            model = config.detect_local_model()
         label = config.get_provider_display_name(provider)
         if model:
             label += f" ({model})"
@@ -976,6 +991,9 @@ def _handle_provider(chat_manager, console, debug_mode_container, args, cron_sch
         for prov in config.get_providers():
             cfg = config.get_provider_config(prov)
             model = cfg.get('model') or cfg.get('api_model') or ''
+            # Auto-detect model from running local server
+            if prov == "local" and not model:
+                model = config.detect_local_model()
             entry = {"value": prov, "text": config.get_provider_display_name(prov)}
             if model:
                 entry["description"] = model[:40]
@@ -1097,12 +1115,30 @@ def _handle_model(chat_manager, console, debug_mode_container, args, cron_schedu
     elif not args:
         # Show current model for current provider
         cfg = config.get_provider_config(current_provider)
-        model = cfg.get('model') or cfg.get('api_model') or 'Not set'
+        model = cfg.get('model') or cfg.get('api_model') or ''
+        if not model and current_provider == "local":
+            detected = config.detect_local_model()
+            model = detected or 'Not set'
+            if detected:
+                model = f"{detected} (auto-detected)"
         console.print(f"[bold #5F9EA0]Current provider:[/bold #5F9EA0] {current_provider}")
         console.print(f"[bold #5F9EA0]Current model:[/bold #5F9EA0] {model}")
+        if current_provider == "local":
+            console.print("[dim]Use /model auto to clear manual override and auto-detect from server[/dim]")
         return CommandResult(status="handled")
     else:
         model = args.strip()
+
+    # Special: /model auto for local provider — clear manual model to enable auto-detection
+    if model.lower() == "auto" and current_provider == "local":
+        config_manager.set_model(current_provider, "")
+        chat_manager.reload_config()
+        detected = config.detect_local_model()
+        if detected:
+            console.print(f"[green]Model cleared. Auto-detected: {detected}[/green]")
+        else:
+            console.print("[green]Model cleared. No local server detected — will auto-detect when server starts.[/green]")
+        return CommandResult(status="handled")
 
     # Set model for current provider
     try:
@@ -1487,8 +1523,17 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
         ctx_tokens = sub_result.get("context_tokens", 0)
         hard_limit = sub_result.get("hard_limit_tokens", 0)
         console.print(
-            f"Review stopped: context ({ctx_tokens:,} tokens) "
-            f"reached hard limit ({hard_limit:,} tokens).",
+            f"Task too large for subagent, offloading to main agent: "
+            f"context ({ctx_tokens:,} tokens) reached hard limit ({hard_limit:,} tokens).",
+            highlight=False,
+            markup=False,
+        )
+    elif sub_result.get("billed_limit_exceeded"):
+        billed_total = sub_result.get("billed_total_tokens", 0)
+        billed_limit = sub_result.get("billed_hard_limit_tokens", 0)
+        console.print(
+            f"Task too large for subagent, offloading to main agent: "
+            f"token budget ({billed_total:,} tokens) reached hard limit ({billed_limit:,} tokens).",
             highlight=False,
             markup=False,
         )
@@ -1501,12 +1546,13 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
 
     result_text = sub_result.get("result", "")
 
-    # Only display/inject for successful results — excludes cancelled,
-    # preflight_overflow, hard_limit_exceeded, and error.
+    force_main_history = sub_result.get("context_dumped", False)
+
+    # Display/inject successful results and overflow dumps. The dump is
+    # intentionally routed back into main history so the main agent can resume.
     is_success = not (
         sub_result.get("cancelled")
         or sub_result.get("preflight_overflow")
-        or sub_result.get("hard_limit_exceeded")
         or sub_result.get("error")
     )
 
@@ -1519,13 +1565,16 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
 
     # ── Inject into chat history (citation-expanded) ─────────────
     if result_text and is_success:
-        from utils.citation_parser import inject_file_contents
-
         repo_root = Path.cwd().resolve()
-        gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
-        history_text = inject_file_contents(
-            result_text, repo_root, gitignore_spec, console
-        )
+        if force_main_history:
+            history_text = result_text
+        else:
+            from utils.citation_parser import inject_file_contents
+
+            gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
+            history_text = inject_file_contents(
+                result_text, repo_root, gitignore_spec, console
+            )
 
         review_cmd = "/review"
         if user_intent:
@@ -1538,11 +1587,20 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
             "role": "assistant",
             "content": history_text,
         })
+        if force_main_history:
+            chat_manager.messages.append({
+                "role": "user",
+                "content": SUBAGENT_OVERFLOW_CONTINUATION,
+            })
 
         # Update context token tracker so compaction timing stays accurate
         injected_tokens = chat_manager.token_tracker.estimate_tokens(
             f"{review_cmd}\n\n{history_text}"
         )
+        if force_main_history:
+            injected_tokens += chat_manager.token_tracker.estimate_tokens(
+                SUBAGENT_OVERFLOW_CONTINUATION
+            )
         chat_manager.token_tracker.current_context_tokens += injected_tokens
 
     return sub_result
@@ -1783,8 +1841,17 @@ def _run_ask_worker(
         ctx_tokens = sub_result.get("context_tokens", 0)
         hard_limit = sub_result.get("hard_limit_tokens", 0)
         console.print(
-            f"Ask stopped: context ({ctx_tokens:,} tokens) "
-            f"reached hard limit ({hard_limit:,} tokens).",
+            f"Task too large for subagent, offloading to main agent: "
+            f"context ({ctx_tokens:,} tokens) reached hard limit ({hard_limit:,} tokens).",
+            highlight=False,
+            markup=False,
+        )
+    elif sub_result.get("billed_limit_exceeded"):
+        billed_total = sub_result.get("billed_total_tokens", 0)
+        billed_limit = sub_result.get("billed_hard_limit_tokens", 0)
+        console.print(
+            f"Task too large for subagent, offloading to main agent: "
+            f"token budget ({billed_total:,} tokens) reached hard limit ({billed_limit:,} tokens).",
             highlight=False,
             markup=False,
         )
@@ -1797,11 +1864,13 @@ def _run_ask_worker(
 
     # ── Display result ───────────────────────────────────────────
     result_text = sub_result.get("result", "")
-    # Only display/inject for successful results (not cancel, overflow, hard-limit, error)
+    force_main_history = sub_result.get("context_dumped", False)
+
+    # Display/inject successful results and overflow dumps. The dump is
+    # intentionally routed back into main history so the main agent can resume.
     is_success = not (
         sub_result.get("cancelled")
         or sub_result.get("preflight_overflow")
-        or sub_result.get("hard_limit_exceeded")
         or sub_result.get("error")
     )
     if result_text and is_success:
@@ -1817,7 +1886,7 @@ def _run_ask_worker(
         console.print()
 
     # ── Inject into history (unless -f or non-success) ───────────
-    if not display_only and result_text and is_success:
+    if (force_main_history or not display_only) and result_text and is_success:
         context_note = f" (with {context_desc} context)" if context_desc else ""
         chat_manager.messages.append({
             "role": "user",
@@ -1827,10 +1896,19 @@ def _run_ask_worker(
             "role": "assistant",
             "content": result_text,
         })
+        if force_main_history:
+            chat_manager.messages.append({
+                "role": "user",
+                "content": SUBAGENT_OVERFLOW_CONTINUATION,
+            })
 
         injected_tokens = chat_manager.token_tracker.estimate_tokens(
             f"/ask{context_note}: {query}\n\n{result_text}"
         )
+        if force_main_history:
+            injected_tokens += chat_manager.token_tracker.estimate_tokens(
+                SUBAGENT_OVERFLOW_CONTINUATION
+            )
         chat_manager.token_tracker.current_context_tokens += injected_tokens
 
     # ── Invoke continuation if provided ──────────────────────────
@@ -3245,57 +3323,6 @@ def _handle_cd(chat_manager, console, debug_mode_container, args, cron_scheduler
     return CommandResult(status="handled")
 
 
-def _handle_prompt(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle /prompt command — show/swap prompt variants."""
-    from utils.settings import prompt_settings
-    from llm.prompts import _variant_available, _list_variants
-
-    cfg_manager = config_manager
-
-    if not args or args.strip() == "list":
-        variants = _list_variants()
-        current = prompt_settings.variant
-        console.print()
-        console.print(f"[bold #5F9EA0]Prompt Variants[/bold #5F9EA0]  (current: [bold]{current}[/bold])")
-        console.print()
-        for v in variants:
-            marker = "[bold green]active[/bold green]" if v == current else ""
-            console.print(f"  [bold]{v}[/bold]  {marker}")
-        console.print()
-        console.print("[dim]Switch with: [bold #5F9EA0]/prompt main[/bold #5F9EA0] or [bold #5F9EA0]/prompt micro[/bold #5F9EA0][/dim]")
-        return CommandResult(status="handled")
-
-    # Single arg: variant name to switch to
-    target = args.strip().lower()
-
-    if not _variant_available(target):
-        variants = _list_variants()
-        console.print(f"[red]Unknown variant: '{target}'[/red]")
-        console.print(f"[dim]Available: {', '.join(variants)}[/dim]")
-        return CommandResult(status="handled")
-
-    # Update settings
-    prompt_settings.variant = target
-
-    # Persist to config
-    try:
-        cfg_data = cfg_manager.load(force_reload=True)
-        if "PROMPT_SETTINGS" not in cfg_data:
-            cfg_data["PROMPT_SETTINGS"] = {}
-        cfg_data["PROMPT_SETTINGS"]["variant"] = target
-        cfg_manager.save(cfg_data)
-    except Exception as e:
-        console.print(f"[red]Failed to save variant to config: {e}[/red]")
-        console.print("[yellow]Variant applied for this session only — it will revert on restart.[/yellow]")
-
-    # Rebuild system prompt in-place (no restart)
-    chat_manager.update_system_prompt(variant=target)
-    console.print(f"[green]Switched to '{target}' variant[/green]")
-    console.print("[dim]System prompt rebuilt in-place.[/dim]")
-
-    return CommandResult(status="handled")
-
-
 def _print_skills_usage(console):
     show_skills_help_table(console)
 
@@ -3756,9 +3783,17 @@ def _handle_swarm_start(chat_manager, console, name_arg):
 
     console.print(f"[dim]Swarm '{swarm_name}' started on ws://{host}:{server.port}/{swarm_name}[/dim]")
 
+    # Wire toolbar invalidation so worker joins/status changes redraw immediately.
+    from prompt_toolkit.application import get_app
+    server.set_app(get_app())
+
     chat_manager.swarm_server = server
     chat_manager.swarm_admin_mode = True
     chat_manager.start_swarm_inbox_poller()
+
+    # Register swarm tools (only available in admin mode)
+    from tools.swarm import register as register_swarm_tools
+    register_swarm_tools()
 
     # Remove agents.md exchange — admin doesn't need the codebase map
     if len(chat_manager.messages) >= 3:
@@ -3913,6 +3948,7 @@ def _handle_swarm_close(chat_manager, console):
         return CommandResult(status="handled")
 
     server = chat_manager.swarm_server
+    server.set_app(None)
     console.print(f"[dim]Stopping swarm server '{server.swarm_name}'...[/dim]")
 
     try:
@@ -3929,6 +3965,10 @@ def _handle_swarm_close(chat_manager, console):
     chat_manager.swarm_server = None
     chat_manager.swarm_admin_mode = False
     chat_manager._reset_swarm_state()
+
+    # Unregister swarm tools (no longer in admin mode)
+    from tools.swarm import unregister as unregister_swarm_tools
+    unregister_swarm_tools()
 
     chat_manager.update_system_prompt()
 
@@ -3988,7 +4028,6 @@ _COMMAND_HANDLERS = {
     "/setup": _handle_setup,
     "/update": _handle_update,
     "/cron": _handle_cron,
-    "/prompt": _handle_prompt,
     "/skills": _handle_skills,
     "/skill": _handle_skills,
     "/ask": _handle_ask,

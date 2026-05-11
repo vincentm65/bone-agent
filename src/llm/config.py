@@ -59,6 +59,59 @@ def _load_config():
 
 _CONFIG = _load_config()
 
+# --- Local server model detection cache ---
+_local_model_cache = {"model": None, "timestamp": 0.0}
+_LOCAL_MODEL_CACHE_TTL = 30.0  # seconds
+
+
+def detect_local_model() -> str:
+    """Probe the local llama.cpp server for its loaded model name.
+
+    Queries the ``/props`` endpoint on the configured local API base
+    (default ``http://127.0.0.1:8080``) and returns the
+    ``model_alias`` (or ``model_path`` basename).  Falls back to
+    querying ``/v1/models`` for non-llama.cpp servers.
+
+    Results are cached for 30 seconds to avoid hammering the server
+    on every toolbar render.
+
+    Returns:
+        Model name string, or empty string if the server is unreachable.
+    """
+    import json
+    import time
+    import urllib.request
+    import urllib.error
+
+    now = time.monotonic()
+    if _local_model_cache["model"] is not None and (now - _local_model_cache["timestamp"]) < _LOCAL_MODEL_CACHE_TTL:
+        return _local_model_cache["model"]
+
+    api_base = _CONFIG.get("LLM_API_BASE", "http://127.0.0.1:8080").rstrip("/")
+
+    model_name = ""
+    for endpoint in ("/props", "/v1/models"):
+        try:
+            req = urllib.request.Request(f"{api_base}{endpoint}", method="GET")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if endpoint == "/props":
+                raw = data.get("model_alias") or data.get("model_path") or ""
+            else:
+                # OpenAI /v1/models format: {"data": [{"id": "..."}]}
+                models = data.get("data", [])
+                raw = models[0].get("id", "") if models else ""
+            if raw:
+                # Take basename if it's a path
+                model_name = raw.replace("\\", "/").split("/")[-1]
+                break
+        except Exception:
+            continue
+
+    _local_model_cache["model"] = model_name
+    _local_model_cache["timestamp"] = now
+    return model_name
+
 
 def _get_codex_token() -> str:
     """Read access token from Codex CLI's cached auth (~/.codex/auth.json).
@@ -118,7 +171,7 @@ def _get_provider_registry():
 
     _provider_registry_cache = {
         "local": {
-            "type": "api",
+            "type": "local",
             "api_key": _CONFIG.get("LLM_API_KEY", ""),
             "model": _CONFIG.get("LLM_MODEL", ""),
             "api_base": _CONFIG.get("LLM_API_BASE", "http://127.0.0.1:8080"),
@@ -387,10 +440,11 @@ def reload_config():
     
     Note: This is a manual operation - call after config changes.
     """
-    global _CONFIG, _provider_registry_cache, _cached_provider, PROVIDER_REGISTRY, LLM_PROVIDER, STATUS_BAR_SETTINGS, MEMORY_SETTINGS
+    global _CONFIG, _provider_registry_cache, _cached_provider, PROVIDER_REGISTRY, LLM_PROVIDER, STATUS_BAR_SETTINGS, MEMORY_SETTINGS, _local_model_cache
     _CONFIG = _load_config()
     _provider_registry_cache = None
     _cached_provider = None
+    _local_model_cache = {"model": None, "timestamp": 0.0}
     # Rebuild module-level variables
     PROVIDER_REGISTRY = _get_provider_registry()
     LLM_PROVIDER = _get_provider()

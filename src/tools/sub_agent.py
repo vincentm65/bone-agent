@@ -175,23 +175,23 @@ def sub_agent(
             tokens = sub_agent_data.get('context_tokens', 0)
             limit = sub_agent_data.get('hard_limit_tokens', 0)
             console.print(
-                f"[dim red]╰─ hard limit overflow: {tokens:,} / {limit:,} tokens[/dim red]",
+                f"[dim red]╰─ Task too large for subagent, offloading to main agent: {tokens:,} / {limit:,} tokens[/dim red]",
                 highlight=False,
             )
             console.file.flush()
             return raw_result
 
-        # If billed limit was exceeded, show warning and return partial results
+        # If billed limit was exceeded, show warning and return context dump
         if sub_agent_data.get('billed_limit_exceeded'):
             panel.cancel()
             billed_total = sub_agent_data.get('billed_total_tokens', 0)
             billed_limit = sub_agent_data.get('billed_hard_limit_tokens', 0)
             console.print(
-                f"[dim yellow]╰─ token budget exhausted: {billed_total:,} / {billed_limit:,} tokens burned[/dim yellow]",
+                f"[dim yellow]╰─ Task too large for subagent, offloading to main agent: {billed_total:,} / {billed_limit:,} tokens burned[/dim yellow]",
                 highlight=False,
             )
             console.file.flush()
-            # Skip file injection — partial results should go back as-is
+            # Skip file injection — the full sub-agent history should go back as-is
             return raw_result
 
         # Parse and inject file contents
@@ -200,5 +200,4 @@ def sub_agent(
         )
 
         return injected_result
-
 

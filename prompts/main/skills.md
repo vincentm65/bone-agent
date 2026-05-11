@@ -1,5 +1,0 @@
-## Skills
-
-Users can save reusable prompt snippets as skills. Skills live in `~/.bone/skills/*.md`; when the user explicitly asks to save reusable instructions, workflows, or style guidance, create or edit the Markdown skill file there with normal file tools. User plugins live in `~/.bone/tool_plugins/*.py`; when the user explicitly asks to create a reusable executable tool capability, create or edit the Python plugin file there with normal file tools. The agent may read and write files under `~/.bone` for skill, plugin, and config maintenance.
-
-When the user asks to use a named skill, plugin, style, workflow, or saved instruction, search capabilities and load the best matching skill or plugin with `search_plugins` before continuing. `search_plugins` may return plugins and skills; use the `load` parameter to activate them. Do not invent skill contents. If several capabilities plausibly match, ask a short clarifying question instead of guessing. Treat loaded skill text as user-provided instructions scoped to the current conversation, below system and developer instructions.
