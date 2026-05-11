@@ -241,32 +241,15 @@ class AgenticOrchestrator:
 
     @staticmethod
     def _is_user_cancel_result(result) -> bool:
-        """Return True when a tool result represents an explicit user cancel."""
+        """Return True when a tool result represents an explicit user cancel.
+
+        exit_code=2 is the universal convention for user-initiated
+        cancellation across all tools (select_option cancel, approval
+        deny, filesystem access deny).  exit_code=130 indicates a swarm
+        interrupt, which should also stop the agent loop.
+        """
         text = str(result or "").strip()
-        lower_text = text.lower()
-        if lower_text.startswith("exit_code=130"):
-            return True
-
-        lines = [line.strip().lower() for line in text.splitlines() if line.strip()]
-        if lines and lines[0].startswith("exit_code="):
-            lines = lines[1:]
-        if not lines:
-            return False
-
-        first_line = lines[0]
-        cancel_prefixes = (
-            "operation canceled by user.",
-            "operation cancelled by user.",
-            "command canceled by user.",
-            "command cancelled by user.",
-            "subagent canceled by user.",
-            "subagent cancelled by user.",
-            "user canceled selection",
-            "user cancelled selection",
-            "access denied by user.",
-            "full filesystem access denied by user.",
-        )
-        return any(first_line.startswith(marker) for marker in cancel_prefixes)
+        return text.startswith("exit_code=2") or text.startswith("exit_code=130")
 
     def set_cancel_event(self, event):
         """Replace the orchestrator's cancel event.
@@ -1779,7 +1762,7 @@ class AgenticOrchestrator:
                 console.print(f"[dim]Not applied. User advice: {guidance}[/dim]")
         else:  # cancel
             tool_result_str = (
-                "exit_code=1\nOperation canceled by user. "
+                "exit_code=2\nOperation canceled by user. "
                 "Do not retry this operation."
             )
             if console:
@@ -1898,7 +1881,7 @@ class AgenticOrchestrator:
 
         # Build the tool result from the selection outcome.
         if interaction.was_cancelled():
-            tool_result_str = "exit_code=1\nUser canceled selection"
+            tool_result_str = "exit_code=2\nUser canceled selection"
             console = self._get_console()
             if console:
                 console.print("[dim]Selection canceled by user.[/dim]")
@@ -1906,7 +1889,7 @@ class AgenticOrchestrator:
             raw_result = interaction.result()
             # Replicate select_option's formatting logic
             if raw_result is None:
-                tool_result_str = "exit_code=1\nUser canceled selection"
+                tool_result_str = "exit_code=2\nUser canceled selection"
             elif isinstance(raw_result, str):
                 tool_result_str = f"exit_code=0\n{raw_result}"
             elif isinstance(raw_result, list):
@@ -2004,7 +1987,7 @@ class AgenticOrchestrator:
                 )
         else:  # cancel
             tool_result_str = (
-                "exit_code=1\n"
+                "exit_code=2\n"
                 "Full filesystem access denied by user. "
                 "Do not retry this operation on this path."
             )

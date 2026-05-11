@@ -68,7 +68,7 @@ def handle_edit_approval(preview, file_path, args_dict, console, thinking_indica
         should_exit = False
     else:  # cancel
         console.print("[dim]Operation canceled by user.[/dim]")
-        result_str = "exit_code=1\nOperation canceled by user. Do not retry this operation."
+        result_str = "exit_code=2\nOperation canceled by user. Do not retry this operation."
         should_exit = True
 
     # Restart thinking indicator after user input
@@ -218,7 +218,7 @@ def handle_command_approval(command, arguments, tool, context, console,
         result = f"Command not executed. User advice: {guidance}"
         command_executed = False
     elif action == "cancel":
-        result = "Command canceled by user. Do not retry this operation."
+        result = "exit_code=2\nCommand canceled by user. Do not retry this operation."
         if thinking_indicator:
             thinking_indicator.start()
         return result, True, False

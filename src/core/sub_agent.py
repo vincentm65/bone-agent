@@ -500,10 +500,14 @@ def run_sub_agent(
     context_dumped = False
     if hard_limit_exceeded and sub_agent_settings.dump_context_on_hard_limit:
         result = _format_messages_summary(temp_chat_manager.messages, "Hard Limit Reached")
-        context_dumped = False
+        # This is now a bounded handoff summary rather than a full dump, but
+        # callers still use the flag to mean "inject this into main history
+        # and let the main agent continue from it".
+        context_dumped = True
     elif billed_limit_exceeded and sub_agent_settings.dump_context_on_hard_limit:
         result = _format_messages_summary(temp_chat_manager.messages, "Token Budget Exhausted")
-        context_dumped = False
+        # Same semantic handoff flag as the context hard-limit path above.
+        context_dumped = True
     else:
         # Extract final response (last assistant message with content)
         final_content = ""

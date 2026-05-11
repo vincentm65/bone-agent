@@ -174,24 +174,30 @@ def sub_agent(
         # return a full message-history dump here: it can be hundreds of
         # thousands of tokens and can freeze the UI if it leaks to scrollback.
         if sub_agent_data.get('hard_limit_exceeded'):
-            panel.set_error("Sub-agent hit its context limit; returned a bounded summary to the main agent.")
+            if hasattr(panel, 'clear'):
+                panel.clear()
+            else:
+                panel.cancel()
             tokens = sub_agent_data.get('context_tokens', 0)
             limit = sub_agent_data.get('hard_limit_tokens', 0)
             console.print(
-                f"[dim red]╰─ subagent stopped at context limit; hidden summary returned: {tokens:,} / {limit:,} tokens[/dim red]",
+                f"[dim yellow]╰─ subagent reached context limit; handing bounded summary to main agent: {tokens:,} / {limit:,} tokens[/dim yellow]",
                 highlight=False,
             )
             console.file.flush()
             return raw_result
 
-        # If billed limit was exceeded, finish the toolbar and return only the
+        # If billed limit was exceeded, clear the toolbar and return only the
         # bounded hidden summary produced by core.sub_agent.
         if sub_agent_data.get('billed_limit_exceeded'):
-            panel.set_error("Sub-agent hit its cumulative token budget; returned a bounded summary to the main agent.")
+            if hasattr(panel, 'clear'):
+                panel.clear()
+            else:
+                panel.cancel()
             billed_total = sub_agent_data.get('billed_total_tokens', 0)
             billed_limit = sub_agent_data.get('billed_hard_limit_tokens', 0)
             console.print(
-                f"[dim yellow]╰─ subagent stopped at token budget; hidden summary returned: {billed_total:,} / {billed_limit:,} tokens burned[/dim yellow]",
+                f"[dim yellow]╰─ subagent reached token budget; handing bounded summary to main agent: {billed_total:,} / {billed_limit:,} tokens burned[/dim yellow]",
                 highlight=False,
             )
             console.file.flush()

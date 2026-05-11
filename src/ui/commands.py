@@ -1460,6 +1460,44 @@ def _forward_subagent_usage(chat_manager, sub_result):
         chat_manager.token_tracker.add_usage(usage, model_name=sub_result.get("model", ""))
 
 
+def _clear_subagent_panel(panel):
+    """Remove subagent progress from the toolbar without showing an error."""
+    if hasattr(panel, "clear"):
+        panel.clear()
+    else:
+        panel.cancel()
+
+
+def _continue_main_after_subagent_overflow(chat_manager, console, query, result_text):
+    """Run the main agent from a bounded subagent-overflow summary."""
+    if not result_text:
+        return
+
+    from core.agentic import agentic_answer
+    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
+
+    overflow_intro = (
+        f"Subagent overflow handoff for: {query}\n\n"
+        f"{result_text}"
+    )
+    chat_manager.messages.append({"role": "assistant", "content": overflow_intro})
+    chat_manager.token_tracker.current_context_tokens += chat_manager.token_tracker.estimate_tokens(
+        overflow_intro
+    )
+
+    console.print("[dim]Continuing with main agent from subagent handoff...[/dim]", highlight=False)
+    agentic_answer(
+        chat_manager,
+        SUBAGENT_OVERFLOW_CONTINUATION,
+        console,
+        Path.cwd().resolve(),
+        str(_RG_EXE_PATH),
+        False,
+        thinking_indicator=None,
+    )
+    chat_manager._update_context_tokens()
+
+
 def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
     """Run the /review sub-agent and handle display/history injection.
 
@@ -1520,19 +1558,21 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
             markup=False,
         )
     elif sub_result.get("hard_limit_exceeded"):
+        _clear_subagent_panel(panel)
         ctx_tokens = sub_result.get("context_tokens", 0)
         hard_limit = sub_result.get("hard_limit_tokens", 0)
         console.print(
-            f"Task too large for subagent, offloading to main agent: "
+            f"Task too large for subagent; continuing with main agent: "
             f"context ({ctx_tokens:,} tokens) reached hard limit ({hard_limit:,} tokens).",
             highlight=False,
             markup=False,
         )
     elif sub_result.get("billed_limit_exceeded"):
+        _clear_subagent_panel(panel)
         billed_total = sub_result.get("billed_total_tokens", 0)
         billed_limit = sub_result.get("billed_hard_limit_tokens", 0)
         console.print(
-            f"Task too large for subagent, offloading to main agent: "
+            f"Task too large for subagent; continuing with main agent: "
             f"token budget ({billed_total:,} tokens) reached hard limit ({billed_limit:,} tokens).",
             highlight=False,
             markup=False,
@@ -1545,6 +1585,10 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
         panel.set_complete(sub_result.get("usage", {}))
 
     result_text = sub_result.get("result", "")
+
+    if sub_result.get("context_dumped") and result_text and not sub_result.get("error"):
+        _continue_main_after_subagent_overflow(chat_manager, console, query, result_text)
+        return sub_result
 
     force_main_history = sub_result.get("context_dumped", False)
 
@@ -1838,19 +1882,21 @@ def _run_ask_worker(
             markup=False,
         )
     elif sub_result.get("hard_limit_exceeded"):
+        _clear_subagent_panel(panel)
         ctx_tokens = sub_result.get("context_tokens", 0)
         hard_limit = sub_result.get("hard_limit_tokens", 0)
         console.print(
-            f"Task too large for subagent, offloading to main agent: "
+            f"Task too large for subagent; continuing with main agent: "
             f"context ({ctx_tokens:,} tokens) reached hard limit ({hard_limit:,} tokens).",
             highlight=False,
             markup=False,
         )
     elif sub_result.get("billed_limit_exceeded"):
+        _clear_subagent_panel(panel)
         billed_total = sub_result.get("billed_total_tokens", 0)
         billed_limit = sub_result.get("billed_hard_limit_tokens", 0)
         console.print(
-            f"Task too large for subagent, offloading to main agent: "
+            f"Task too large for subagent; continuing with main agent: "
             f"token budget ({billed_total:,} tokens) reached hard limit ({billed_limit:,} tokens).",
             highlight=False,
             markup=False,
@@ -1864,6 +1910,13 @@ def _run_ask_worker(
 
     # ── Display result ───────────────────────────────────────────
     result_text = sub_result.get("result", "")
+
+    if sub_result.get("context_dumped") and result_text and not sub_result.get("error"):
+        _continue_main_after_subagent_overflow(chat_manager, console, query, result_text)
+        if continuation is not None:
+            continuation(sub_result)
+        return sub_result
+
     force_main_history = sub_result.get("context_dumped", False)
 
     # Display/inject successful results and overflow dumps. The dump is

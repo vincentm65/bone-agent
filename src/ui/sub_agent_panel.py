@@ -165,6 +165,20 @@ class SubAgentPanel:
         self._restore_spinner()
         self.chat_manager.invalidate_toolbar()
 
+    def clear(self, restore_spinner=True):
+        """Immediately remove subagent status from the toolbar.
+
+        Overflow handoff paths are not user-facing errors: the main agent is
+        about to continue from the bounded sub-agent summary, so leaving a red
+        done/error panel below the status bar is stale and confusing.
+        """
+        self._stop_refresh_timer()
+        self._subagent_finished = True
+        self.chat_manager.progress.clear_subagent()
+        if restore_spinner:
+            self._restore_spinner()
+        self.chat_manager.invalidate_toolbar()
+
     def cancel(self):
         """Clear subagent display on user cancellation.
 

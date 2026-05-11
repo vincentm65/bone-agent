@@ -444,10 +444,7 @@ class SelectionPanel(ToolbarInteraction):
                 return 130
             return None
 
-        if self.was_cancelled():
-            return None
-
-        return self.result()
+        return result
 
 
 @tool(
@@ -508,7 +505,8 @@ def select_option(
         str: Formatted tool result with exit_code and selected value(s):
             - "exit_code=0\\n{value}" for single question (1 item in array)
             - "exit_code=0\\n{value1, value2, ...}" for multi-question or multi-select
-            - "exit_code=1\\n{error_message}" for user cancellation or validation errors
+            - "exit_code=2\\nUser canceled selection" for user cancellation
+            - "exit_code=1\\n{error_message}" for validation errors
     """
     try:
         # Validate questions parameter
@@ -558,9 +556,10 @@ def select_option(
         if result == 130:
             return "exit_code=130\nInterrupted by pending swarm approval"
 
-        # Handle user cancellation
+        # Handle user cancellation — exit_code=2 is the universal
+        # convention for user-initiated cancellation across all tools.
         if result is None:
-            return "exit_code=1\nUser canceled selection"
+            return "exit_code=2\nUser canceled selection"
 
         console = (context or {}).get("console")
 

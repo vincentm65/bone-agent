@@ -574,21 +574,7 @@ class SwarmWorkerRunner:
             self._inbox.put(InboxItem(source="admin", kind="stop"))
             self._admin_work_pending.set()
         elif msg.get("type") == "clear_worker_context":
-            # Only clear if worker is idle (not running a task)
-            if not self._busy.is_set():
-                clear_worker_context(self.chat_manager)
-                self._client.send({
-                    "type": "admin_notice",
-                    "worker_id": self.worker_id,
-                    "message": "Context cleared by admin",
-                })
-                self.console.print("[dim]Context cleared by admin request.[/dim]")
-            else:
-                self._client.send({
-                    "type": "admin_notice",
-                    "worker_id": self.worker_id,
-                    "message": "Cannot clear context: worker is busy",
-                })
+            self._inbox.put(InboxItem(source="admin", kind="clear_context"))
 
     @property
     def chat_manager(self) -> ChatManager:
@@ -809,6 +795,21 @@ class SwarmWorkerRunner:
             self._killed = True
             self.console.print("[dim]Received stop_worker — exiting.[/dim]")
             self._running = False
+        elif item.source == "admin" and item.kind == "clear_context":
+            if not self._busy.is_set():
+                clear_worker_context(self.chat_manager)
+                self._client.send({
+                    "type": "admin_notice",
+                    "worker_id": self.worker_id,
+                    "message": "Context cleared by admin",
+                })
+                self.console.print("[dim]Context cleared by admin request.[/dim]")
+            else:
+                self._client.send({
+                    "type": "admin_notice",
+                    "worker_id": self.worker_id,
+                    "message": "Cannot clear context: worker is busy",
+                })
         elif item.source == "local" and item.kind == "command":
             self._run_local_command(item.data)
         elif item.source == "local" and item.kind == "task":
