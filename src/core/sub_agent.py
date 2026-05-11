@@ -40,6 +40,9 @@ class SubAgentCancelled(Exception):
 def _format_messages_dump(messages, reason: str = "Hard Limit Reached") -> str:
     """Format sub-agent message history as a markdown dump.
 
+    This is intentionally suitable for hidden tool-result context only.  It
+    must never be printed directly to the user's chat transcript.
+
     Args:
         messages: List of message dicts from the sub-agent ChatManager.
 
@@ -76,6 +79,60 @@ def _format_messages_dump(messages, reason: str = "Hard Limit Reached") -> str:
             lines.append(content)
         lines.append("")
     return "\n".join(lines)
+
+
+def _format_messages_summary(messages, reason: str = "Hard Limit Reached", max_chars: int = 60_000) -> str:
+    """Format a bounded overflow summary for the parent agent.
+
+    Returning a 500k-token dump as one tool result can overflow the parent
+    conversation, make logs/renderers unusable, and leak hidden sub-agent
+    history into user-visible output.  This summary preserves the useful
+    recent assistant findings and tool-call breadcrumbs while staying bounded.
+    """
+    lines = [
+        f"## Sub-agent stopped before completion ({reason})",
+        "",
+        "The delegated sub-agent exceeded its token budget. The full internal history was not returned because it was too large. Use the partial findings and recent activity below; continue with focused searches if more detail is needed.",
+        "",
+    ]
+
+    assistant_snippets = []
+    tool_breadcrumbs = []
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = (msg.get("content") or "").strip()
+        tool_calls = msg.get("tool_calls") or []
+
+        if role == "assistant" and content:
+            assistant_snippets.append(content)
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            tool_breadcrumbs.append(f"- `{fn.get('name', '?')}` — `{fn.get('arguments', '')}`")
+
+    if assistant_snippets:
+        lines.extend(["### Recent assistant findings", ""])
+        remaining = max_chars // 2
+        for snippet in reversed(assistant_snippets[-6:]):
+            if remaining <= 0:
+                break
+            clipped = snippet[-remaining:]
+            lines.extend([clipped, ""])
+            remaining -= len(clipped)
+
+    if tool_breadcrumbs:
+        lines.extend(["### Recent tool activity", ""])
+        lines.extend(tool_breadcrumbs[-40:])
+        lines.append("")
+
+    result = "\n".join(lines)
+    if len(result) > max_chars:
+        result = result[-max_chars:]
+        result = (
+            f"## Sub-agent stopped before completion ({reason})\n\n"
+            "Earlier overflow summary content was truncated to keep the parent context safe.\n\n"
+            f"{result}"
+        )
+    return result
 
 
 def _configure_compaction():
@@ -442,11 +499,11 @@ def run_sub_agent(
 
     context_dumped = False
     if hard_limit_exceeded and sub_agent_settings.dump_context_on_hard_limit:
-        result = _format_messages_dump(temp_chat_manager.messages, "Hard Limit Reached")
-        context_dumped = True
+        result = _format_messages_summary(temp_chat_manager.messages, "Hard Limit Reached")
+        context_dumped = False
     elif billed_limit_exceeded and sub_agent_settings.dump_context_on_hard_limit:
-        result = _format_messages_dump(temp_chat_manager.messages, "Token Budget Exhausted")
-        context_dumped = True
+        result = _format_messages_summary(temp_chat_manager.messages, "Token Budget Exhausted")
+        context_dumped = False
     else:
         # Extract final response (last assistant message with content)
         final_content = ""

@@ -54,7 +54,7 @@ class SimplePanelUpdater:
 
 @tool(
     name="sub_agent",
-    description="Required: Call this first before any rg or read_file when answering 'how something works', architecture, patterns, multi-file flows, or broad exploration. Do not search manually — this tool is 10x faster. Examples: 'How does authentication work?', 'Explain the data flow', 'Where is X handled?'",
+    description="Use for bounded codebase research when a question requires locating or understanding a specific multi-file flow. Prefer direct rg/read_file for small searches or known files. Do not delegate broad open-ended tasks; ask one narrow question with clear scope and a stop condition.",
     parameters={
         "type": "object",
         "properties": {
@@ -169,29 +169,32 @@ def sub_agent(
         # Display sub-agent result summary (used for context)
         raw_result = sub_agent_data.get('result', '')
 
-        # If hard limit was exceeded, clear toolbar and return context dump
+        # If hard limit was exceeded, finish the toolbar and return only the
+        # bounded hidden summary produced by core.sub_agent.  Never render or
+        # return a full message-history dump here: it can be hundreds of
+        # thousands of tokens and can freeze the UI if it leaks to scrollback.
         if sub_agent_data.get('hard_limit_exceeded'):
-            panel.cancel()
+            panel.set_error("Sub-agent hit its context limit; returned a bounded summary to the main agent.")
             tokens = sub_agent_data.get('context_tokens', 0)
             limit = sub_agent_data.get('hard_limit_tokens', 0)
             console.print(
-                f"[dim red]╰─ Task too large for subagent, offloading to main agent: {tokens:,} / {limit:,} tokens[/dim red]",
+                f"[dim red]╰─ subagent stopped at context limit; hidden summary returned: {tokens:,} / {limit:,} tokens[/dim red]",
                 highlight=False,
             )
             console.file.flush()
             return raw_result
 
-        # If billed limit was exceeded, show warning and return context dump
+        # If billed limit was exceeded, finish the toolbar and return only the
+        # bounded hidden summary produced by core.sub_agent.
         if sub_agent_data.get('billed_limit_exceeded'):
-            panel.cancel()
+            panel.set_error("Sub-agent hit its cumulative token budget; returned a bounded summary to the main agent.")
             billed_total = sub_agent_data.get('billed_total_tokens', 0)
             billed_limit = sub_agent_data.get('billed_hard_limit_tokens', 0)
             console.print(
-                f"[dim yellow]╰─ Task too large for subagent, offloading to main agent: {billed_total:,} / {billed_limit:,} tokens burned[/dim yellow]",
+                f"[dim yellow]╰─ subagent stopped at token budget; hidden summary returned: {billed_total:,} / {billed_limit:,} tokens burned[/dim yellow]",
                 highlight=False,
             )
             console.file.flush()
-            # Skip file injection — the full sub-agent history should go back as-is
             return raw_result
 
         # Parse and inject file contents

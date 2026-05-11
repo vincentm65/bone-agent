@@ -668,6 +668,12 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
                 return f"Searched web for '{query[:40]}...' ({results} results)"
             return f"Searched web: '{query[:40]}...'"
 
+        elif fn_name == "sub_agent":
+            query = args.get('query', '')
+            if "Sub-agent stopped before completion" in tool_result:
+                return f"Sub-agent stopped at token limit: '{query[:50]}...'"
+            return f"Ran sub-agent: '{query[:50]}...'"
+
         return f"Used {fn_name}"
 
     def _generate_tool_block_summary(self, tool_calls, tool_results):

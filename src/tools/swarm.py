@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from .helpers.base import tool, ToolRegistry
+from ui.swarm_formatting import format_swarm_status
 
-ADMIN_SWARM_TOOL_NAMES = frozenset({"dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "spawn_swarm_worker"})
+ADMIN_SWARM_TOOL_NAMES = frozenset({"dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "spawn_swarm_worker", "check_swarm_status"})
 
 def _require_swarm_admin(chat_manager: Any) -> tuple[bool, str]:
     if not chat_manager:
@@ -218,6 +219,28 @@ def spawn_swarm_worker(
     return "\n".join(parts)
 
 
+def check_swarm_status(
+    chat_manager: Any = None,
+) -> str:
+    """Check current swarm status — active workers, queued/running tasks, and pending approvals.
+
+    Returns a detailed snapshot suitable for the admin agent to inspect the
+    state of the swarm pool without issuing slash commands.
+    """
+    ok, error = _require_swarm_admin(chat_manager)
+    if not ok:
+        return f"exit_code=1\n{error}"
+
+    server = chat_manager.swarm_server
+    try:
+        snapshot = server.status_snapshot()
+        formatted = format_swarm_status(snapshot, mode="agent")
+    except Exception as e:
+        return f"exit_code=1\nFailed to check swarm status: {e}"
+
+    return f"exit_code=0\n{formatted}"
+
+
 # =============================================================================
 # On-demand registration / unregistration
 # =============================================================================
@@ -356,6 +379,26 @@ _SWARM_TOOL_DEFS = [
             "required": [],
         },
         "tags": ["swarm", "pool", "admin", "spawn"],
+        "category": "swarm",
+    },
+    {
+        "name": "check_swarm_status",
+        "fn": check_swarm_status,
+        "description": (
+            "Inspect the current swarm pool status. "
+            "Returns a detailed snapshot of active workers (idle and busy), "
+            "queued and running tasks, and pending approval requests. "
+            "Use this to monitor swarm health, decide whether to spawn more "
+            "workers, kill stuck workers, or assess overall pool capacity. "
+            "Only works when the admin agent is in swarm admin mode. "
+            "No parameters required."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "tags": ["swarm", "pool", "admin", "status"],
         "category": "swarm",
     },
 ]

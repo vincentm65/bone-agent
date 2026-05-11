@@ -673,7 +673,19 @@ def display_tool_feedback(command, tool_result, console, indent=False, panel_upd
 
         # Check for "No matches found" message (0 results)
         lines = tool_result.split('\n')
-        if any("No matches found" in line for line in lines):
+        exit_code = extract_exit_code(tool_result)
+        if exit_code is not None and exit_code not in (0, 1):
+            detail = next(
+                (
+                    line.strip()
+                    for line in lines[1:]
+                    if line.strip()
+                    and not line.startswith(("matches=", "files="))
+                ),
+                "Search failed",
+            )
+            message = f"{prefix}[dim red]Search failed: {detail}[/dim red]"
+        elif any("No matches found" in line for line in lines):
             message = f"{prefix}[dim]No matches found[/dim]"
         # Check for matches=N or files=N pattern
         elif len(lines) > 1:
@@ -831,6 +843,19 @@ def build_panel_tool_message(tool_name, tool_result, command):
                 pattern = match.group(1).strip()
 
         lines = tool_result.split('\n')
+        exit_code = extract_exit_code(tool_result)
+        if exit_code is not None and exit_code not in (0, 1):
+            detail = next(
+                (
+                    line.strip()
+                    for line in lines[1:]
+                    if line.strip()
+                    and not line.startswith(("matches=", "files="))
+                ),
+                "Search failed",
+            )
+            return f"[grey]rg {pattern}[/grey]\n[dim red]╰─ Search failed: {detail}[/dim red]"
+
         if len(lines) > 1:
             metadata = extract_all_metadata(tool_result, line_index=1)
             count = metadata.get('matches') or metadata.get('files')
@@ -929,4 +954,3 @@ def build_panel_tool_message(tool_name, tool_result, command):
         return f"[grey]{label}[/grey]\n[dim]╰─ {summary}[/dim]"
 
     return f"[grey]{tool_name}[/grey]"
-

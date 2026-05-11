@@ -495,6 +495,18 @@ class SwarmWorkerRunner:
         self.display_name = display_name or f"{generate_worker_name()}_{secrets.token_hex(2)}"
         self.model = model or ""
         self.provider = provider or ""
+
+        # Resolve effective model for unprofiled (random) workers so the
+        # admin status bar can show e.g. "steady_bloom_1b87 (GLM-5.1) - idle".
+        # Profiled workers keep their explicitly-configured model as-is.
+        if not self.model:
+            try:
+                from llm.client import LLMClient
+                temp_client = LLMClient(provider=self.provider or None)
+                self.model = temp_client.model
+            except Exception:
+                self.model = ""  # fallback: don't break worker startup
+
         self._current_activity = ""
 
     @property

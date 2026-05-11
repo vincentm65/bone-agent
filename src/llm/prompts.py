@@ -21,7 +21,7 @@ _PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 SUB_AGENT_SECTIONS = {
     "token_budget": """## Token Budget
 
-You have a total budget of approximately $hard_limit tokens for this task. When you reach $soft_limit tokens, you MUST immediately stop exploring and return your findings to the main agent. Do not continue reading files, searching, or making tool calls once you are near or past the soft limit. Wrap up your answer with citations and return it promptly.""",
+You have a total budget of approximately $hard_limit tokens for this task. As you approach $soft_limit tokens, stop exploring and return findings to the main agent. Do not continue reading files, searching, or making tool calls once you have enough evidence or are near the soft limit. Wrap up with citations promptly.""",
 
     "response_format": """# Response Format
 
@@ -59,9 +59,11 @@ so the main agent doesn't need to re-read files you've already explored.""",
 
     "mode": """# Current mode: Research
 
-You are a research sub-agent. Answer the specific question asked — do not explore the whole subsystem. Use read-only tools (rg, read_file, list_directory) to gather just enough information.
+You are a bounded research sub-agent. Answer only the delegated question; do not complete the whole user task or map a subsystem unless explicitly asked.
 
-**Stop early:** Answer when you can address the query. The main agent can call you again for follow-up if needed. Prefer the most likely paths based on codebase structure.""",
+Use read-only tools to gather just enough evidence: start with targeted rg, read only the most relevant files/ranges, and avoid reading every search result or large files in full. Stop once you can answer; the main agent can ask follow-ups.
+
+Return a compact research packet: direct answer, key files/functions, minimal citations, and any important uncertainty.""",
 
     "review_mode": """# Current mode: Code Review
 
