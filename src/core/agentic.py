@@ -151,47 +151,7 @@ def _handle_empty_response(empty_response_count, console):
 
 
 
-def _handle_tool_limit_reached(chat_manager, console):
-    """Handle case when tool call limit is exceeded.
 
-    Returns:
-        bool: True if handled successfully, False if error
-    """
-    chat_manager.messages.append({
-        "role": "user",
-        "content": "Tool limit reached. Provide your answer without calling tools."
-    })
-
-    try:
-        response = chat_manager.client.chat_completion(
-            chat_manager.messages, stream=False, tools=None
-        )
-    except LLMError as e:
-        console.print(f"[red]LLM Error: {e}[/red]")
-        return False
-
-    if isinstance(response, dict) and 'usage' in response:
-        provider_cfg = get_provider_config(chat_manager.client.provider)
-        chat_manager.token_tracker.add_usage(
-            response,
-            model_name=provider_cfg.get("model", ""),
-        )
-    try:
-        final_message = response["choices"][0]["message"]
-    except (KeyError, IndexError):
-        console.print("[red]Error: invalid response from model[/red]")
-        return False
-
-    content = final_message.get("content", "").strip()
-    if content:
-        md = Markdown(left_align_headings(content), code_theme=MonokaiDarkBGStyle, justify="left")
-        console.print(md)
-        chat_manager.messages.append(final_message)
-        console.print()
-        return True
-
-    console.print("[red]Error: model returned empty response after tool limit reached.[/red]")
-    return False
 
 class AgenticOrchestrator:
     """Orchestrates the agentic tool-calling loop.
@@ -282,21 +242,31 @@ class AgenticOrchestrator:
     @staticmethod
     def _is_user_cancel_result(result) -> bool:
         """Return True when a tool result represents an explicit user cancel."""
-        text = str(result or "").strip().lower()
-        if text.startswith("exit_code=130"):
+        text = str(result or "").strip()
+        lower_text = text.lower()
+        if lower_text.startswith("exit_code=130"):
             return True
-        cancel_markers = (
-            "operation canceled by user",
-            "operation cancelled by user",
-            "command canceled by user",
-            "command cancelled by user",
+
+        lines = [line.strip().lower() for line in text.splitlines() if line.strip()]
+        if lines and lines[0].startswith("exit_code="):
+            lines = lines[1:]
+        if not lines:
+            return False
+
+        first_line = lines[0]
+        cancel_prefixes = (
+            "operation canceled by user.",
+            "operation cancelled by user.",
+            "command canceled by user.",
+            "command cancelled by user.",
+            "subagent canceled by user.",
+            "subagent cancelled by user.",
             "user canceled selection",
             "user cancelled selection",
-            "cancelled by user",
-            "canceled by user",
-            "access denied by user",
+            "access denied by user.",
+            "full filesystem access denied by user.",
         )
-        return any(marker in text for marker in cancel_markers)
+        return any(first_line.startswith(marker) for marker in cancel_prefixes)
 
     def set_cancel_event(self, event):
         """Replace the orchestrator's cancel event.
@@ -627,6 +597,53 @@ class AgenticOrchestrator:
         )
         return not should_continue
 
+    def _handle_tool_limit_reached(self, thinking_indicator=None):
+        """Handle case when tool call limit is exceeded.
+
+        Appends and logs a synthetic user message, calls the LLM without
+        tools, then delegates to _handle_final_response for proper display,
+        logging, compaction, and context-token updates.
+
+        Returns:
+            bool: True if handled successfully (loop should exit), False if error
+        """
+        user_message = {
+            "role": "user",
+            "content": "Tool limit reached. Provide your answer without calling tools."
+        }
+        self.chat_manager.messages.append(user_message)
+        self.chat_manager.log_message(user_message)
+
+        try:
+            response = self.chat_manager.client.chat_completion(
+                self.chat_manager.messages, stream=False, tools=None
+            )
+        except LLMError as e:
+            self.console.print(f"[red]LLM Error: {e}[/red]")
+            return False
+
+        if isinstance(response, dict) and 'usage' in response:
+            provider_cfg = get_provider_config(self.chat_manager.client.provider)
+            self.chat_manager.token_tracker.add_usage(
+                response,
+                model_name=provider_cfg.get("model", ""),
+            )
+
+        try:
+            final_message = response["choices"][0]["message"]
+        except (KeyError, IndexError):
+            self.console.print("[red]Error: invalid response from model[/red]")
+            return False
+
+        content = final_message.get("content", "").strip()
+        if not content:
+            self.console.print(
+                "[red]Error: model returned empty response after tool limit reached.[/red]"
+            )
+            return False
+
+        return self._handle_final_response(final_message, thinking_indicator)
+
     def _handle_tool_calls(self, response, thinking_indicator, allowed_tools=None, allow_active_plugins=False):
         """Process tool calls and display accompanying content.
 
@@ -735,7 +752,8 @@ class AgenticOrchestrator:
         self.tool_calls_count += 1
 
         if self.tool_calls_count > MAX_TOOL_CALLS:
-            return not _handle_tool_limit_reached(self.chat_manager, self.console)
+            self._handle_tool_limit_reached(thinking_indicator)
+            return True
 
         # Display conversational content if present
         # Skip if calling sub_agent OR if we ARE a sub-agent (sub-agent panel provides context)
@@ -1679,9 +1697,9 @@ class AgenticOrchestrator:
                 # Clean up subagent panel state on error
                 if function_name == "sub_agent" and panel_to_use is not self.panel_updater:
                     panel_to_use.set_error(str(e))
-                return False, f"Error executing tool '{function_name}': {str(e)}"
+                return False, f"exit_code=1\nError executing tool '{function_name}': {str(e)}"
 
-        return False, f"Error: Unknown tool '{function_name}'."
+        return False, f"exit_code=1\nError: Unknown tool '{function_name}'."
 
     def resume_after_approval(self, thinking_indicator=None):
         """Resume the agentic loop after a suspended tool approval is resolved.
