@@ -367,48 +367,13 @@ class SwarmServer:
                     await self._dispatch_queued_tasks_async()
 
                 elif msg_type == "completion_summary":
-                    task_id = msg.get("task_id", "")
-                    summary = msg.get("message", "")
-                    status = msg.get("status", "done")
-                    user_intervened = msg.get("user_intervened", False)
-
-                    with self._lock:
-                        if task_id not in self._tasks:
-                            self._store_event(
-                                f"Ignoring completion for unknown task {task_id} from {worker_id}",
-                                extra={"task_id": task_id, "worker_id": worker_id, "status": "unknown_task"},
-                            )
-                            skip_dispatch = True
-                        else:
-                            self._tasks[task_id]["status"] = status
-                            self._tasks[task_id]["summary"] = summary
-
-                            self._workers[worker_id]["status"] = "idle"
-                            self._workers[worker_id]["current_task_id"] = None
-                            self._workers[worker_id]["current_activity"] = ""
-
-                            intervention_note = " (user intervened)" if user_intervened else ""
-
-                            # Store event for notification history
-                            self._store_event(
-                                f"Task {task_id} {status} on {worker_id}{intervention_note}",
-                                extra={
-                                    "kind": "task_completed",
-                                    "task_id": task_id,
-                                    "worker_id": worker_id,
-                                    "status": status,
-                                    "summary": summary,
-                                },
-                            )
-
-                            self._enqueue_task_terminal_event(
-                                task_id=task_id,
-                                worker_id=worker_id,
-                                display_name=self._workers[worker_id].get("display_name", ""),
-                                status=status,
-                                summary=summary,
-                            )
-                            skip_dispatch = False
+                    skip_dispatch = self._handle_completion_summary(
+                        worker_id=worker_id,
+                        task_id=msg.get("task_id", ""),
+                        summary=msg.get("message", ""),
+                        status=msg.get("status", "done"),
+                        user_intervened=msg.get("user_intervened", False),
+                    )
                     if skip_dispatch:
                         continue
 
@@ -567,6 +532,81 @@ class SwarmServer:
             "summary": summary,
             "task_type": task.get("task_type", "implementation"),
         })
+
+    def _handle_completion_summary(self, *, worker_id: str, task_id: str,
+                                   summary: str, status: str,
+                                   user_intervened: bool = False) -> bool:
+        """Apply a worker completion message.
+
+        Returns True when the message was stale/ignored and queued-task
+        dispatch should be skipped.  Killed/interrupted task states are
+        terminal and must not be overwritten by belated worker messages.
+        """
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                self._store_event(
+                    f"Ignoring completion for unknown task {task_id} from {worker_id}",
+                    extra={"task_id": task_id, "worker_id": worker_id, "status": "unknown_task"},
+                )
+                return True
+
+            task_status = task.get("status")
+            if task_status in {"killed", "interrupted"}:
+                self._store_event(
+                    f"Ignoring stale completion for {task_id} from {worker_id}; task is {task_status}",
+                    extra={
+                        "kind": "warning",
+                        "task_id": task_id,
+                        "worker_id": worker_id,
+                        "status": "stale_completion",
+                        "task_status": task_status,
+                    },
+                )
+                return True
+
+            worker = self._workers.get(worker_id)
+            if worker is None:
+                self._store_event(
+                    f"Ignoring completion for {task_id} from removed worker {worker_id}",
+                    extra={
+                        "kind": "warning",
+                        "task_id": task_id,
+                        "worker_id": worker_id,
+                        "status": "unknown_worker",
+                    },
+                )
+                return True
+
+            task["status"] = status
+            task["summary"] = summary
+
+            worker["status"] = "idle"
+            worker["current_task_id"] = None
+            worker["current_activity"] = ""
+
+            intervention_note = " (user intervened)" if user_intervened else ""
+
+            # Store event for notification history.
+            self._store_event(
+                f"Task {task_id} {status} on {worker_id}{intervention_note}",
+                extra={
+                    "kind": "task_completed",
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "status": status,
+                    "summary": summary,
+                },
+            )
+
+            self._enqueue_task_terminal_event(
+                task_id=task_id,
+                worker_id=worker_id,
+                display_name=worker.get("display_name", ""),
+                status=status,
+                summary=summary,
+            )
+            return False
 
     def _cleanup_worker(self, worker_id: str) -> None:
         """Remove a worker and mark their task as interrupted."""
