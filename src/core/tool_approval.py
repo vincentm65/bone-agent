@@ -215,7 +215,7 @@ def handle_command_approval(command, arguments, tool, context, console,
         if cron_job_id and cron_allowlist:
             cron_allowlist.add_command(cron_job_id, command)
     elif action == "advise":
-        result = f"Command not executed. User advice: {guidance}"
+        result = f"exit_code=1\nCommand not executed. User advice: {guidance}"
         command_executed = False
     elif action == "cancel":
         result = "exit_code=2\nCommand canceled by user. Do not retry this operation."

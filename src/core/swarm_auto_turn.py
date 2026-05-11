@@ -115,7 +115,7 @@ def _inbox_to_auto_turn_extra(item: dict) -> dict | None:
         status = item.get("status", "")
         task_type = item.get("task_type", "implementation")
         result_kind = "auto_continue_completion"
-        if status == "failed":
+        if status in ("failed", "interrupted", "killed"):
             result_kind = "action_required_completion"
         return {
             "kind": result_kind,

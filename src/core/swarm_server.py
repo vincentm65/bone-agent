@@ -401,16 +401,13 @@ class SwarmServer:
                                 },
                             )
 
-                            # Post completion to inbox for admin LLM processing
-                            self._inbox.put({
-                                "kind": "completion",
-                                "task_id": task_id,
-                                "worker_id": worker_id,
-                                "display_name": self._workers[worker_id].get("display_name", ""),
-                                "status": status,
-                                "summary": summary,
-                                "task_type": self._tasks[task_id].get("task_type", "implementation"),
-                            })
+                            self._enqueue_task_terminal_event(
+                                task_id=task_id,
+                                worker_id=worker_id,
+                                display_name=self._workers[worker_id].get("display_name", ""),
+                                status=status,
+                                summary=summary,
+                            )
                             skip_dispatch = False
                     if skip_dispatch:
                         continue
@@ -556,6 +553,21 @@ class SwarmServer:
             )
             self._cleanup_worker(worker_id)
 
+    def _enqueue_task_terminal_event(self, *, task_id: str, worker_id: str,
+                                     status: str, summary: str,
+                                     display_name: str = "") -> None:
+        """Queue a terminal task event for admin LLM processing."""
+        task = self._tasks.get(task_id, {})
+        self._inbox.put({
+            "kind": "completion",
+            "task_id": task_id,
+            "worker_id": worker_id,
+            "display_name": display_name,
+            "status": status,
+            "summary": summary,
+            "task_type": task.get("task_type", "implementation"),
+        })
+
     def _cleanup_worker(self, worker_id: str) -> None:
         """Remove a worker and mark their task as interrupted."""
         with self._lock:
@@ -567,10 +579,20 @@ class SwarmServer:
             if worker:
                 task_id = worker.get("current_task_id")
                 if task_id and task_id in self._tasks:
+                    summary = f"Task interrupted — {worker_id} disconnected"
                     self._tasks[task_id]["status"] = "interrupted"
+                    self._tasks[task_id]["summary"] = summary
+                    self._tasks[task_id]["completed_at"] = time.time()
                     self._store_event(
                         f"Task {task_id} interrupted — {worker_id} disconnected",
                         extra={"kind": "warning", "task_id": task_id, "worker_id": worker_id, "status": "interrupted"},
+                    )
+                    self._enqueue_task_terminal_event(
+                        task_id=task_id,
+                        worker_id=worker_id,
+                        display_name=worker.get("display_name", ""),
+                        status="interrupted",
+                        summary=summary,
                     )
             for key, pending in list(self._pending_approvals.items()):
                 if pending.get("worker_id") == worker_id:
