@@ -296,9 +296,17 @@ def ensure_dream_job(config: CronConfig) -> None:
         job = CronJob(
             id=DREAM_JOB_ID,
             schedule=DREAM_JOB_SCHEDULE,
-            command="Run the dream memory consolidation process. Read yesterday's user messages from ~/.bone/conversations/, analyze them for user preferences, constraints, and explicit 'remember this' requests — do NOT record activity history or what the user was working on. Consolidate into memory files. Then clean up JSONL files older than 7 days.",
+            command=(
+                "Run the dream memory consolidation process. Read yesterday's user messages from ~/.bone/conversations/ and do two things:\n"
+                "\n"
+                "1. Memory consolidation: Analyze messages for user preferences, constraints, and explicit 'remember this' requests — do NOT record activity history or what the user was working on. Consolidate into memory files (~/.bone/user_memory.md for global preferences, .bone/agents.md in the project root for project-specific preferences). Keep each under 1500 chars.\n"
+                "\n"
+                "2. Skill auto-creation: Look for reusable patterns across conversations — repeated multi-step workflows the user asks for frequently, consistent styles or formats they prefer, or instructions they give more than once. When you find a clear pattern, create or update a skill file in ~/.bone/skills/ using the skill format (YAML frontmatter with description and tags, then a # heading and body). Only create skills for genuinely reusable workflows — not one-off requests or trivia. Each skill should be a concise, self-contained instruction prompt.\n"
+                "\n"
+                "Then clean up JSONL files older than 7 days."
+            ),
             enabled=True,
-            description="Dream memory consolidation — scans user messages and updates memories",
+            description="Dream memory consolidation and skill auto-creation — scans user messages, updates memories, and creates reusable skills",
         )
         config.add_job(job)
         logger.info("Seeded dream memory cron job (daily at 4am)")

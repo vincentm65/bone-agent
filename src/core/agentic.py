@@ -307,12 +307,6 @@ class AgenticOrchestrator:
 
         tools = TOOLS()
         if allowed_tools is None:
-            if getattr(self.chat_manager, "swarm_admin_mode", False):
-                admin_blocked_tools = {"execute_command"}
-                return [
-                    tool for tool in tools
-                    if tool.get("function", {}).get("name") not in admin_blocked_tools
-                ]
             return tools
 
         effective_names = set(allowed_tools)
