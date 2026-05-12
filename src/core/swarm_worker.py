@@ -576,6 +576,7 @@ class SwarmWorkerRunner:
             self._admin_work_pending.set()
         elif msg.get("type") == "clear_worker_context":
             self._inbox.put(InboxItem(source="admin", kind="clear_context"))
+            self._admin_work_pending.set()
 
     @property
     def chat_manager(self) -> ChatManager:
@@ -745,6 +746,25 @@ class SwarmWorkerRunner:
             )
         return self.__orchestrator
 
+    def _drain_clear_context_items(self) -> None:
+        """Remove stale clear_context inbox items (superseded by task-start clear)."""
+        temp_items = []
+        while True:
+            try:
+                item = self._inbox.get_nowait()
+                if item.source == "admin" and item.kind == "clear_context":
+                    self._client.send({
+                        "type": "admin_notice",
+                        "worker_id": self.worker_id,
+                        "message": "Context cleared (superseded by new task)",
+                    })
+                    continue
+                temp_items.append(item)
+            except queue.Empty:
+                break
+        for item in temp_items:
+            self._inbox.put(item)
+
     def _clear_terminal_for_next_task(self) -> None:
         """Clear the terminal and display the startup banner (same as /clear)."""
         if hasattr(self.chat_manager, "approve_mode"):
@@ -837,6 +857,9 @@ class SwarmWorkerRunner:
         try:
             self._task_id = task_id
             self._write_scope = write_scope
+
+            # Discard stale clear_context requests — task start clears anyway
+            self._drain_clear_context_items()
 
             # Clear accumulated context from prior tasks before starting
             clear_worker_context(self.chat_manager)

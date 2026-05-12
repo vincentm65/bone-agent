@@ -22,11 +22,18 @@ _effective_hard_limit_tokens = min(
 )
 
 
-def _last_assistant_content(messages: list[dict]) -> str:
-    """Extract content from the last assistant message with non-empty content."""
+def _last_assistant_content(messages: list[dict], max_chars: int = 60_000) -> str:
+    """Extract content from the last assistant message with non-empty content.
+
+    If *max_chars* is given the result is truncated to that many characters
+    (keeping the tail, which tends to contain the most recent findings).
+    """
     for msg in reversed(messages):
         if msg.get("role") == "assistant" and msg.get("content"):
-            return msg["content"].strip()
+            content = msg["content"].strip()
+            if max_chars and len(content) > max_chars:
+                content = content[-max_chars:]
+            return content
     return ""
 
 
@@ -96,6 +103,10 @@ def _format_messages_summary(messages, reason: str = "Hard Limit Reached", max_c
             "Earlier overflow summary content was truncated to keep the parent context safe.\n\n"
             f"{result}"
         )
+        # Truncate again after prepending the header so the final
+        # output stays within max_chars.
+        if len(result) > max_chars:
+            result = result[-max_chars:]
     return result
 
 
@@ -108,7 +119,9 @@ def _configure_compaction():
     if sub_agent_settings.enable_compaction:
         return ChatManager(compact_trigger_tokens=sub_agent_settings.compact_trigger_tokens)
     else:
-        return ChatManager(compact_trigger_tokens=None)
+        cm = ChatManager(compact_trigger_tokens=None)
+        cm._compaction_disabled = True
+        return cm
 
 
 def _inject_system_prompt(chat_manager, sub_agent_type: str = "research"):
@@ -171,7 +184,6 @@ def _create_chat_manager(sub_agent_type: str = "research"):
         ChatManager: A new ChatManager instance with pre-configured system prompt
     """
     chat_manager = _configure_compaction()
-    chat_manager._compaction_disabled = True
     _inject_system_prompt(chat_manager, sub_agent_type=sub_agent_type)
     _load_codebase_map(chat_manager)
     _configure_isolation(chat_manager)

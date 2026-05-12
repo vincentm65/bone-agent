@@ -1159,6 +1159,10 @@ def main():
                                             chat_manager.messages.append(
                                                 {"role": "assistant", "content": partial}
                                             )
+                                # Reset tracker so a handled streaming interrupt
+                                # doesn't bleed into the next idle-prompt Ctrl+C
+                                # and trigger a false double-Ctrl+C exit.
+                                CTRL_C_TRACKER['last_time'] = 0
                                 _safe_print(console, session)  # Extra spacing
                             finally:
                                 # Ensure HTTP connection is closed
