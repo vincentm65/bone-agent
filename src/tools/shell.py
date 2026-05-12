@@ -10,8 +10,6 @@ from typing import Optional
 from rich.panel import Panel
 from llm.config import TOOLS_REQUIRE_CONFIRMATION
 from utils.settings import tool_settings
-from exceptions import CommandExecutionError
-from utils.validation import CHAINING_OPERATORS
 
 from .helpers.base import tool
 from .helpers.formatters import format_tool_result
@@ -251,10 +249,7 @@ def run_shell_command(command, repo_root, rg_exe_path, console, debug_mode, giti
         debug_mode: Whether to show debug output
 
     Returns:
-        str: Formatted tool result
-
-    Raises:
-        CommandExecutionError: If command execution fails
+        str: Formatted tool result (includes error details if execution fails)
     """
     try:
         env = _prepare_execution_environment(repo_root, rg_exe_path)
@@ -277,14 +272,14 @@ def run_shell_command(command, repo_root, rg_exe_path, console, debug_mode, giti
             console.print(f"[dim]→ AI receives:\n{formatted_result}[/dim]")
 
         return formatted_result
-    except CommandExecutionError:
-        # Re-raise our custom exceptions
-        raise
+    except subprocess.TimeoutExpired as e:
+        partial = (e.output or "") + (e.stderr or "")
+        msg = f"exit_code=1\nCommand timed out after {e.timeout}s."
+        if partial.strip():
+            msg += f"\nPartial output:\n{partial[:2000]}"
+        return msg
     except Exception as exc:
-        raise CommandExecutionError(
-            f"Command execution failed",
-            details={"command": command, "original_error": str(exc)}
-        )
+        return f"exit_code=1\nCommand execution failed: {exc}"
 
 
 # =============================================================================
@@ -353,18 +348,15 @@ def execute_command(
     # Validate command
     is_safe, reason = check_command(command)
     if not is_safe:
-        return reason
+        return f"exit_code=1\n{reason}"
 
     # Execute command (approval workflow handled by orchestrator)
-    try:
-        return run_shell_command(
-            command,
-            repo_root,
-            rg_exe_path,
-            console,
-            debug_mode,
-            gitignore_spec,
-            cancel_event=chat_manager.get_agent_cancel_event() if chat_manager else None,
-        )
-    except Exception as e:
-        return f"exit_code=1\nCommand execution failed: {str(e)}"
+    return run_shell_command(
+        command,
+        repo_root,
+        rg_exe_path,
+        console,
+        debug_mode,
+        gitignore_spec,
+        cancel_event=chat_manager.get_agent_cancel_event() if chat_manager else None,
+    )
