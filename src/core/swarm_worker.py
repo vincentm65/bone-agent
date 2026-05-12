@@ -489,6 +489,7 @@ class SwarmWorkerRunner:
         self._admin_work_pending = threading.Event()
         self._busy = threading.Event()
         self._spinner_timer: threading.Timer | None = None
+        self._spinner_stopped: bool = False
         self._deferred_user_input: str | None = None
 
         # Worker identity
@@ -923,6 +924,7 @@ class SwarmWorkerRunner:
 
         if not completed_normally:
             # ADMIN_STOP_SENTINEL — bail out before sending completion summary
+            self._current_activity = ""
             return
 
         # Extract final response
@@ -982,6 +984,7 @@ class SwarmWorkerRunner:
 
         if not completed_normally:
             # ADMIN_STOP_SENTINEL — bail out before printing finished message
+            self._current_activity = ""
             return
 
         if error:
@@ -1147,6 +1150,7 @@ class SwarmWorkerRunner:
 
     def _start_progress_spinner(self, message=""):
         """Start toolbar spinner and frame-advance timer."""
+        self._spinner_stopped = False
         progress = getattr(self.chat_manager, 'progress', None)
         if progress:
             progress.start_spinner(message)
@@ -1154,6 +1158,8 @@ class SwarmWorkerRunner:
 
     def _schedule_spinner_advance(self):
         """Schedule next spinner frame advance."""
+        if self._spinner_stopped:
+            return
         progress = getattr(self.chat_manager, 'progress', None)
         if progress and (progress.spinner_active or progress.subagent_active):
             progress.advance_spinner()
@@ -1166,13 +1172,14 @@ class SwarmWorkerRunner:
             self._spinner_timer.start()
 
     def _stop_progress_spinner(self):
-        """Stop toolbar spinner and cancel timer."""
+        """Stop toolbar spinner, cancel timer, and clear all progress state."""
+        self._spinner_stopped = True
         if self._spinner_timer:
             self._spinner_timer.cancel()
             self._spinner_timer = None
         progress = getattr(self.chat_manager, 'progress', None)
         if progress:
-            progress.stop_spinner()
+            progress.clear_all()
         self._invalidate_toolbar()
 
     def _invalidate_toolbar(self):

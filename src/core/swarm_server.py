@@ -606,6 +606,8 @@ class SwarmServer:
                 status=status,
                 summary=summary,
             )
+            # Prune terminal task to prevent unbounded growth
+            self._tasks.pop(task_id, None)
             return False
 
     def _cleanup_worker(self, worker_id: str) -> None:
@@ -634,6 +636,8 @@ class SwarmServer:
                         status="interrupted",
                         summary=summary,
                     )
+                    # Prune terminal task to prevent unbounded growth
+                    self._tasks.pop(task_id, None)
             for key, pending in list(self._pending_approvals.items()):
                 if pending.get("worker_id") == worker_id:
                     self._pending_approvals.pop(key, None)
@@ -948,6 +952,8 @@ class SwarmServer:
                     f"Task {task_id} killed — {worker_id} force-removed",
                     extra={"kind": "warning", "task_id": task_id, "worker_id": worker_id, "status": "killed"},
                 )
+                # Prune terminal task to prevent unbounded growth
+                self._tasks.pop(task_id, None)
 
             # Cancel pending approvals for this worker.
             for key, pending in list(self._pending_approvals.items()):

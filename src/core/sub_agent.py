@@ -22,6 +22,14 @@ _effective_hard_limit_tokens = min(
 )
 
 
+def _last_assistant_content(messages: list[dict]) -> str:
+    """Extract content from the last assistant message with non-empty content."""
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant" and msg.get("content"):
+            return msg["content"].strip()
+    return ""
+
+
 class HardLimitExceeded(Exception):
     """Raised when the sub-agent hits its hard token limit."""
     pass
@@ -442,16 +450,20 @@ def run_sub_agent(
     except SubAgentCancelled:
         cancelled = True
     except LLMError as e:
-        return {
-            "result": "",
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
-            },
-            "model": temp_chat_manager.client.model,
-            "error": str(e)
-        }
+        error_str = str(e).lower()
+        if "context_length_exceeded" in error_str or "maximum context length" in error_str:
+            hard_limit_exceeded = True
+        else:
+            return {
+                "result": "",
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                },
+                "model": temp_chat_manager.client.model,
+                "error": str(e)
+            }
     except Exception as e:
         import traceback
         error_details = f"{e}\n\nTraceback:\n{traceback.format_exc()}"
@@ -498,25 +510,18 @@ def run_sub_agent(
     delta_cost = tt.total_actual_cost + tt.total_estimated_cost
 
     context_dumped = False
-    if hard_limit_exceeded and sub_agent_settings.dump_context_on_hard_limit:
-        result = _format_messages_summary(temp_chat_manager.messages, "Hard Limit Reached")
-        # This is now a bounded handoff summary rather than a full dump, but
-        # callers still use the flag to mean "inject this into main history
-        # and let the main agent continue from it".
+    if hard_limit_exceeded:
         context_dumped = True
-    elif billed_limit_exceeded and sub_agent_settings.dump_context_on_hard_limit:
-        result = _format_messages_summary(temp_chat_manager.messages, "Token Budget Exhausted")
-        # Same semantic handoff flag as the context hard-limit path above.
+        if sub_agent_settings.dump_context_on_hard_limit:
+            result = _format_messages_summary(temp_chat_manager.messages, "Hard Limit Reached")
+        else:
+            result = _last_assistant_content(temp_chat_manager.messages)
+    elif billed_limit_exceeded:
         context_dumped = True
-    else:
-        # Extract final response (last assistant message with content)
-        final_content = ""
-        for msg in reversed(temp_chat_manager.messages):
-            if msg.get("role") == "assistant" and msg.get("content"):
-                final_content = msg["content"].strip()
-                break
-
-        if billed_limit_exceeded:
+        if sub_agent_settings.dump_context_on_hard_limit:
+            result = _format_messages_summary(temp_chat_manager.messages, "Token Budget Exhausted")
+        else:
+            final_content = _last_assistant_content(temp_chat_manager.messages)
             prefix = (
                 f"Sub-agent hit the cumulative token budget "
                 f"({tt.conv_total_tokens:,} / {sub_agent_settings.billed_hard_limit_tokens:,} tokens burned). "
@@ -524,9 +529,8 @@ def run_sub_agent(
                 "Review what it found so far and decide whether to continue with a follow-up query."
             )
             result = f"{prefix}\n\n{final_content}" if final_content else prefix
-        else:
-            result = final_content
-
+    else:
+        result = _last_assistant_content(temp_chat_manager.messages)
     usage = {
         "prompt_tokens": delta_prompt,
         "completion_tokens": delta_completion,

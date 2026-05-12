@@ -78,6 +78,9 @@ class ToolDefinition:
         if self.handler is None:
             raise RuntimeError(f"Tool '{self.name}' has no registered handler")
 
+        # Work on a copy so the caller's dict is not mutated
+        arguments = dict(arguments)
+
         # Get the handler's parameter names
         sig = inspect.signature(self.handler)
         handler_params = set(sig.parameters.keys())
