@@ -45,50 +45,6 @@ class SubAgentCancelled(Exception):
     pass
 
 
-def _format_messages_dump(messages, reason: str = "Hard Limit Reached") -> str:
-    """Format sub-agent message history as a markdown dump.
-
-    This is intentionally suitable for hidden tool-result context only.  It
-    must never be printed directly to the user's chat transcript.
-
-    Args:
-        messages: List of message dicts from the sub-agent ChatManager.
-
-    Returns:
-        Markdown string with the full conversation context.
-    """
-    lines = [
-        f"## Task too large for subagent, offloading to main agent ({reason})",
-        "",
-        "The sub-agent could not safely continue. Below is the full, unabridged conversation history from its investigation so the main agent can pick up where it left off.",
-        "",
-        "Main agent instruction: Continue researching if more information is required to complete the task. If the available context is enough, answer now.",
-        "",
-        "---",
-        "",
-    ]
-    for i, msg in enumerate(messages):
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        tool_calls = msg.get("tool_calls")
-        tool_call_id = msg.get("tool_call_id")
-
-        if tool_call_id:
-            lines.append(f"### Message {i} — tool result ({tool_call_id})")
-        elif tool_calls:
-            lines.append(f"### Message {i} — assistant tool calls")
-            for tc in tool_calls:
-                fn = tc.get("function", {})
-                lines.append(f"- `{fn.get('name', '?')}` — `{fn.get('arguments', '')}`")
-        else:
-            lines.append(f"### Message {i} — {role}")
-
-        if content:
-            lines.append(content)
-        lines.append("")
-    return "\n".join(lines)
-
-
 def _format_messages_summary(messages, reason: str = "Hard Limit Reached", max_chars: int = 60_000) -> str:
     """Format a bounded overflow summary for the parent agent.
 

@@ -581,6 +581,16 @@ def main():
         pending_attachments.clear()
         event.app.invalidate()
 
+    @bindings.add('enter', filter=Condition(lambda: INPUT_BLOCKED.get('blocked', False)))
+    def _block_enter_during_agent(event):
+        """Swallow Enter while a background agent is running.
+
+        Without this binding, PTK's default accept handler fires on Enter
+        during background prompts (empty-prompt + inputhook), returning
+        whatever text the user typed and breaking out of the agent wait.
+        """
+        pass  # Intentionally swallow the keypress
+
     swarm_nav_enabled = Condition(
         lambda: (
             not INPUT_BLOCKED.get('blocked', False)
