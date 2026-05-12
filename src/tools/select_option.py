@@ -587,24 +587,34 @@ def select_option(
 
         console = (context or {}).get("console")
 
-        # Return the selected values (single string for 1 question, comma-separated for multiple)
+        # Return the selected values
         if isinstance(result, str):
             if console:
                 console.print(f"[dim]Selected: {result}[/dim]", highlight=False)
             return f"exit_code=0\n{result}"
         else:
-            # Result is a list (multi-question mode or multi-select)
-            formatted = []
-            for r in result:
-                if isinstance(r, list):
-                    # Multi-select question: comma-separated values
-                    formatted.append(', '.join(str(v) for v in r))
-                else:
-                    formatted.append(str(r))
-            selected_text = ', '.join(formatted)
+            # Result is a list
+            if len(questions) > 1:
+                # Multi-question mode: label each answer by question number
+                lines = ["exit_code=0"]
+                for i, r in enumerate(result):
+                    if isinstance(r, list):
+                        lines.append(f"Q{i+1}: {', '.join(str(v) for v in r)}")
+                    else:
+                        lines.append(f"Q{i+1}: {r}")
+                tool_result = '\n'.join(lines)
+            else:
+                # Single question: simple comma-separated output
+                formatted = []
+                for r in result:
+                    if isinstance(r, list):
+                        formatted.append(', '.join(str(v) for v in r))
+                    else:
+                        formatted.append(str(r))
+                tool_result = f"exit_code=0\n{', '.join(formatted)}"
             if console:
-                console.print(f"[dim]Selected: {selected_text}[/dim]", highlight=False)
-            return f"exit_code=0\n{selected_text}"
+                console.print(f"[dim]Selected: {tool_result.split(chr(10), 1)[-1]}[/dim]", highlight=False)
+            return tool_result
 
     except Exception as e:
         return f"exit_code=1\nError displaying selection panel: {str(e)}"

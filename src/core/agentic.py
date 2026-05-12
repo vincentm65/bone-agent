@@ -158,7 +158,6 @@ from core.tool_feedback import (
     vault_root_str,
     _print_or_append,
     strip_leading_task_list_echo,
-    build_read_file_label,
     build_tool_label,
     display_tool_feedback,
 )
@@ -1005,28 +1004,9 @@ class AgenticOrchestrator:
                     arguments = tool_call.get("function", {}).get("arguments", "{}")
                     args_dict = json.loads(arguments) if isinstance(arguments, str) else arguments
 
-                    # Label builders
-                    label_builders = {
-                        "rg": lambda a: f"rg: {a.get('pattern', '')[:40]}",
-                        "read_file": lambda a: build_read_file_label(
-                            a.get('path_str', ''),
-                            a.get('start_line'),
-                            a.get('max_lines'),
-                            with_colon=True
-                        ),
-                        "list_directory": lambda a: f"list_directory: {a.get('path_str', '')}",
-                        "search_plugins": lambda a: f"search_plugins: {a.get('query', '')}",
-                        "create_file": lambda a: f"create_file: {a.get('path_str', '')}",
-                        "web_search": lambda a: f"web search | {a.get('query', '')}",
-                        "create_task_list": lambda a: "create_task_list",
-                        "complete_task": lambda a: "complete_task",
-                        "show_task_list": lambda a: "show_task_list",
-                    }
-
-                    # Print the label first (staggered output: label → feedback)
-                    label_builder = label_builders.get(function_name, lambda a: function_name)
+                    # Use the canonical label builder (same as sequential path)
                     try:
-                        label = label_builder(args_dict)
+                        label = build_tool_label(function_name, args_dict)
                         
                         # Print the label before feedback (matches sequential path)
                         if not self.panel_updater and function_name not in ("create_task_list", "complete_task", "show_task_list"):
@@ -1864,7 +1844,7 @@ class AgenticOrchestrator:
     def _append_tool_result(self, tool_id, tool_result):
         content = (
             f"exit_code=0\n{str(tool_result)}"
-            if hasattr(tool_result, '__rich__')
+            if isinstance(tool_result, Text)
             else str(tool_result)
         )
         tool_msg = {
@@ -1915,13 +1895,25 @@ class AgenticOrchestrator:
             elif isinstance(raw_result, str):
                 tool_result_str = f"exit_code=0\n{raw_result}"
             elif isinstance(raw_result, list):
-                formatted = []
-                for r in raw_result:
-                    if isinstance(r, list):
-                        formatted.append(', '.join(str(v) for v in r))
-                    else:
-                        formatted.append(str(r))
-                tool_result_str = f"exit_code=0\n{', '.join(formatted)}"
+                questions = getattr(exc, 'questions', [])
+                if len(questions) > 1:
+                    # Multi-question mode: label each answer by question number
+                    lines = ["exit_code=0"]
+                    for i, r in enumerate(raw_result):
+                        if isinstance(r, list):
+                            lines.append(f"Q{i+1}: {', '.join(str(v) for v in r)}")
+                        else:
+                            lines.append(f"Q{i+1}: {r}")
+                    tool_result_str = '\n'.join(lines)
+                else:
+                    # Single question: simple comma-separated output
+                    formatted = []
+                    for r in raw_result:
+                        if isinstance(r, list):
+                            formatted.append(', '.join(str(v) for v in r))
+                        else:
+                            formatted.append(str(r))
+                    tool_result_str = f"exit_code=0\n{', '.join(formatted)}"
             else:
                 tool_result_str = f"exit_code=0\n{raw_result}"
             console = self._get_console()

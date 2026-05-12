@@ -292,12 +292,27 @@ def run_sub_agent(
 
     _soft_limit_warned = False
     _billed_warning_sent = False
+    _pending_warnings = []
 
     def _chat_completion_with_token_hint(messages, **kwargs):
-        """Inject one-time limit warnings when thresholds are crossed. Passes messages
-        through unchanged on normal turns to keep the message prefix stable for caching."""
+        """Inject pending limit warnings into the next chat_completion call."""
+        nonlocal _pending_warnings
+        if _pending_warnings:
+            warning_msg = {"role": "system", "content": "\n".join(_pending_warnings)}
+            _pending_warnings = []
+            return original_chat_completion([warning_msg, *messages], **kwargs)
+        return original_chat_completion(messages, **kwargs)
+
+    def _get_llm_response_with_hard_limit(allowed_tools=None, allow_active_plugins=False):
+        """Wrapper to check context and billed token limits and update panel state."""
         nonlocal _soft_limit_warned, _billed_warning_sent
+
+        if cancel_event and cancel_event.is_set():
+            raise SubAgentCancelled("Sub-agent cancelled by user.")
+
         tt = temp_chat_manager.token_tracker
+
+        # --- Warning thresholds (checked before hard limits) ---
         warnings = []
 
         if not _soft_limit_warned and tt.current_context_tokens >= sub_agent_settings.soft_limit_tokens:
@@ -317,40 +332,36 @@ def run_sub_agent(
                 "Do NOT call any more tools."
             )
 
-        if warnings:
-            warning_msg = {"role": "system", "content": "\n".join(warnings)}
-            return original_chat_completion([warning_msg, *messages], **kwargs)
-
-        return original_chat_completion(messages, **kwargs)
-
-    def _get_llm_response_with_hard_limit(allowed_tools=None, allow_active_plugins=False):
-        """Wrapper to check context and billed token limits and update panel state."""
-        if cancel_event and cancel_event.is_set():
-            raise SubAgentCancelled("Sub-agent cancelled by user.")
-
-        tt = temp_chat_manager.token_tracker
+        # --- Hard limits (raise exceptions, including any pending warnings) ---
 
         # Check hard token limit before making LLM call
         # Use current_context_tokens (prompt size) not total_tokens (cumulative billing)
         # to catch prompt-length-over-limit errors before they hit the API.
         if tt.current_context_tokens >= _effective_hard_limit_tokens:
-            raise HardLimitExceeded(
+            msg = (
                 f"Sub-agent hard token limit exceeded: "
                 f"{tt.current_context_tokens:,} / {_effective_hard_limit_tokens:,} tokens."
             )
+            if warnings:
+                msg = "\n".join(warnings) + "\n" + msg
+            raise HardLimitExceeded(msg)
 
         # Check cumulative billed tokens to stop runaway sub-agents even when
         # current context remains below the prompt-size hard limit.
-        #
-        # Note: the billed warning is injected by _chat_completion_with_token_hint
-        # on the next chat_completion call. This hard stop runs before each LLM
-        # response, so once we hit the billed hard limit the warning may never be
-        # delivered if no further chat_completion call is made.
         if tt.conv_total_tokens >= sub_agent_settings.billed_hard_limit_tokens:
-            raise BilledLimitExceeded(
+            msg = (
                 f"Sub-agent billed token limit exceeded: "
                 f"{tt.conv_total_tokens:,} / {sub_agent_settings.billed_hard_limit_tokens:,} tokens."
             )
+            if warnings:
+                msg = "\n".join(warnings) + "\n" + msg
+            raise BilledLimitExceeded(msg)
+
+        # If warnings were generated but no hard limit was hit, queue them
+        # for injection by _chat_completion_with_token_hint on this turn's
+        # upcoming chat_completion call.
+        if warnings:
+            _pending_warnings.extend(warnings)
 
         # Update panel with live token counts
         # Order: conversation length (current context) first, total tokens billed second

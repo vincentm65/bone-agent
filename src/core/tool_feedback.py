@@ -944,6 +944,40 @@ def build_panel_tool_message(tool_name, tool_result, command):
         first_two = "\n".join(tool_result.splitlines()[:2]).strip()
         return f"[grey]{tool_name}[/grey]\n[dim]╰─ {first_two or tool_result.strip()}[/dim]"
 
+    if tool_name == "create_file":
+        path = ""
+        if command:
+            match = re.search(r'create_file:?\s*(.+)', command)
+            if match:
+                path = match.group(1).strip()
+        exit_code = extract_exit_code(tool_result)
+        if exit_code == 0:
+            return f"[grey]create_file {path}[/grey]\n[dim]╰─ Created[/dim]"
+        detail = ""
+        if exit_code is not None:
+            lines = tool_result.split('\n')
+            detail = next((line.strip() for line in lines[1:] if line.strip()), "")
+        if detail:
+            return f"[grey]create_file {path}[/grey]\n[dim red]╰─ Failed: {detail}[/dim red]"
+        return f"[grey]create_file {path}[/grey]\n[dim red]╰─ Failed[/dim red]"
+
+    if tool_name == "edit_file":
+        path = ""
+        if command:
+            match = re.search(r'edit_file:?\s*(.+)', command)
+            if match:
+                path = match.group(1).strip()
+        exit_code = extract_exit_code(tool_result)
+        if exit_code == 0:
+            return f"[grey]edit_file {path}[/grey]\n[dim]╰─ Applied[/dim]"
+        detail = ""
+        if exit_code is not None:
+            lines = tool_result.split('\n')
+            detail = next((line.strip() for line in lines[1:] if line.strip()), "")
+        if detail:
+            return f"[grey]edit_file {path}[/grey]\n[dim red]╰─ Failed: {detail}[/dim red]"
+        return f"[grey]edit_file {path}[/grey]\n[dim red]╰─ Failed[/dim red]"
+
     if tool_name in ("dispatch_swarm_task", "handle_approval", "kill_swarm_worker", "spawn_swarm_worker"):
         label = command if command else tool_name
         summary, is_failure = _format_swarm_tool_summary(command or tool_name, tool_result)
