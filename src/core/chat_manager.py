@@ -104,6 +104,14 @@ class ChatManager:
         # discards late LLM responses after in-flight HTTP calls complete.
         self._agent_cancel_event: threading.Event = threading.Event()
 
+        # Queued user-message state: messages submitted while an agent turn
+        # is running are buffered here and drained between turns.
+        self._queued_user_messages: queue.Queue[Any] = queue.Queue()
+        self._queued_user_lock: threading.Lock = threading.Lock()
+        # Agent-running guard: set while the agentic loop owns the conversation
+        # and cleared when the turn completes.
+        self._agent_running_event: threading.Event = threading.Event()
+
         # Disable all compaction when True (used by sub-agents to preserve findings)
         self._compaction_disabled = False
 
@@ -1761,6 +1769,95 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             except Exception:
                 break
         return prompts
+
+    # -- Agent-running guard and queued user messages ---------------------
+
+    def set_agent_running(self, running: bool) -> None:
+        """Set or clear the agent-running flag and invalidate toolbar.
+
+        Args:
+            running: True when an agent turn starts, False when it ends.
+        """
+        if running:
+            self._agent_running_event.set()
+        else:
+            self._agent_running_event.clear()
+        self.invalidate_toolbar()
+
+    def is_agent_running(self) -> bool:
+        """Return True if an agent turn is currently in progress."""
+        return self._agent_running_event.is_set()
+
+    def enqueue_user_message(self, content: Any) -> bool:
+        """Buffer a user message for processing after the current agent turn.
+
+        Rejects None, empty strings, and whitespace-only strings.
+        Non-string content types (e.g. multimodal lists) are enqueued as-is.
+
+        Args:
+            content: User message content (string, list, or other types).
+
+        Returns:
+            True if the message was enqueued, False if rejected.
+        """
+        if content is None:
+            return False
+        if isinstance(content, str):
+            if not content.strip():
+                return False
+        with self._queued_user_lock:
+            self._queued_user_messages.put(content)
+        self.invalidate_toolbar()
+        return True
+
+    def queued_user_message_count(self) -> int:
+        """Return the number of queued user messages (thread-safe)."""
+        with self._queued_user_lock:
+            return self._queued_user_messages.qsize()
+
+    def has_queued_user_messages(self) -> bool:
+        """Return True if there are queued user messages waiting."""
+        return self.queued_user_message_count() > 0
+
+    def drain_queued_user_messages(self, limit: int | None = None) -> list[Any]:
+        """Drain queued user messages in FIFO order.
+
+        Args:
+            limit: Maximum number of messages to drain. None drains all.
+
+        Returns:
+            List of drained message contents (may be empty).
+        """
+        drained: list[Any] = []
+        with self._queued_user_lock:
+            while True:
+                if limit is not None and len(drained) >= limit:
+                    break
+                try:
+                    drained.append(self._queued_user_messages.get_nowait())
+                except Exception:
+                    break
+        if drained:
+            self.invalidate_toolbar()
+        return drained
+
+    def clear_queued_user_messages(self) -> int:
+        """Remove all queued user messages and return the count removed.
+
+        Returns:
+            Number of messages that were discarded.
+        """
+        with self._queued_user_lock:
+            count = 0
+            while True:
+                try:
+                    self._queued_user_messages.get_nowait()
+                    count += 1
+                except Exception:
+                    break
+        if count:
+            self.invalidate_toolbar()
+        return count
 
     def sync_log(self):
         """Rewrite the entire conversation log to match current message state.

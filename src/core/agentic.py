@@ -373,12 +373,21 @@ class AgenticOrchestrator:
         self._current_allowed_tools = allowed_tools
         self._current_allow_active_plugins = allow_active_plugins
 
-        # Clear the task list on normal user turns. Swarm auto-turns are
-        # synthetic follow-ups for the active plan, so they must preserve it.
+        # Clear completed task lists on the next normal user turn. Swarm
+        # auto-turns are synthetic follow-ups for the active plan, so they
+        # must preserve it. Incomplete plans stay alive across user
+        # interjections (e.g. "spawn another worker") so the admin can keep
+        # completing the original checklist.
         task_list = getattr(self.chat_manager, "task_list", None)
-        if task_list and not _is_swarm_auto_turn_input(user_input):
+        if (
+            task_list
+            and not _is_swarm_auto_turn_input(user_input)
+            and all(t.get("completed") for t in task_list)
+        ):
             task_list.clear()
             self.chat_manager.task_list_title = None
+            if hasattr(self.chat_manager, "swarm_complete"):
+                self.chat_manager.swarm_complete = False
 
         user_message = {"role": "user", "content": sanitize_message_content(user_input)}
 

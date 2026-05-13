@@ -115,6 +115,11 @@ class OpenAIHandler:
 
         if config.get("provider") == "bone" and payload.get("model", "").startswith("deepseek/"):
             payload["provider"] = {"order": ["deepseek"]}
+        
+        # Force Cerebras for gpt-oss-120b (fast inference model)
+        model = payload.get("model", "")
+        if model == "openai/gpt-oss-120b" or model.endswith("/gpt-oss-120b"):
+            payload["provider"] = {"order": ["Cerebras"], "allow_fallbacks": False}
 
         return payload
 

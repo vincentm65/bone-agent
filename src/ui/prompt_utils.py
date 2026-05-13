@@ -261,23 +261,48 @@ def _get_worker_status_text(chat_manager, worker_runner, include_progress: bool 
     return toolbar_text
 
 
+def _get_queued_message_text(chat_manager):
+    """Return a styled one-line indicator of queued user messages.
+
+    Returns an empty string when ``queued_user_message_count()`` is missing,
+    raises, or returns 0.
+    """
+    try:
+        count_fn = getattr(chat_manager, 'queued_user_message_count', None)
+        if count_fn is None:
+            return ""
+        count = count_fn()
+        if not count:
+            return ""
+        plural = "s" if count != 1 else ""
+        line = f"↩ {count} queued message{plural}"
+        return _style_line(line, "#B8A040") + "\n"
+    except Exception:
+        return ""
+
+
 def _get_progress_above_text(chat_manager):
     """Return progress text for above the model status bar.
 
-    Generic spinner (Thinking ...) and active tool indicator.
-    Returns an empty string if neither is active.
+    Generic spinner (Thinking ...) and active tool indicator plus an
+    optional queued-message count line.  Returns an empty string when
+    nothing is active.
 
     When a subagent is active, the generic spinner is suppressed to avoid
     duplicate status display (the subagent line in _get_progress_below_text
-    handles all progress rendering).
+    handles all progress rendering), but the queued-message count still
+    appears.
     """
+    queue_line = _get_queued_message_text(chat_manager)
+
     progress = getattr(chat_manager, 'progress', None)
     if progress is None:
-        return ""
+        return queue_line
 
-    # Suppress generic spinner when subagent is active to avoid duplicate
+    # Suppress generic spinner when subagent is active to avoid duplicate,
+    # but still show queued-message count.
     if progress.subagent_active:
-        return ""
+        return queue_line
 
     # Spinner — shown when no subagent is active
     spinner_text = progress.get_spinner_text()
@@ -287,14 +312,20 @@ def _get_progress_above_text(chat_manager):
         msg = parts[1] if len(parts) > 1 else ""
         line = _truncate_plain(f"{frame} {msg}")
         frame_part, _, msg_part = line.partition(" ")
-        return f'<style fg="cyan">{_escape_html(frame_part)}</style> <style fg="white">{_escape_html(msg_part)}</style>\n'
+        spinner_line = f'<style fg="cyan">{_escape_html(frame_part)}</style> <style fg="white">{_escape_html(msg_part)}</style>\n'
+        if queue_line:
+            return spinner_line + queue_line
+        return spinner_line
 
     # Active tool
     tool_name = progress.active_tool_name
     if tool_name:
-        return _style_line(f"* {tool_name}", "#5F9EA0") + " "
+        tool_line = _style_line(f"* {tool_name}", "#5F9EA0") + " "
+        if queue_line:
+            return tool_line + queue_line
+        return tool_line
 
-    return ""
+    return queue_line
 
 
 def _get_progress_below_text(chat_manager):

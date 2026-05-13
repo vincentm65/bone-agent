@@ -768,7 +768,12 @@ class SwarmWorkerRunner:
     def _clear_terminal_for_next_task(self) -> None:
         """Clear the terminal and display the startup banner (same as /clear)."""
         if hasattr(self.chat_manager, "approve_mode"):
-            display_startup_banner(self.chat_manager.approve_mode, clear_screen=True)
+            display_startup_banner(
+                self.chat_manager.approve_mode,
+                clear_screen=True,
+                provider=self.provider or None,
+                model=self.model or None,
+            )
         elif sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
@@ -992,7 +997,12 @@ class SwarmWorkerRunner:
         write_scope: list[str] = []
 
         if hasattr(self.chat_manager, "approve_mode"):
-            display_startup_banner(self.chat_manager.approve_mode, clear_screen=True)
+            display_startup_banner(
+                self.chat_manager.approve_mode,
+                clear_screen=True,
+                provider=self.provider or None,
+                model=self.model or None,
+            )
         elif sys.stdout.isatty():
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()

@@ -37,7 +37,7 @@ def _get_version() -> str:
         return "?.?.?"
 
 
-def display_startup_banner(approve_mode: str, *, clear_screen: bool = False):
+def display_startup_banner(approve_mode: str, *, clear_screen: bool = False, provider: str | None = None, model: str | None = None):
     """Ultra-minimalist startup screen for bone-agent.
 
     Args:
@@ -47,15 +47,16 @@ def display_startup_banner(approve_mode: str, *, clear_screen: bool = False):
     if clear_screen:
         console.clear()
     # Get model name based on provider
-    provider_config = config.get_provider_config(config.LLM_PROVIDER)
-    if config.LLM_PROVIDER == "local":
-        model_path = provider_config.get("model") or ""
+    effective_provider = provider or config.LLM_PROVIDER
+    provider_config = config.get_provider_config(effective_provider)
+    if effective_provider == "local":
+        model_path = model or provider_config.get("model") or ""
         if model_path:
             model_name = os.path.basename(model_path)
         else:
             model_name = config.detect_local_model() or "None"
     else:
-        model_name = provider_config.get("model") or "None"
+        model_name = model or provider_config.get("model") or "None"
 
     # Get and format current directory
     current_dir = os.getcwd()
@@ -73,7 +74,7 @@ def display_startup_banner(approve_mode: str, *, clear_screen: bool = False):
     )
 
     model_info = Text.assemble(
-        (f"{config.LLM_PROVIDER.upper()} ", "bold #5F9EA0"),
+        (f"{effective_provider.upper()} ", "bold #5F9EA0"),
         (f"{model_name}", "grey70")
     )
 

@@ -119,12 +119,20 @@ def check_double_ctrl_c() -> bool:
         return False
 
 
-def _drain_stdin(session):
+def _drain_stdin(session, chat_manager=None):
     """Drain buffered keystrokes and clear the prompt_toolkit buffer.
 
-    Called after AI processing ends to discard any input the user
-    typed while the thinking indicator was active.
+    Called after AI processing ends.  When *chat_manager* is given, any
+    non-whitespace PTK buffer text is preserved (not enqueued) and
+    restored into the buffer after the terminal flush so the user can
+    continue typing.  When *chat_manager* is ``None``, the buffer is
+    cleared unconditionally.
     """
+    # Capture partial input before flushing so it can be restored later.
+    preserved_text = None
+    if chat_manager is not None:
+        preserved_text = _buffer_text(session)
+
     try:
         if os.name != 'nt':
             import termios
@@ -143,8 +151,117 @@ def _drain_stdin(session):
     except Exception:
         pass
 
+    # Restore the partial input the user was still typing.
+    # Stash the text on the session so it survives prompt teardown and
+    # can be restored when the next normal idle prompt starts.
+    if preserved_text and preserved_text.strip():
+        _stash_prompt_buffer(session, preserved_text)
+        _restore_prompt_buffer(session, preserved_text)
+
 
 from core.swarm_auto_turn import drain_inbox_to_prompts
+
+
+# ── Helpers: prompt-buffer access ──────────────────────────────────
+
+def _buffer_text(session):
+    """Safe getter for session.default_buffer.text."""
+    try:
+        buf = session.default_buffer
+        if buf is not None:
+            return buf.text or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _clear_prompt_buffer(session):
+    """Safe clear of buffer text and reset cursor position."""
+    try:
+        buf = session.default_buffer
+        if buf is not None:
+            buf.text = ""
+            buf.cursor_position = 0
+    except Exception:
+        pass
+
+
+def _restore_prompt_buffer(session, text):
+    """Set buffer text and cursor position if *text* is non-empty.
+
+    Returns True if text was set.
+    """
+    if not text or (isinstance(text, str) and not text.strip()):
+        return False
+    try:
+        buf = session.default_buffer
+        if buf is not None:
+            buf.text = text
+            buf.cursor_position = len(text)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _stash_prompt_buffer(session, text):
+    """Stash *text* on *session* for later restoration.
+
+    Only stores non-whitespace text.  The stash is kept as a private
+    attribute ``_bone_restore_prompt_text`` on the session object so it
+    survives prompt teardown/reset cycles.
+    """
+    if not text or not text.strip():
+        return
+    try:
+        session._bone_restore_prompt_text = text
+    except Exception:
+        pass
+
+
+def _pop_stashed_prompt_buffer(session):
+    """Return and clear the stashed prompt text from *session*.
+
+    Returns the stashed string or ``None`` if nothing was stashed.
+    """
+    try:
+        text = getattr(session, '_bone_restore_prompt_text', None)
+        if text is not None:
+            session._bone_restore_prompt_text = None
+        return text
+    except Exception:
+        return None
+
+
+def _restore_stashed_prompt_buffer(session):
+    """Pop any stashed text and restore it into the prompt buffer.
+
+    Returns True if text was restored, False otherwise.
+    """
+    text = _pop_stashed_prompt_buffer(session)
+    if text is None:
+        return False
+    return _restore_prompt_buffer(session, text)
+
+
+def _restore_swarm_interrupted_prompt_buffer(session, chat_manager):
+    """Restore idle-prompt text saved when a swarm interrupt fired.
+
+    Swarm interrupts can happen while the user is still drafting a message at
+    the normal prompt.  That draft is stored on the chat manager, not in the
+    queued-message FIFO, because the user did not press Enter to submit it.
+    """
+    if chat_manager is None:
+        return False
+    try:
+        text = getattr(chat_manager, '_pending_prompt_restore_text', None)
+        if text is not None:
+            chat_manager._pending_prompt_restore_text = None
+    except Exception:
+        return False
+    if text is None:
+        return False
+    return _restore_prompt_buffer(session, text)
 
 
 # ── Helper: toolbar spinner management ────────────────────────────
@@ -305,6 +422,7 @@ def _resume_orchestrator_with_live_toolbar(
     session,
     safe_console,
     resume_method_name,
+    prompt_callable=None,
 ):
     """Run a suspended-agent resume with the status toolbar still visible."""
     completion_event = threading.Event()
@@ -319,7 +437,7 @@ def _resume_orchestrator_with_live_toolbar(
     agent_thread.start()
     try:
         raw_input = session.prompt(
-            lambda: "",
+            prompt_callable if prompt_callable is not None else lambda: "",
             bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
             inputhook=_create_agent_done_inputhook(
                 completion_event,
@@ -385,6 +503,17 @@ def _create_agent_done_inputhook(completion_event, on_complete=None):
 
 # ── Helpers: background-prompt cleanup ────────────────────────────
 
+def _clear_transient_prompt_line():
+    """Erase a transient host prompt line (e.g. interactive-command host).
+
+    Uses the ANSI cursor-up + line-clear idiom already present elsewhere
+    in this file.  Intended only for internal host/transient prompts —
+    NOT for real submitted chat prompts.
+    """
+    sys.stdout.write("\033[F\033[K")
+    sys.stdout.flush()
+
+
 def _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread=None):
     """Standard cleanup after a background-thread prompt completes.
 
@@ -396,7 +525,7 @@ def _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread=None):
     _stop_progress_spinner(chat_manager)
     safe_console.set_app(None)
     INPUT_BLOCKED['blocked'] = False
-    _drain_stdin(session)
+    _drain_stdin(session, chat_manager=chat_manager)
 
 
 def _prompt_with_erase_when_done(session, *args, **kwargs):
@@ -450,6 +579,106 @@ def _handle_ctrl_c_bg_prompt(chat_manager, session, safe_console,
         _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
         if not check_double_ctrl_c():
             console.print(f"\n[yellow]{idle_msg}[/yellow]")
+
+
+def _run_subagent_worker(chat_manager, session, safe_console, cmd_worker):
+    """Run a slash-command subagent worker in a background thread with a live PTK prompt.
+
+    Handles thread setup, prompting, Ctrl+C cancellation, and cleanup.
+    Returns ``True`` on normal completion, ``False`` on KeyboardInterrupt.
+    """
+    INPUT_BLOCKED['blocked'] = True
+    set_agent_running = getattr(chat_manager, 'set_agent_running', None)
+    if set_agent_running is not None:
+        set_agent_running(True)
+    completion_event = threading.Event()
+    safe_console.set_app(session.app)
+    agent_thread = threading.Thread(
+        target=cmd_worker,
+        args=(console, safe_console, completion_event),
+        daemon=True,
+    )
+    agent_thread.start()
+    interrupted = False
+    try:
+        _prompt_with_erase_when_done(
+            session,
+            lambda: get_queue_prompt(chat_manager),
+            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+            inputhook=_create_agent_done_inputhook(
+                completion_event,
+                on_complete=lambda: _stop_progress_spinner(chat_manager),
+            ),
+        )
+    except KeyboardInterrupt:
+        _handle_ctrl_c_bg_prompt(
+            chat_manager, session, safe_console,
+            agent_thread, completion_event,
+            cancel_msg="Subagent cancelled.",
+            idle_msg="Cancelled (Ctrl+C). Press Ctrl+C again to exit.",
+        )
+        interrupted = True
+    finally:
+        if not interrupted:
+            _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+        if set_agent_running is not None:
+            set_agent_running(False)
+    return not interrupted
+
+
+def _run_background_agent_turn(chat_manager, session, safe_console, user_content, *,
+                               idle_msg="Response interrupted (Ctrl+C). Press Ctrl+C again to exit.",
+                               prompt_callable=None):
+    """Run one agent turn in a background thread with a live PTK prompt/toolbar.
+
+    Returns the raw input from the transient prompt, or ``None`` if the
+    turn was interrupted via Ctrl+C.  The caller is responsible for
+    inspecting the return value and deciding whether to continue/break.
+    """
+    INPUT_BLOCKED['blocked'] = True
+    set_agent_running = getattr(chat_manager, 'set_agent_running', None)
+    if set_agent_running is not None:
+        set_agent_running(True)
+
+    completion_event = threading.Event()
+    result_holder = {'done': False}
+
+    try:
+        safe_console.set_app(session.app)
+        _start_progress_spinner(chat_manager)
+        console.print("─" * console.width, style="rgb(30,30,30)")
+        console.print()
+        agent_thread = threading.Thread(
+            target=_run_agent_in_thread,
+            args=(chat_manager, user_content, console, safe_console,
+                  Path.cwd().resolve(), RG_EXE_PATH,
+                  DEBUG_MODE_CONTAINER['debug'],
+                  completion_event, result_holder),
+            daemon=True,
+        )
+        agent_thread.start()
+        try:
+            raw_input = _prompt_with_erase_when_done(
+                session,
+                prompt_callable if prompt_callable is not None else lambda: "",
+                bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+                inputhook=_create_agent_done_inputhook(
+                    completion_event,
+                    on_complete=lambda: _stop_progress_spinner(chat_manager),
+                ),
+            )
+        except KeyboardInterrupt:
+            _handle_ctrl_c_bg_prompt(
+                chat_manager, session, safe_console,
+                agent_thread, completion_event,
+                idle_msg=idle_msg,
+            )
+            return None
+        _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+        return raw_input
+    finally:
+        if set_agent_running is not None:
+            set_agent_running(False)
 
 
 def main():
@@ -568,6 +797,10 @@ def main():
             console.print(prompt_text, end="")
         return ANSI(capture.get())
 
+    def get_queue_prompt(chat_manager):
+        """Return prompt shown while agent work runs and user input is queued."""
+        return get_prompt(chat_manager)
+
     @bindings.add('escape', 'escape')
     def clear_input(event):
         """Clear the current input line on double ESC press (blocked during thinking)."""
@@ -581,15 +814,30 @@ def main():
         pending_attachments.clear()
         event.app.invalidate()
 
-    @bindings.add('enter', filter=Condition(lambda: INPUT_BLOCKED.get('blocked', False)))
-    def _block_enter_during_agent(event):
-        """Swallow Enter while a background agent is running.
+    _enter_queue_filter = Condition(
+        lambda: (
+            INPUT_BLOCKED.get('blocked', False)
+            and get_active_interaction(chat_manager) is None
+        )
+    )
 
-        Without this binding, PTK's default accept handler fires on Enter
-        during background prompts (empty-prompt + inputhook), returning
-        whatever text the user typed and breaking out of the agent wait.
-        """
-        pass  # Intentionally swallow the keypress
+    @bindings.add('enter', filter=_enter_queue_filter)
+    def _queue_message_during_agent(event):
+        """Queue typed text while an agent/background turn is running."""
+        buf = event.app.current_buffer
+        if buf is None:
+            return
+        text = buf.text
+        buf.text = ""
+        if text.strip():
+            chat_manager.enqueue_user_message(text)
+            _tb = getattr(chat_manager, "invalidate_toolbar", None)
+            if _tb is not None:
+                try:
+                    _tb()
+                except Exception:
+                    pass
+        event.app.invalidate()
 
     swarm_nav_enabled = Condition(
         lambda: (
@@ -700,6 +948,112 @@ def main():
 
     handoff_to_worker = False
 
+    def print_queued_user_message(message_text, has_attachments=False):
+        """Print a queued user message before its follow-up agent turn."""
+        if message_text:
+            console.print(Text.assemble((" > ", "white"), (message_text, "white")))
+        elif has_attachments:
+            console.print(Text.assemble((" > ", "white"), ("[queued image message]", "white")))
+
+    def print_queued_command_message(command_text):
+        """Print a queued command echo (separate from normal-chat echo)."""
+        if command_text:
+            console.print(Text.assemble((" > ", "white"), (command_text, "white")))
+
+    def run_queued_user_messages():
+        """Drain queued user messages FIFO and send each as a follow-up agent turn.
+
+        Called after a background agent turn completes to process any input the
+        user typed while the agent was running.  Each queued message goes through
+        the same text preparation as normal input (image-attach lines, pending
+        attachments, maybe_auto_compact).  Ctrl+C during a queued turn breaks out
+        of the loop and returns to idle prompt.
+
+        Slash commands are intercepted by ``process_command`` before LLM dispatch,
+        mirroring the normal idle-input path.  Returns ``'exit'`` when a queued
+        ``/exit`` command is processed so the caller can set the exit flag.
+        """
+        processed = 0
+        while getattr(chat_manager, 'has_queued_user_messages', lambda: False)():
+            queued = chat_manager.drain_queued_user_messages(limit=1)
+            if not queued:
+                break
+            queued_input = queued[0]
+            if isinstance(queued_input, str):
+                parsed_input = consume_image_attach_lines(queued_input.strip())
+                queued_attachments = list(pending_attachments)
+                pending_attachments.clear()
+                if not parsed_input and not queued_attachments:
+                    continue
+
+                # ── Route slash / shell commands through the command handler ──
+                cmd_result, modified_input, cmd_worker = process_command(
+                    chat_manager, parsed_input, console, DEBUG_MODE_CONTAINER, cron_scheduler
+                )
+
+                if cmd_result == "exit":
+                    return 'exit'
+                elif cmd_result == "swarm_worker":
+                    if queued_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    console.print("[yellow]/worker cannot be used from queued input. Skipping.[/yellow]")
+                    continue
+                elif cmd_result == "handled":
+                    if queued_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    print_queued_command_message(parsed_input)
+                    continue
+                elif cmd_result == "setting_selector":
+                    if queued_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    print_queued_command_message(parsed_input)
+                    selector = getattr(chat_manager, '_setting_selector', None)
+                    if selector is not None:
+                        patch_for_active_prompt(selector, SETTING_RESOLVED_SENTINEL)
+                        set_active_interaction(chat_manager, selector)
+                    return  # break out so main loop can present the toolbar interaction
+                elif cmd_result == "confirm_input":
+                    if queued_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    print_queued_command_message(parsed_input)
+                    interaction = getattr(chat_manager, '_confirm_interaction', None)
+                    if interaction is not None:
+                        patch_for_active_prompt(interaction, COMMAND_CONFIRM_SENTINEL)
+                        set_active_interaction(chat_manager, interaction)
+                    return  # break out so main loop can present the toolbar interaction
+                elif cmd_result == "text_input":
+                    if queued_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    print_queued_command_message(parsed_input)
+                    return  # break out so main loop can resolve pending text
+                elif cmd_result == "subagent_run":
+                    if queued_attachments:
+                        console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
+                    print_queued_command_message(parsed_input)
+                    if cmd_worker is not None:
+                        _run_subagent_worker(chat_manager, session, safe_console, cmd_worker)
+                    continue  # continue draining queued messages (don't nest run_queued_user_messages)
+
+                # ── Normal chat message (cmd_result is None) ──
+                final_input = modified_input if modified_input else parsed_input
+                queued_content = build_message_content(final_input, queued_attachments)
+                print_queued_user_message(final_input, bool(queued_attachments))
+            else:
+                queued_content = queued_input
+                console.print(Text.assemble((" > ", "white"), ("[queued multimodal message]", "white")))
+            chat_manager.maybe_auto_compact(console)
+            raw = _run_background_agent_turn(
+                chat_manager, session, safe_console, queued_content,
+                idle_msg="Queued response interrupted (Ctrl+C). Press Ctrl+C again to exit.",
+                prompt_callable=lambda: get_queue_prompt(chat_manager),
+            )
+            if raw is None:
+                break
+            processed += 1
+            if processed >= 50:
+                console.print("[yellow]Queue limit reached (50 messages). Remaining queued messages discarded.[/yellow]")
+                break
+
     try:
         while True:
             # Check if exit was requested via double Ctrl+C
@@ -717,10 +1071,15 @@ def main():
                     "bottom_toolbar": lambda: get_bottom_toolbar_text(chat_manager),
                 }
 
+                def idle_pre_run():
+                    if not _restore_swarm_interrupted_prompt_buffer(session, chat_manager):
+                        _restore_stashed_prompt_buffer(session)
+                    create_swarm_pre_run(chat_manager)()
+
                 raw_input = session.prompt(
                     lambda: get_prompt(chat_manager),
                     inputhook=create_swarm_inputhook(chat_manager),
-                    pre_run=create_swarm_pre_run(chat_manager),
+                    pre_run=idle_pre_run,
                     **prompt_kwargs,
                 )
                 # Sentinel 130 from swarm inputhook — pending work in server inbox.
@@ -765,40 +1124,50 @@ def main():
                     INPUT_BLOCKED['blocked'] = True
                     if TOOLS_ENABLED:
                         # Background thread + living PTK for toolbar progress
-                        completion_event = threading.Event()
-                        result_holder = {'done': False}
-                        safe_console.set_app(session.app)
-                        _start_progress_spinner(chat_manager)
-                        console.print("─" * console.width, style="rgb(30,30,30)")
-                        console.print()
-                        agent_thread = threading.Thread(
-                            target=_run_agent_in_thread,
-                            args=(chat_manager, final_content, console, safe_console,
-                                  Path.cwd().resolve(), RG_EXE_PATH,
-                                  DEBUG_MODE_CONTAINER['debug'],
-                                  completion_event, result_holder),
-                            daemon=True,
-                        )
-                        agent_thread.start()
+                        set_agent_running = getattr(chat_manager, 'set_agent_running', None)
+                        if set_agent_running is not None:
+                            set_agent_running(True)
                         try:
-                            raw_input = _prompt_with_erase_when_done(
-                                session,
-                                lambda: "",
-                                bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
-                                inputhook=_create_agent_done_inputhook(
-                                    completion_event,
-                                    on_complete=lambda: _stop_progress_spinner(chat_manager),
-                                ),
+                            completion_event = threading.Event()
+                            result_holder = {'done': False}
+                            safe_console.set_app(session.app)
+                            _start_progress_spinner(chat_manager)
+                            console.print("─" * console.width, style="rgb(30,30,30)")
+                            console.print()
+                            agent_thread = threading.Thread(
+                                target=_run_agent_in_thread,
+                                args=(chat_manager, final_content, console, safe_console,
+                                      Path.cwd().resolve(), RG_EXE_PATH,
+                                      DEBUG_MODE_CONTAINER['debug'],
+                                      completion_event, result_holder),
+                                daemon=True,
                             )
-                        except KeyboardInterrupt:
-                            _handle_ctrl_c_bg_prompt(
-                                chat_manager, session, safe_console,
-                                agent_thread, completion_event,
-                                cancel_msg="Swarm auto-turn cancelled.",
-                                idle_msg="Swarm auto-turn interrupted (Ctrl+C). Press Ctrl+C again to exit.",
-                            )
-                            continue
-                        _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+                            agent_thread.start()
+                            try:
+                                raw_input = _prompt_with_erase_when_done(
+                                    session,
+                                    lambda: get_queue_prompt(chat_manager),
+                                    bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+                                    inputhook=_create_agent_done_inputhook(
+                                        completion_event,
+                                        on_complete=lambda: _stop_progress_spinner(chat_manager),
+                                    ),
+                                )
+                            except KeyboardInterrupt:
+                                _handle_ctrl_c_bg_prompt(
+                                    chat_manager, session, safe_console,
+                                    agent_thread, completion_event,
+                                    cancel_msg="Swarm auto-turn cancelled.",
+                                    idle_msg="Swarm auto-turn interrupted (Ctrl+C). Press Ctrl+C again to exit.",
+                                )
+                                continue
+                            _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+                            if run_queued_user_messages() == 'exit':
+                                CTRL_C_TRACKER['exit_requested'] = True
+                                continue
+                        finally:
+                            if set_agent_running is not None:
+                                set_agent_running(False)
                     # Else: non-tools path.  Auto-turns need tools to process
                     # approvals and completions; skip with a warning if disabled.
                     else:
@@ -833,7 +1202,7 @@ def main():
                         )
                     finally:
                         INPUT_BLOCKED['blocked'] = False
-                        _drain_stdin(session)
+                        _drain_stdin(session, chat_manager=chat_manager)
                     continue
 
                 # Select_option resolved via toolbar — resume the suspended
@@ -843,15 +1212,22 @@ def main():
                 if raw_input == 132 and getattr(chat_manager, '_agentic_orchestrator', None) is not None:
                     INPUT_BLOCKED['blocked'] = True
                     try:
-                        _resume_orchestrator_with_live_toolbar(
+                        _clear_transient_prompt_line()
+                        raw_during_resume, _resume_result = _resume_orchestrator_with_live_toolbar(
                             chat_manager,
                             session,
                             safe_console,
                             "resume_after_selection",
+                            prompt_callable=lambda: get_queue_prompt(chat_manager),
                         )
+                        if isinstance(raw_during_resume, str) and raw_during_resume.strip():
+                            chat_manager.enqueue_user_message(raw_during_resume)
                     finally:
                         INPUT_BLOCKED['blocked'] = False
-                        _drain_stdin(session)
+                        _drain_stdin(session, chat_manager=chat_manager)
+                    queued_result = run_queued_user_messages()
+                    if queued_result == 'exit':
+                        CTRL_C_TRACKER['exit_requested'] = True
                     continue
 
                 # Setting selector resolved via toolbar — the user finished
@@ -863,6 +1239,7 @@ def main():
                     selector = chat_manager._setting_selector
                     continuation = getattr(chat_manager, '_setting_continuation', None)
                     try:
+                        _clear_transient_prompt_line()
                         if continuation is not None:
                             continuation(selector)
                     finally:
@@ -894,7 +1271,7 @@ def main():
                         )
                     finally:
                         INPUT_BLOCKED['blocked'] = False
-                        _drain_stdin(session)
+                        _drain_stdin(session, chat_manager=chat_manager)
                     continue
 
                 # Command confirmation (yes/no toolbar interaction) resolved
@@ -908,6 +1285,7 @@ def main():
                     cancelled = interaction.was_cancelled()
                     result = None if cancelled else interaction.result()
                     try:
+                        _clear_transient_prompt_line()
                         if continuation is not None:
                             continuation(result)
                     finally:
@@ -1019,34 +1397,9 @@ def main():
                         console.print("[dim]Discarded pasted image attachments because slash commands do not use them.[/dim]")
                     if cmd_worker is None:
                         continue
-                    INPUT_BLOCKED['blocked'] = True
-                    completion_event = threading.Event()
-                    safe_console.set_app(session.app)
-                    agent_thread = threading.Thread(
-                        target=cmd_worker,
-                        args=(console, safe_console, completion_event),
-                        daemon=True,
-                    )
-                    agent_thread.start()
-                    try:
-                        raw_input = _prompt_with_erase_when_done(
-                            session,
-                            lambda: "",
-                            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
-                            inputhook=_create_agent_done_inputhook(
-                                completion_event,
-                                on_complete=lambda: _stop_progress_spinner(chat_manager),
-                            ),
-                        )
-                    except KeyboardInterrupt:
-                        _handle_ctrl_c_bg_prompt(
-                            chat_manager, session, safe_console,
-                            agent_thread, completion_event,
-                            cancel_msg="Subagent cancelled.",
-                            idle_msg="Cancelled (Ctrl+C). Press Ctrl+C again to exit.",
-                        )
-                        continue
-                    _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+                    if _run_subagent_worker(chat_manager, session, safe_console, cmd_worker):
+                        if run_queued_user_messages() == 'exit':
+                            CTRL_C_TRACKER['exit_requested'] = True
                     continue
 
                 # Use modified input if provided (from /edit command)
@@ -1057,40 +1410,51 @@ def main():
 
                 if TOOLS_ENABLED:
                     # Background thread + living PTK for toolbar progress
-                    completion_event = threading.Event()
-                    result_holder = {'done': False}
-                    safe_console.set_app(session.app)
-                    _start_progress_spinner(chat_manager)
-                    console.print("─" * console.width, style="rgb(30,30,30)")
-                    console.print()  # Extra newline after user input to separate from LLM response
-                    agent_thread = threading.Thread(
-                        target=_run_agent_in_thread,
-                        args=(chat_manager, final_content, console, safe_console,
-                              Path.cwd().resolve(), RG_EXE_PATH,
-                              DEBUG_MODE_CONTAINER['debug'],
-                              completion_event, result_holder),
-                        daemon=True,
-                    )
-                    agent_thread.start()
+                    INPUT_BLOCKED['blocked'] = True
+                    set_agent_running = getattr(chat_manager, 'set_agent_running', None)
+                    if set_agent_running is not None:
+                        set_agent_running(True)
                     try:
-                        raw_input = _prompt_with_erase_when_done(
-                            session,
-                            lambda: "",
-                            bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
-                            inputhook=_create_agent_done_inputhook(
-                                completion_event,
-                                on_complete=lambda: _stop_progress_spinner(chat_manager),
-                            ),
+                        completion_event = threading.Event()
+                        result_holder = {'done': False}
+                        safe_console.set_app(session.app)
+                        _start_progress_spinner(chat_manager)
+                        console.print("─" * console.width, style="rgb(30,30,30)")
+                        console.print()  # Extra newline after user input to separate from LLM response
+                        agent_thread = threading.Thread(
+                            target=_run_agent_in_thread,
+                            args=(chat_manager, final_content, console, safe_console,
+                                  Path.cwd().resolve(), RG_EXE_PATH,
+                                  DEBUG_MODE_CONTAINER['debug'],
+                                  completion_event, result_holder),
+                            daemon=True,
                         )
-                    except KeyboardInterrupt:
-                        _handle_ctrl_c_bg_prompt(
-                            chat_manager, session, safe_console,
-                            agent_thread, completion_event,
-                            cancel_msg="Subagent cancelled.",
-                            idle_msg="Response interrupted (Ctrl+C). Press Ctrl+C again to exit.",
-                        )
-                        continue
-                    _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+                        agent_thread.start()
+                        try:
+                            raw_input = _prompt_with_erase_when_done(
+                                session,
+                                lambda: get_queue_prompt(chat_manager),
+                                bottom_toolbar=lambda: get_bottom_toolbar_text(chat_manager),
+                                inputhook=_create_agent_done_inputhook(
+                                    completion_event,
+                                    on_complete=lambda: _stop_progress_spinner(chat_manager),
+                                ),
+                            )
+                        except KeyboardInterrupt:
+                            _handle_ctrl_c_bg_prompt(
+                                chat_manager, session, safe_console,
+                                agent_thread, completion_event,
+                                cancel_msg="Subagent cancelled.",
+                                idle_msg="Response interrupted (Ctrl+C). Press Ctrl+C again to exit.",
+                            )
+                            continue
+                        _cleanup_bg_prompt(chat_manager, session, safe_console, agent_thread)
+                        if run_queued_user_messages() == 'exit':
+                            CTRL_C_TRACKER['exit_requested'] = True
+                            continue
+                    finally:
+                        if set_agent_running is not None:
+                            set_agent_running(False)
                 else:
                     thinking_indicator.start()
                     INPUT_BLOCKED['blocked'] = True
@@ -1125,7 +1489,7 @@ def main():
                                 # Force toolbar to repaint without spinner before printing
                                 chat_manager.invalidate_toolbar()
                                 INPUT_BLOCKED['blocked'] = False
-                                _drain_stdin(session)
+                                _drain_stdin(session, chat_manager=chat_manager)
 
                                 if full_response.strip():
                                     md = Markdown(left_align_headings(full_response), code_theme=MonokaiDarkBGStyle, justify="left")
@@ -1179,7 +1543,7 @@ def main():
                     finally:
                         thinking_indicator.stop(reset=True)
                         INPUT_BLOCKED['blocked'] = False
-                        _drain_stdin(session)
+                        _drain_stdin(session, chat_manager=chat_manager)
 
             except KeyboardInterrupt:
                 # Ctrl+C pressed while waiting for input

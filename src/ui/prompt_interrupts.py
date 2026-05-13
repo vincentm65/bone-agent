@@ -33,6 +33,51 @@ import time
 from prompt_toolkit.application import get_app
 
 
+def _save_current_buffer_for_restore(chat_manager):
+    """Save in-progress typed buffer content for later prompt restoration.
+
+    Called from interrupt paths before ``get_app().exit(130)`` to preserve
+    user input that was being typed when the swarm auto-turn arrived.  This
+    must not enqueue the text as a submitted user message: swarm interrupts
+    can happen while the user is still drafting input and has not pressed
+    Enter.
+
+    Args:
+        chat_manager: ChatManager instance (may be None).
+
+    Returns:
+        ``True`` if buffer text was saved, ``False`` otherwise.
+    """
+    if chat_manager is None:
+        return False
+    try:
+        app = get_app()
+    except Exception:
+        return False
+    try:
+        buf = getattr(app, "current_buffer", None)
+        text = getattr(buf, "text", "")
+    except Exception:
+        return False
+    if not text or not text.strip():
+        return False
+    try:
+        chat_manager._pending_prompt_restore_text = text
+    except Exception:
+        return False
+    try:
+        buf.text = ""
+        if hasattr(buf, "cursor_position"):
+            buf.cursor_position = 0
+    except Exception:
+        pass
+    try:
+        app.invalidate()
+    except Exception:
+        pass
+    return True
+
+
 def _create_swarm_poll_task(chat_manager, poll_interval=0.1):
     """Return an async coroutine that polls for swarm work and exits the app.
 
@@ -44,6 +89,7 @@ def _create_swarm_poll_task(chat_manager, poll_interval=0.1):
         while True:
             if chat_manager.has_pending_swarm_work():
                 try:
+                    _save_current_buffer_for_restore(chat_manager)
                     get_app().exit(result=130)
                 except Exception:
                     pass
@@ -124,6 +170,7 @@ def _run_application_interruptible(application, chat_manager, poll_interval=0.1)
         while True:
             if chat_manager.has_pending_swarm_work():
                 try:
+                    _save_current_buffer_for_restore(chat_manager)
                     get_app().exit(result=130)
                 except Exception:
                     pass
