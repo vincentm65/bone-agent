@@ -42,17 +42,7 @@ SUBAGENT_OVERFLOW_CONTINUATION = (
 
 
 def _setting_selector_handoff(chat_manager, selector, continuation):
-    """Store selector + continuation on chat_manager for main-loop handoff.
-
-    The main loop detects ``CommandResult(status="setting_selector")``,
-    patches the selector so finish/cancel exit with sentinel 133, sets it
-    as the active toolbar interaction, and re-enters ``session.prompt()``.
-    When the user finishes, the sentinel is detected and *continuation* is
-    called with the resolved selector.
-
-    Returns:
-        CommandResult(status="setting_selector") for the main loop.
-    """
+    """Store selector + continuation on chat_manager for main-loop handoff."""
     chat_manager._setting_selector = selector
     chat_manager._setting_continuation = continuation
     return CommandResult(status="setting_selector")
@@ -68,22 +58,7 @@ class CommandResult:
 
 
 def _confirm_handoff(chat_manager, prompt, continuation):
-    """Store a yes/no confirmation interaction + continuation on chat_manager.
-
-    The main loop detects ``CommandResult(status="confirm_input")``,
-    patches the interaction so finish/cancel exit with sentinel 135, sets
-    it as the active toolbar interaction, and re-enters
-    ``session.prompt()``.  When the user selects Yes/No or presses Esc,
-    the sentinel is detected and *continuation* is called with the result.
-
-    The continuation receives:
-        ``True``  — user selected "Yes"
-        ``False`` — user selected "No"
-        ``None``  — user cancelled (Esc)
-
-    Returns:
-        CommandResult(status="confirm_input") for the main loop.
-    """
+    """Store a yes/no confirmation interaction + continuation on chat_manager."""
     from ui.toolbar_interactions import CommandConfirmInteraction
 
     interaction = CommandConfirmInteraction(prompt)
@@ -93,22 +68,7 @@ def _confirm_handoff(chat_manager, prompt, continuation):
 
 
 def _text_input_handoff(chat_manager, prompt, continuation):
-    """Store a text-input pending interaction + continuation on chat_manager.
-
-    The main loop detects ``CommandResult(status="text_input")``, leaves
-    the pending interaction already set on chat_manager, and re-enters
-    ``session.prompt()``.  The toolbar renders the prompt text.  When the
-    user types text and presses Enter, the main loop resolves the pending
-    interaction and calls *continuation* with the input string.
-
-    The continuation receives:
-        The user's input string (possibly empty).
-        ``None`` is not sent — empty string indicates the user pressed
-        Enter without typing.
-
-    Returns:
-        CommandResult(status="text_input") for the main loop.
-    """
+    """Store a text-input pending interaction + continuation on chat_manager."""
     from ui.toolbar_interactions import PendingInteraction
 
     pending = PendingInteraction(prompt)
@@ -570,13 +530,7 @@ def _handle_compact(chat_manager, console, debug_mode_container, args, cron_sche
 
 
 def _handle_config(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle config command - interactive runtime settings editor.
-
-    Uses the clean handoff path: stores a SettingSelector + continuation
-    on chat_manager and returns ``"setting_selector"`` so the main prompt
-    loop can render it in the toolbar instead of launching a nested
-    prompt_toolkit Application.
-    """
+    """Handle config command - interactive runtime settings editor."""
     from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
 
     # Build runtime settings from current state
@@ -963,17 +917,7 @@ def _build_provider_editor_selector(console, provider):
 
 
 def _apply_provider_changes(chat_manager, console, provider, changes):
-    """Apply a set of provider setting changes.
-
-    Args:
-        chat_manager: ChatManager instance
-        console: Rich console
-        provider: Provider name
-        changes: dict of change key -> new value (from selector)
-
-    Returns:
-        True if changes were applied, False if cancelled/no-op.
-    """
+    """Apply a set of provider setting changes."""
     cfg = config.get_provider_config(provider)
     config_data = config_manager.load()
     current_model = cfg.get('model') or cfg.get('api_model') or ''
@@ -1286,15 +1230,7 @@ def _handle_key(chat_manager, console, debug_mode_container, args, cron_schedule
 
 
 def _handle_edit(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle external editor command for multi-line input.
-
-    Opens an external editor for composing prompts. After the editor closes,
-    the content is sent to the LLM.
-
-    Returns:
-        CommandResult: status="handled" if cancelled/failed
-                       status="continue" with replacement_input to send to LLM
-    """
+    """Handle external editor command for multi-line input."""
     from utils.editor import open_editor_for_input
 
     success, content = open_editor_for_input(
@@ -1499,19 +1435,7 @@ def _handle_usage(chat_manager, console, debug_mode_container, args, cron_schedu
 
 
 def _build_ask_context(chat_manager, num_turns):
-    """Build context string from the last N user turns for /ask -c.
-
-    A user turn is: one role=user message plus all following messages
-    (assistant, tool, system) up to the next user message or end of list.
-
-    Args:
-        chat_manager: ChatManager instance with .messages list
-        num_turns: Number of user turns to include (positive int), or None for all
-
-    Returns:
-        Formatted string of messages suitable as initial_context for sub-agent.
-        Returns empty string if num_turns is 0 or no user messages exist.
-    """
+    """Build context string from the last N user turns for /ask -c."""
     messages = chat_manager.messages
 
     if num_turns is None:
@@ -1579,61 +1503,28 @@ def _continue_main_after_subagent_overflow(chat_manager, console, query, result_
     chat_manager._update_context_tokens()
 
 
-def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
-    """Run the /review sub-agent and handle display/history injection.
-
-    This is the direct-callable worker for tests and background threads.
-    It creates a SubAgentPanel, runs the sub-agent, handles special
-    results, displays the output, and injects into chat history.
-
-    Args:
-        chat_manager: ChatManager instance
-        console: Rich console (or SafeConsole) for output
-        query: Review prompt string
-        diff_output: Git diff output to use as initial_context
-        user_intent: Optional user intent string
-
-    Returns:
-        The sub_result dict from ``run_sub_agent``.
-    """
-    from core.sub_agent import run_sub_agent
-    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
-
-    panel = SubAgentPanel(query, chat_manager)
-
-    # Clear stale cancellation flag and obtain cancel event for this run
-    chat_manager.clear_subagent_cancel()
-
-    try:
-        sub_result = run_sub_agent(
-            task_query=query,
-            repo_root=Path.cwd().resolve(),
-            rg_exe_path=str(_RG_EXE_PATH),
-            console=console,
-            panel_updater=panel,
-            sub_agent_type="review",
-            initial_context=diff_output,
-            cancel_event=chat_manager.get_subagent_cancel_event(),
-        )
-    except Exception as e:
-        panel.set_error(str(e))
-        console.print("Sub-agent failed: ", style="red", highlight=False)
-        console.print(str(e), highlight=False, markup=False)
-        sub_result = {"error": str(e)}
-
-    # Forward usage
+def _process_subagent_result(
+    chat_manager, console, sub_result, panel, query,
+    *,
+    label,
+    user_msg_content,
+    do_citation_expansion=False,
+    skip_inject=False,
+    continuation=None,
+):
+    """Handle sub-agent result: status display, markdown output, and history injection."""
     _forward_subagent_usage(chat_manager, sub_result)
 
     # ── Handle special results ───────────────────────────────────
     if sub_result.get("cancelled"):
         panel.cancel()
-        console.print("[dim]Review cancelled.[/dim]", highlight=False)
+        console.print(f"[dim]{label} cancelled.[/dim]", highlight=False)
     elif sub_result.get("preflight_overflow"):
         panel.cancel()
         tokens = sub_result.get("preflight_tokens", 0)
         limit = sub_result.get("hard_limit", 0)
         console.print(
-            f"Review cannot start: initial context ({tokens:,} tokens) "
+            f"{label} cannot start: initial context ({tokens:,} tokens) "
             f"exceeds hard limit ({limit:,} tokens).",
             highlight=False,
             markup=False,
@@ -1669,12 +1560,12 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
 
     if sub_result.get("context_dumped") and result_text and not sub_result.get("error"):
         _continue_main_after_subagent_overflow(chat_manager, console, query, result_text)
+        if continuation is not None:
+            continuation(sub_result)
         return sub_result
 
     force_main_history = sub_result.get("context_dumped", False)
 
-    # Display/inject successful results and overflow dumps. The dump is
-    # intentionally routed back into main history so the main agent can resume.
     is_success = not (
         sub_result.get("cancelled")
         or sub_result.get("preflight_overflow")
@@ -1688,29 +1579,28 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
         console.print(md)
         console.print()
 
-    # ── Inject into chat history (citation-expanded) ─────────────
-    if result_text and is_success:
-        repo_root = Path.cwd().resolve()
+    # ── Inject into chat history ─────────────────────────────────
+    should_inject = (force_main_history or not skip_inject) and result_text and is_success
+    if should_inject:
         if force_main_history:
-            history_text = result_text
-        else:
+            assistant_text = result_text
+        elif do_citation_expansion:
             from utils.citation_parser import inject_file_contents
-
+            repo_root = Path.cwd().resolve()
             gitignore_spec = chat_manager.get_gitignore_spec(repo_root)
-            history_text = inject_file_contents(
+            assistant_text = inject_file_contents(
                 result_text, repo_root, gitignore_spec, console
             )
+        else:
+            assistant_text = result_text
 
-        review_cmd = "/review"
-        if user_intent:
-            review_cmd += f"\n\nUser intent: {user_intent}"
         chat_manager.messages.append({
             "role": "user",
-            "content": review_cmd,
+            "content": user_msg_content,
         })
         chat_manager.messages.append({
             "role": "assistant",
-            "content": history_text,
+            "content": assistant_text,
         })
         if force_main_history:
             chat_manager.messages.append({
@@ -1718,9 +1608,8 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
                 "content": SUBAGENT_OVERFLOW_CONTINUATION,
             })
 
-        # Update context token tracker so compaction timing stays accurate
         injected_tokens = chat_manager.token_tracker.estimate_tokens(
-            f"{review_cmd}\n\n{history_text}"
+            f"{user_msg_content}\n\n{assistant_text}"
         )
         if force_main_history:
             injected_tokens += chat_manager.token_tracker.estimate_tokens(
@@ -1728,19 +1617,53 @@ def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
             )
         chat_manager.token_tracker.current_context_tokens += injected_tokens
 
+    # ── Invoke continuation if provided ──────────────────────────
+    if continuation is not None:
+        continuation(sub_result)
+
     return sub_result
 
 
+def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
+    """Run the /review sub-agent and handle display/history injection."""
+    from core.sub_agent import run_sub_agent
+    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
+
+    panel = SubAgentPanel(query, chat_manager)
+
+    # Clear stale cancellation flag and obtain cancel event for this run
+    chat_manager.clear_subagent_cancel()
+
+    try:
+        sub_result = run_sub_agent(
+            task_query=query,
+            repo_root=Path.cwd().resolve(),
+            rg_exe_path=str(_RG_EXE_PATH),
+            console=console,
+            panel_updater=panel,
+            sub_agent_type="review",
+            initial_context=diff_output,
+            cancel_event=chat_manager.get_subagent_cancel_event(),
+        )
+    except Exception as e:
+        panel.set_error(str(e))
+        console.print("Sub-agent failed: ", style="red", highlight=False)
+        console.print(str(e), highlight=False, markup=False)
+        sub_result = {"error": str(e)}
+
+    user_msg = "/review"
+    if user_intent:
+        user_msg += f"\n\nUser intent: {user_intent}"
+    return _process_subagent_result(
+        chat_manager, console, sub_result, panel, query,
+        label="Review",
+        user_msg_content=user_msg,
+        do_citation_expansion=True,
+    )
+
+
 def _handle_review(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle review command - run code review on git changes via sub-agent.
-
-    Pre-work (parse args, run git diff) happens synchronously in the handler.
-    The sub-agent run is deferred to a background worker so the PTK toolbar
-    can render live subagent status.
-
-    Returns CommandResult(status="subagent_run", worker=...) on success,
-    or CommandResult(status="handled") for early exits (usage, git errors).
-    """
+    """Handle review command - run code review on git changes via sub-agent."""
     # ── Parse args: separate git diff flags from user intent ─────
     user_intent = None
     git_args = ""
@@ -1833,26 +1756,7 @@ def _run_ask_worker(
     args,
     continuation=None,
 ):
-    """Run the /ask sub-agent and optionally invoke *continuation* on completion.
-
-    This function handles the full sub-agent lifecycle: building context,
-    running the sub-agent via ``run_sub_agent``, handling cancellation /
-    overflow / error states, and forwarding usage to the main chat manager.
-
-    If *continuation* is provided, it is called with the sub-result dict
-    after the sub-agent completes (successfully or not). The continuation
-    is responsible for displaying the result, injecting into history,
-    and any other post-run bookkeeping.
-
-    Args:
-        chat_manager: ChatManager instance
-        console: Rich console for output
-        args: Raw argument string passed to /ask
-        continuation: Optional callable(sub_result) for post-run handling
-
-    Returns:
-        The sub_result dict from ``run_sub_agent``.
-    """
+    """Run the /ask sub-agent and optionally invoke *continuation* on completion."""
     from core.sub_agent import run_sub_agent
     from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
 
@@ -1945,126 +1849,18 @@ def _run_ask_worker(
         console.print(str(e), highlight=False, markup=False)
         sub_result = {"error": str(e)}
 
-    # Forward usage
-    _forward_subagent_usage(chat_manager, sub_result)
-
-    # ── Handle special results ───────────────────────────────────
-    if sub_result.get("cancelled"):
-        panel.cancel()
-        console.print("[dim]Ask cancelled.[/dim]", highlight=False)
-    elif sub_result.get("preflight_overflow"):
-        panel.cancel()
-        tokens = sub_result.get("preflight_tokens", 0)
-        limit = sub_result.get("hard_limit", 0)
-        console.print(
-            f"Ask cannot start: initial context ({tokens:,} tokens) "
-            f"exceeds hard limit ({limit:,} tokens).",
-            highlight=False,
-            markup=False,
-        )
-    elif sub_result.get("hard_limit_exceeded"):
-        _clear_subagent_panel(panel)
-        ctx_tokens = sub_result.get("context_tokens", 0)
-        hard_limit = sub_result.get("hard_limit_tokens", 0)
-        console.print(
-            f"Task too large for subagent; continuing with main agent: "
-            f"context ({ctx_tokens:,} tokens) reached hard limit ({hard_limit:,} tokens).",
-            highlight=False,
-            markup=False,
-        )
-    elif sub_result.get("billed_limit_exceeded"):
-        _clear_subagent_panel(panel)
-        billed_total = sub_result.get("billed_total_tokens", 0)
-        billed_limit = sub_result.get("billed_hard_limit_tokens", 0)
-        console.print(
-            f"Task too large for subagent; continuing with main agent: "
-            f"token budget ({billed_total:,} tokens) reached hard limit ({billed_limit:,} tokens).",
-            highlight=False,
-            markup=False,
-        )
-    elif sub_result.get("error"):
-        panel.set_error(sub_result["error"])
-        console.print("Sub-agent error: ", style="red", highlight=False)
-        console.print(sub_result["error"], highlight=False, markup=False)
-    else:
-        panel.set_complete(sub_result.get("usage", {}))
-
-    # ── Display result ───────────────────────────────────────────
-    result_text = sub_result.get("result", "")
-
-    if sub_result.get("context_dumped") and result_text and not sub_result.get("error"):
-        _continue_main_after_subagent_overflow(chat_manager, console, query, result_text)
-        if continuation is not None:
-            continuation(sub_result)
-        return sub_result
-
-    force_main_history = sub_result.get("context_dumped", False)
-
-    # Display/inject successful results and overflow dumps. The dump is
-    # intentionally routed back into main history so the main agent can resume.
-    is_success = not (
-        sub_result.get("cancelled")
-        or sub_result.get("preflight_overflow")
-        or sub_result.get("error")
+    context_note = f" (with {context_desc} context)" if context_desc else ""
+    return _process_subagent_result(
+        chat_manager, console, sub_result, panel, query,
+        label="Ask",
+        user_msg_content=f"/ask{context_note}: {query}",
+        skip_inject=display_only,
+        continuation=continuation,
     )
-    if result_text and is_success:
-        from rich.markdown import Markdown
-        from utils.settings import MonokaiDarkBGStyle, left_align_headings
-        console.print()
-        md = Markdown(
-            left_align_headings(result_text),
-            code_theme=MonokaiDarkBGStyle,
-            justify="left",
-        )
-        console.print(md)
-        console.print()
-
-    # ── Inject into history (unless -f or non-success) ───────────
-    if (force_main_history or not display_only) and result_text and is_success:
-        context_note = f" (with {context_desc} context)" if context_desc else ""
-        chat_manager.messages.append({
-            "role": "user",
-            "content": f"/ask{context_note}: {query}",
-        })
-        chat_manager.messages.append({
-            "role": "assistant",
-            "content": result_text,
-        })
-        if force_main_history:
-            chat_manager.messages.append({
-                "role": "user",
-                "content": SUBAGENT_OVERFLOW_CONTINUATION,
-            })
-
-        injected_tokens = chat_manager.token_tracker.estimate_tokens(
-            f"/ask{context_note}: {query}\n\n{result_text}"
-        )
-        if force_main_history:
-            injected_tokens += chat_manager.token_tracker.estimate_tokens(
-                SUBAGENT_OVERFLOW_CONTINUATION
-            )
-        chat_manager.token_tracker.current_context_tokens += injected_tokens
-
-    # ── Invoke continuation if provided ──────────────────────────
-    if continuation is not None:
-        continuation(sub_result)
-
-    return sub_result
 
 
 def _handle_ask(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle /ask command — run sub-agent with subagent-status continuation.
-
-    Usage:
-        /ask <query>          Fresh sub-agent, result in history
-        /ask -c N <query>     Last N user turns as context, result in history
-        /ask -c <query>       All chat history as context, result in history
-        /ask -f <query>       Fresh sub-agent, display only (no history)
-        /ask -cf N <query>    N turns context, display only
-        /ask -cf <query>      All history context, display only
-
-    Alias: /a
-    """
+    """Handle /ask command — run sub-agent with subagent-status continuation."""
     # Build the post-run continuation (display + history injection).
     # This is stored on chat_manager so the main loop can invoke it
     # after the background thread completes the sub-agent run.
@@ -2151,11 +1947,7 @@ def _call_proxy_api(
     api_key: str | None = None,
     timeout: int = 10,
 ) -> tuple[int, dict | None]:
-    """Call a bone-proxy API endpoint.
-
-    Returns (status_code, parsed_json_or_None).
-    Returns (0, None) on network/parse failures.
-    """
+    """Call a bone-proxy API endpoint."""
     # Validate endpoint uses HTTPS (or localhost HTTP)
     full_url = f"{api_base.rstrip('/')}{path}"
     valid, err = validate_api_url(full_url)
@@ -2390,12 +2182,7 @@ def _handle_account(chat_manager, console, debug_mode_container, args, cron_sche
 
 
 def _send_reset_key_email(chat_manager, console, api_base, email):
-    """Shared logic for sending a new API key via email.
-
-    Used by both /login (path 2: user lost key) and /reset-key.
-    Uses _confirm_handoff for the confirmation step to avoid blocking Prompt.ask.
-    Returns CommandResult.
-    """
+    """Shared logic for sending a new API key via email."""
     console.print(f"[#5F9EA0]Sending new API key to {email}...[/#5F9EA0]")
     console.print("[dim]This will create a new key and email it to you. Old keys remain valid.[/dim]")
     console.print()
@@ -2430,12 +2217,7 @@ def _send_reset_key_email(chat_manager, console, api_base, email):
 
 
 def _handle_login(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle /login <email> — log in to an existing bone-agent account on this device.
-
-    Two paths:
-    - User has their API key: validate it, save to config, switch provider.
-    - User lost their key: email a new one via /reset-key endpoint.
-    """
+    """Handle /login <email> — log in to an existing bone-agent account on this device."""
     if not args or not args.strip():
         console.print("[red]Usage: /login <email>[/red]")
         console.print("[dim]Log in to an existing bone-agent account on this device.[/dim]")
@@ -2590,11 +2372,7 @@ def _handle_resend(chat_manager, console, debug_mode_container, args, cron_sched
 
 
 def _handle_reset_key(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle /reset-key [email] — request a new API key via email.
-
-    If no email is given, fetches it from the account endpoint (requires API key).
-    If email is given, works without an API key (for users who lost everything).
-    """
+    """Handle /reset-key [email] — request a new API key via email."""
     if not _require_proxy_provider(chat_manager, console):
         return CommandResult(status="handled")
 
@@ -2860,12 +2638,7 @@ def _handle_rotate_key(chat_manager, console, debug_mode_container, args, cron_s
 
 
 def _persist_obsidian_config(console, **kwargs):
-    """Persist Obsidian settings to config file.
-
-    Args:
-        console: Rich console for output
-        **kwargs: OBSIDIAN_SETTINGS fields to persist
-    """
+    """Persist Obsidian settings to config file."""
     try:
         config_data = config_manager.load(force_reload=True)
         if "OBSIDIAN_SETTINGS" not in config_data:
@@ -2878,17 +2651,7 @@ def _persist_obsidian_config(console, **kwargs):
 
 
 def _apply_obsidian_changes(chat_manager, console, obsidian_settings, changes):
-    """Apply Obsidian setting changes, register/unregister tools, persist config.
-
-    Args:
-        chat_manager: ChatManager instance
-        console: Rich console for output
-        obsidian_settings: ObsidianSettings instance
-        changes: dict of {key: new_value} from SettingSelector
-
-    Returns:
-        list of change description strings
-    """
+    """Apply Obsidian setting changes, register/unregister tools, persist config."""
     change_lines = []
     was_active = obsidian_settings.is_active()
 
@@ -2939,11 +2702,7 @@ def _apply_obsidian_changes(chat_manager, console, obsidian_settings, changes):
 
 
 def _handle_obsidian(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle /obsidian command — manage vault integration.
-
-    No args: Launch interactive SettingSelector UI (same UX as /config).
-    Subcommands: set <path>, enable, disable, status — quick shortcuts.
-    """
+    """Handle /obsidian command — manage vault integration."""
     from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
     from utils.settings import obsidian_settings
 
@@ -3092,19 +2851,7 @@ def _persist_tool_visibility(console):
 
 
 def _handle_tools(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle /tools command — manage tool availability and skill discovery visibility.
-
-    No args: Launch interactive SettingSelector with tools/plugins grouped by category
-    and a skills section for discovery visibility.
-    Subcommands:
-      list — show all tools, plugins, and skills with status
-      enable <name> — enable a core tool or plugin
-      disable <name> — disable a core tool or plugin
-      show-skill <name> — make a skill visible in discovery surfaces
-      hide-skill <name> — hide a skill from discovery surfaces
-      enable-group <key> — enable all tools in a group (e.g. file_ops, task_mgmt)
-      disable-group <key> — disable all tools in a group
-    """
+    """Handle /tools command — manage tool availability and skill discovery visibility."""
     from core.skills import iter_skill_summaries, validate_skill_name
     from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
     from tools.helpers.base import ToolRegistry, TOOL_GROUPS
@@ -3397,14 +3144,7 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
 
 
 def _handle_cd(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Handle /cd command — change working directory.
-
-    Usage: /cd <path>
-    Examples:
-        /cd /home/user/projects
-        /cd ..
-        /cd ~/Documents
-    """
+    """Handle /cd command — change working directory."""
     import os
 
     if not args or not args.strip():
@@ -4196,21 +3936,7 @@ def _handle_shell_command(console, command):
 
 
 def process_command(chat_manager, user_input, console, debug_mode_container, cron_scheduler=None):
-    """Process command and optionally return replacement content.
-
-    Args:
-        chat_manager: ChatManager instance
-        user_input: User's input string
-        console: Rich console for output
-        debug_mode_container: Dict with 'debug' key for debug mode state
-        cron_scheduler: Optional CronScheduler instance for immediate reload
-
-    Returns:
-        tuple: (status, replacement_content, worker)
-            status: "exit" | "handled" | "subagent_run" | None
-            replacement_content: str to replace user_input, or None
-            worker: Callable for "subagent_run", or None
-    """
+    """Process command and optionally return replacement content."""
     # Parse command and arguments
     parts = user_input.split(maxsplit=1)
     cmd = parts[0].lower()
