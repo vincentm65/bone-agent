@@ -31,8 +31,6 @@ class ToolSettings:
     """Tool execution limits and defaults."""
     max_tool_calls: int = field(default_factory=lambda: _CONFIG.get("TOOL_SETTINGS", {}).get("max_tool_calls", 100))
     command_timeout_sec: int = field(default_factory=lambda: _CONFIG.get("TOOL_SETTINGS", {}).get("command_timeout_sec", 30))
-    enable_parallel_execution: bool = field(default_factory=lambda: _CONFIG.get("TOOL_SETTINGS", {}).get("enable_parallel_execution", True))
-    max_parallel_workers: int = field(default_factory=lambda: _CONFIG.get("TOOL_SETTINGS", {}).get("max_parallel_workers", 10))
     max_command_output_lines: int = field(default_factory=lambda: _CONFIG.get("TOOL_SETTINGS", {}).get("max_command_output_lines", 100))
     max_shell_output_lines: int = field(default_factory=lambda: _CONFIG.get("TOOL_SETTINGS", {}).get("max_shell_output_lines", 200))
     max_file_preview_lines: int = field(default_factory=lambda: _CONFIG.get("TOOL_SETTINGS", {}).get("max_file_preview_lines", 200))

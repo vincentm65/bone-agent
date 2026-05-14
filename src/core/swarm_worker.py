@@ -732,7 +732,6 @@ class SwarmWorkerRunner:
                 debug_mode=False,
                 suppress_result_display=False,
                 is_sub_agent=False,
-                force_parallel_execution=True,
                 cron_job_id=self.cron_job_id,
                 cron_allowlist=self.cron_allowlist,
                 cron_interactive=self.cron_interactive,

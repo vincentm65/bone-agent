@@ -76,6 +76,19 @@ console = Console(theme=Theme({
     "markdown.link_url": "default",
 }))
 
+def get_queue_prompt(chat_manager):
+    """Return prompt shown while agent work runs and user input is queued."""
+    if (
+        get_active_interaction(chat_manager) is not None
+        or getattr(chat_manager, "_pending_interaction", None) is not None
+    ):
+        return ANSI("")
+    prompt_text = Text.assemble((" > ", "white"))
+    with console.capture() as capture:
+        console.print(prompt_text, end="")
+    return ANSI(capture.get())
+
+
 # Debug mode container (used as mutable reference)
 DEBUG_MODE_CONTAINER = {'debug': False}
 
@@ -796,10 +809,6 @@ def main():
         with console.capture() as capture:
             console.print(prompt_text, end="")
         return ANSI(capture.get())
-
-    def get_queue_prompt(chat_manager):
-        """Return prompt shown while agent work runs and user input is queued."""
-        return get_prompt(chat_manager)
 
     @bindings.add('escape', 'escape')
     def clear_input(event):

@@ -18,7 +18,6 @@ from tools import (
     TOOLS,
 )
 from tools.swarm import ADMIN_SWARM_TOOL_NAMES
-from utils.settings import tool_settings
 
 from llm.config import get_provider_config
 from utils.result_parsers import extract_exit_code
@@ -188,7 +187,7 @@ class AgenticOrchestrator:
     with tool calling, providing a cleaner, more maintainable structure.
     """
 
-    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, force_parallel_execution=False, cron_job_id=None, cron_allowlist=None, cron_interactive=False, edit_approval_handler=None, create_file_handler=None, command_approval_handler=None, boundary_approval_handler=None, command_approval_awaiter=None, command_send_approval_fn=None, approval_timeout=300):
+    def __init__(self, chat_manager, repo_root, rg_exe_path, console, debug_mode, suppress_result_display=False, is_sub_agent=False, panel_updater=None, cron_job_id=None, cron_allowlist=None, cron_interactive=False, edit_approval_handler=None, create_file_handler=None, command_approval_handler=None, boundary_approval_handler=None, command_approval_awaiter=None, command_send_approval_fn=None, approval_timeout=300):
         """Initialize the orchestrator.
 
         Args:
@@ -200,7 +199,6 @@ class AgenticOrchestrator:
             suppress_result_display: If True, suppress final LLM response display (for research agent)
             is_sub_agent: If True, running as sub-agent (for visual framing)
             panel_updater: Optional SubAgentPanel callback for live panel updates
-            force_parallel_execution: If True, force parallel execution (for sub-agent)
             cron_job_id: Optional cron job ID for command allow list gating
             cron_allowlist: Optional CronAllowlist instance for cron command gating
             cron_interactive: If True, cron job is running in interactive test mode
@@ -220,7 +218,6 @@ class AgenticOrchestrator:
         self.suppress_result_display = suppress_result_display
         self.is_sub_agent = is_sub_agent
         self.panel_updater = panel_updater
-        self.force_parallel_execution = force_parallel_execution
         self.cron_job_id = cron_job_id
         self.cron_allowlist = cron_allowlist
         self.cron_interactive = cron_interactive
@@ -240,8 +237,6 @@ class AgenticOrchestrator:
         # message), but this orchestrator keeps its reference to the
         # already-set event so it still sees the cancel signal.
         self._cancel_event = chat_manager.get_agent_cancel_event()
-        # For parallel execution: temporary console override
-        self._parallel_context = {}
         # Suspension state for tool approval/selection handoff to main prompt
         self._suspended_exc: Optional[ToolApprovalSuspended | SelectionSuspended | BoundaryApprovalSuspended] = None
         # Initialize vault session with known repo_root (for project folder derivation)
@@ -293,13 +288,12 @@ class AgenticOrchestrator:
         self._cancel_event = event
 
     def _get_console(self):
-        """Get the console for output, respecting parallel execution context.
+        """Get the console for output.
 
         Returns:
-            Console object or None if suppressed during parallel execution
+            Console object
         """
-        # Check if we're in a parallel context with suppressed console
-        return self._parallel_context.get('console', self.console)
+        return self.console
 
     def _get_effective_tools(self, allowed_tools=None, allow_active_plugins=False):
         """Return tool schemas allowed for the current run."""
@@ -779,48 +773,11 @@ class AgenticOrchestrator:
                 self.console.print(md)
                 self.console.print()
 
-        # Check if we should use parallel execution
-        use_parallel = (
-            tool_settings.enable_parallel_execution and
-            len(tool_calls) > 1
-        )
-
-        # Force sequential if any edit_file or execute_command in the batch (safety)
-        if use_parallel:
-            for tool_call in tool_calls:
-                tool_name = tool_call.get("function", {}).get("name")
-                if tool_name == "edit_file":
-                    use_parallel = False
-                    if self.debug_mode:
-                        self.console.print("[dim]Forcing sequential execution (edit_file detected)[/dim]")
-                    break
-                elif tool_name == "execute_command":
-                    use_parallel = False
-                    if self.debug_mode:
-                        self.console.print("[dim]Forcing sequential execution (execute_command detected)[/dim]")
-                    break
-                elif tool_name == "sub_agent":
-                    use_parallel = False
-                    if self.debug_mode:
-                        self.console.print("[dim]Forcing sequential execution (sub_agent detected)[/dim]")
-                    break
-                elif tool_name == "select_option":
-                    use_parallel = False
-                    if self.debug_mode:
-                        self.console.print("[dim]Forcing sequential execution (select_option detected)[/dim]")
-                    break
-
-        if use_parallel and self.debug_mode:
-            self.console.print(f"[#5F9EA0]Executing {len(tool_calls)} tools in parallel[/#5F9EA0]")
-
         # Lock compaction during tool execution to prevent orphaning tool_call_ids
         self.chat_manager.set_compaction_lock(True)
 
         try:
-            if use_parallel:
-                result = self._execute_tools_parallel(tool_calls, thinking_indicator)
-            else:
-                result = self._execute_tools_sequential(tool_calls, thinking_indicator)
+            result = self._execute_tools_sequential(tool_calls, thinking_indicator)
         finally:
             # Always unlock — even on suspension the resume path will
             # handle compaction at its own pace.
@@ -926,250 +883,6 @@ class AgenticOrchestrator:
 
         return end_loop
 
-    def _execute_tools_parallel(self, tool_calls, thinking_indicator):
-        """Execute multiple tools concurrently.
-
-        Args:
-            tool_calls: List of tool call dicts from LLM (already filtered)
-            thinking_indicator: Optional ThinkingIndicator instance
-
-        Returns:
-            True if should exit the orchestration loop
-        """
-        if not tool_calls:
-            return False
-        from tools.helpers.parallel_executor import ParallelToolExecutor, ToolCall
-
-        # Suppress console output in handlers during parallel execution
-        # We'll display results ourselves in order below
-        self._parallel_context['console'] = None
-
-        try:
-            # Prepare context
-            context = {
-                'thinking_indicator': thinking_indicator,
-                'repo_root': self.repo_root,
-                'chat_manager': self.chat_manager,
-                'rg_exe_path': self.rg_exe_path,
-                'debug_mode': self.debug_mode,
-                'gitignore_spec': self.gitignore_spec,
-                'panel_updater': self.panel_updater,
-                'vault_root': vault_root_str(),
-                'create_file_handler': self.create_file_handler,
-            }
-
-            # Convert to ToolCall objects
-            tool_call_objs = []
-            for i, tc in enumerate(tool_calls):
-                try:
-                    arguments = json.loads(tc["function"]["arguments"])
-                except json.JSONDecodeError:
-                    # Invalid JSON - handle inline for this tool
-                    tool_msg = {
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": "exit_code=1\nInvalid JSON arguments"
-                    }
-                    self.chat_manager.messages.append(tool_msg)
-                    self.chat_manager.log_message(tool_msg)
-                    continue
-
-                tool_call_objs.append(
-                    ToolCall(
-                        tool_id=tc["id"],
-                        function_name=tc["function"]["name"],
-                        arguments=arguments,
-                        call_index=i
-                    )
-                )
-
-            if not tool_call_objs:
-                # All tools had invalid arguments
-                return False
-
-            # Create executor
-            executor = ParallelToolExecutor(
-                max_workers=tool_settings.max_parallel_workers
-            )
-
-            # Execute in parallel
-            results, _ = executor.execute_tools(
-                tool_call_objs,
-                context
-            )
-
-            # Display results with labels (staggered: label → feedback, like sequential mode)
-            for result in results:
-                if result.success:
-                    # Get tool call info
-                    tool_call = tool_calls[result.call_index]
-                    function_name = tool_call.get("function", {}).get("name", "")
-                    arguments = tool_call.get("function", {}).get("arguments", "{}")
-                    args_dict = json.loads(arguments) if isinstance(arguments, str) else arguments
-
-                    # Use the canonical label builder (same as sequential path)
-                    try:
-                        label = build_tool_label(function_name, args_dict)
-                        
-                        # Print the label before feedback (matches sequential path)
-                        if not self.panel_updater and function_name not in ("create_task_list", "complete_task", "show_task_list"):
-                            label_text = f"[grey]{label}[/grey]" if not function_name.startswith("web search") else f"[bold #5F9EA0]{label}[/bold #5F9EA0]"
-                            self.console.print(label_text, highlight=False)
-                            self.console.file.flush()
-                        
-                        # For task list tools: only show the task list, no label duplication
-                        # Skip the feedback display below since we already showed it
-                        continue_flag = False
-                        if function_name in ("create_task_list", "complete_task", "show_task_list"):
-                            exit_code = extract_exit_code(result.result)
-                            if exit_code == 0 or exit_code is None:
-                                rendered = result.result
-                                if rendered.startswith("exit_code="):
-                                    rendered = "\n".join(rendered.splitlines()[1:])
-                                if self.panel_updater:
-                                    self.panel_updater.append(rendered.strip())
-                                else:
-                                    self.console.print(rendered.strip(), markup=True)
-                                    self.console.print()
-                            else:
-                                first_two = "\n".join(result.result.splitlines()[:2]).strip()
-                                if self.panel_updater:
-                                    self.panel_updater.append(first_two or result.result.strip())
-                                else:
-                                    self.console.print(first_two or result.result.strip(), markup=False)
-                                    self.console.print()
-                            continue_flag = True
-                            label = function_name
-                    except Exception:
-                        label_text = f"[grey]{function_name}[/grey]"
-                        if not self.panel_updater:
-                            self.console.print(label_text, highlight=False)
-                            self.console.file.flush()
-                        label = function_name  # Fallback for error path
-                        continue_flag = False
-
-                    # Display feedback immediately after label (no buffering)
-                    # Skip for task list tools since they handled their own display
-                    if continue_flag:
-                        continue
-                    try:
-                        if function_name == "edit_file" and result.requires_approval:
-                            # Handle approval workflow for edit_file in parallel mode
-                            thinking_indicator = context.get('thinking_indicator')
-                            if self.edit_approval_handler:
-                                approved_result, should_exit = self.edit_approval_handler(args_dict, self.repo_root, self.console, self.gitignore_spec, vault_root_str)
-                                result.result = approved_result
-                                if should_exit:
-                                    result.should_exit = True
-                            else:
-                                preview, is_valid = resolve_edit_preview(result.result)
-                                if is_valid:
-                                    approved_result, should_exit = handle_edit_approval(
-                                        preview, args_dict.get('path', ''), args_dict,
-                                        self.console, thinking_indicator,
-                                        self.chat_manager.approve_mode,
-                                        lambda mode=None: self.chat_manager.cycle_approve_mode(mode),
-                                        self.repo_root, self.gitignore_spec,
-                                        vault_root_str, self.chat_manager)
-                                    result.result = approved_result
-                                    if should_exit:
-                                        result.should_exit = True
-                        elif label:
-                            display_tool_feedback(label, result.result, self.console, panel_updater=self.panel_updater)
-                            # Force flush to ensure immediate output
-                            if not self.panel_updater:
-                                self.console.file.flush()
-                        else:
-                            completion_text = f"[dim]{function_name} completed[/dim]"
-                            if self.panel_updater:
-                                self.panel_updater.append(completion_text)
-                            else:
-                                self.console.print(completion_text, highlight=False)
-                                self.console.file.flush()
-                    except Exception:
-                        completion_text = f"[dim]{function_name} completed[/dim]"
-                        if self.panel_updater:
-                            self.panel_updater.append(completion_text)
-                        else:
-                            self.console.print(completion_text, highlight=False)
-                            self.console.file.flush()
-                else:
-                    error_msg = result.error or result.result
-                    error_text = f"[red]{error_msg}[/red]"
-                    if self.panel_updater:
-                        self.panel_updater.append(error_text)
-                    else:
-                        self.console.print(error_text)
-                        self.console.file.flush()
-
-            # Display summary
-            success_count = sum(1 for r in results if r.success)
-            if self.debug_mode:
-                self.console.print(
-                    f"[dim]Parallel execution: {success_count}/{len(results)} succeeded[/dim]"
-                )
-
-            # Append all results to chat history
-            end_loop = False
-            for result in results:
-                if result.success:
-                    # Check if tool requested exit
-                    if result.should_exit:
-                        end_loop = True
-
-                    # Add exit_code prefix for agent consumption (Rich Text = success)
-                    if isinstance(result.result, Text):
-                        content_for_agent = f"exit_code=0\n{str(result.result)}"
-                    else:
-                        content_for_agent = str(result.result)
-                    tool_msg = {
-                        "role": "tool",
-                        "tool_call_id": result.tool_id,
-                        "content": content_for_agent
-                    }
-                    self.chat_manager.messages.append(tool_msg)
-                    # Log tool result
-                    self.chat_manager.log_message(tool_msg)
-                    if (
-                        getattr(self.chat_manager, "swarm_admin_mode", False)
-                        and tool_calls[result.call_index].get("function", {}).get("name") == "dispatch_swarm_task"
-                        and self._is_successful_swarm_dispatch_result(content_for_agent)
-                    ):
-                        self._swarm_dispatch_completed = True
-
-                    self._check_swarm_completion(
-                        tool_calls[result.call_index].get("function", {}).get("name", "")
-                    )
-                else:
-                    # Tool failed
-                    error_msg = result.error or result.result
-                    tool_msg = {
-                        "role": "tool",
-                        "tool_call_id": result.tool_id,
-                        "content": f"exit_code=1\n{error_msg}"
-                    }
-                    self.chat_manager.messages.append(tool_msg)
-                    # Log tool result
-                    self.chat_manager.log_message(tool_msg)
-
-            # Mid-loop compaction: compact older completed tool blocks
-            # after all parallel results are appended (safe — only compacts completed blocks)
-            self.chat_manager.compact_tool_results(skip_token_update=True)
-
-            # Update context tokens with current run's effective tools
-            tools_for_mode = self._get_effective_tools(
-                allowed_tools=getattr(self, "_current_allowed_tools", None),
-                allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
-            )
-            self.chat_manager._update_context_tokens(tools_for_mode)
-
-            # Pre-send guard: ensure context fits before next LLM call
-            self.chat_manager.ensure_context_fits(console=self.console)
-
-            return end_loop
-        finally:
-            # Restore console output
-            self._parallel_context['console'] = self.console
 
     def _boundary_prompt(self, path_str, access_reason, thinking_indicator=None,
                          tool_id=None, function_name=None, tool=None,

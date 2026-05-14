@@ -644,6 +644,22 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             input_type="number",
         ),
         SettingOption(
+            key="max_context_window", text="Max Context Window",
+            value=context_settings.max_context_window,
+            input_type="number",
+        ),
+        SettingOption(
+            key="hard_limit_tokens", text="Hard Context Limit",
+            value=context_settings.hard_limit_tokens,
+            input_type="number",
+        ),
+        SettingOption(
+            key="notify_auto_compaction", text="Auto-Compaction Notifications",
+            value=context_settings.notify_auto_compaction,
+            input_type="boolean",
+            on_text="ON", off_text="OFF",
+        ),
+        SettingOption(
             key="enable_tool_compaction", text="Per-Message Tool Compaction",
             value=context_settings.tool_compaction.enable_per_message_compaction,
             input_type="boolean",
@@ -657,6 +673,22 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
         SettingOption(
             key="min_tool_blocks", text="Min Tool Blocks Preserved",
             value=context_settings.tool_compaction.min_tool_blocks,
+            input_type="number",
+        ),
+        SettingOption(
+            key="compact_failed_tools", text="Compact Failed Tools",
+            value=context_settings.tool_compaction.compact_failed_tools,
+            input_type="boolean",
+            on_text="ON", off_text="OFF",
+        ),
+        SettingOption(
+            key="compaction_growth_threshold", text="Tool Compaction Growth Threshold",
+            value=context_settings.tool_compaction.compaction_growth_threshold,
+            input_type="number",
+        ),
+        SettingOption(
+            key="compaction_warmup_tokens", text="Tool Compaction Warmup Tokens",
+            value=context_settings.tool_compaction.compaction_warmup_tokens,
             input_type="number",
         ),
     ]
@@ -717,6 +749,20 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             elif key == "compact_trigger_tokens":
                 context_settings.compact_trigger_tokens = int(value)
                 change_lines.append(f"  Compaction Threshold: {value:,} tokens")
+            elif key == "max_context_window":
+                context_settings.max_context_window = int(value)
+                change_lines.append(f"  Max Context Window: {value:,} tokens")
+                # Auto-recalculate hard limit unless user set it explicitly in this batch
+                if "hard_limit_tokens" not in changes:
+                    context_settings.hard_limit_tokens = int(int(value) * 0.9)
+                    change_lines.append(f"  Hard Context Limit: {context_settings.hard_limit_tokens:,} tokens (auto-derived)")
+            elif key == "hard_limit_tokens":
+                context_settings.hard_limit_tokens = int(value)
+                change_lines.append(f"  Hard Context Limit: {value:,} tokens")
+            elif key == "notify_auto_compaction":
+                context_settings.notify_auto_compaction = value
+                state = "enabled" if value else "disabled"
+                change_lines.append(f"  Auto-Compaction Notifications: {state}")
             elif key == "enable_tool_compaction":
                 context_settings.tool_compaction.enable_per_message_compaction = value
                 state = "enabled" if value else "disabled"
@@ -727,13 +773,35 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             elif key == "min_tool_blocks":
                 context_settings.tool_compaction.min_tool_blocks = int(value)
                 change_lines.append(f"  Min Tool Blocks Preserved: {value}")
+            elif key == "compact_failed_tools":
+                context_settings.tool_compaction.compact_failed_tools = value
+                state = "enabled" if value else "disabled"
+                change_lines.append(f"  Compact Failed Tools: {state}")
+            elif key == "compaction_growth_threshold":
+                context_settings.tool_compaction.compaction_growth_threshold = int(value)
+                change_lines.append(f"  Tool Compaction Growth Threshold: {value:,}")
+            elif key == "compaction_warmup_tokens":
+                context_settings.tool_compaction.compaction_warmup_tokens = int(value)
+                change_lines.append(f"  Tool Compaction Warmup Tokens: {value:,}")
             elif key in sb_labels:
                 sb_changes[key] = value
                 state = "ON" if value else "OFF"
                 change_lines.append(f"  {sb_labels[key]}: {state}")
 
         # Persist context setting changes to config
-        ctx_changes = {k: v for k, v in changes.items() if k in ("compact_trigger_tokens", "enable_tool_compaction", "uncompacted_tail_tokens", "min_tool_blocks")}
+        ctx_keys = {
+            "compact_trigger_tokens",
+            "max_context_window",
+            "hard_limit_tokens",
+            "notify_auto_compaction",
+            "enable_tool_compaction",
+            "uncompacted_tail_tokens",
+            "min_tool_blocks",
+            "compact_failed_tools",
+            "compaction_growth_threshold",
+            "compaction_warmup_tokens",
+        }
+        ctx_changes = {k: v for k, v in changes.items() if k in ctx_keys}
         if ctx_changes:
             try:
                 cfg_data = config_manager.load(force_reload=True)
@@ -741,14 +809,27 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
                     cfg_data["CONTEXT_SETTINGS"] = {}
                 if "tool_compaction" not in cfg_data["CONTEXT_SETTINGS"]:
                     cfg_data["CONTEXT_SETTINGS"]["tool_compaction"] = {}
-                if "compact_trigger_tokens" in ctx_changes:
-                    cfg_data["CONTEXT_SETTINGS"]["compact_trigger_tokens"] = int(ctx_changes["compact_trigger_tokens"])
+
+                context_number_keys = ("compact_trigger_tokens", "max_context_window", "hard_limit_tokens")
+                for ctx_key in context_number_keys:
+                    if ctx_key in ctx_changes:
+                        cfg_data["CONTEXT_SETTINGS"][ctx_key] = int(ctx_changes[ctx_key])
+                if "notify_auto_compaction" in ctx_changes:
+                    cfg_data["CONTEXT_SETTINGS"]["notify_auto_compaction"] = ctx_changes["notify_auto_compaction"]
+
+                tool_cfg = cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]
                 if "enable_tool_compaction" in ctx_changes:
-                    cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["enable_per_message_compaction"] = ctx_changes["enable_tool_compaction"]
+                    tool_cfg["enable_per_message_compaction"] = ctx_changes["enable_tool_compaction"]
                 if "uncompacted_tail_tokens" in ctx_changes:
-                    cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["uncompacted_tail_tokens"] = int(ctx_changes["uncompacted_tail_tokens"])
+                    tool_cfg["uncompacted_tail_tokens"] = int(ctx_changes["uncompacted_tail_tokens"])
                 if "min_tool_blocks" in ctx_changes:
-                    cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]["min_tool_blocks"] = int(ctx_changes["min_tool_blocks"])
+                    tool_cfg["min_tool_blocks"] = int(ctx_changes["min_tool_blocks"])
+                if "compact_failed_tools" in ctx_changes:
+                    tool_cfg["compact_failed_tools"] = ctx_changes["compact_failed_tools"]
+                if "compaction_growth_threshold" in ctx_changes:
+                    tool_cfg["compaction_growth_threshold"] = int(ctx_changes["compaction_growth_threshold"])
+                if "compaction_warmup_tokens" in ctx_changes:
+                    tool_cfg["compaction_warmup_tokens"] = int(ctx_changes["compaction_warmup_tokens"])
                 config_manager.save(cfg_data)
             except Exception as e:
                 console.print(f"[red]Failed to save context settings: {e}[/red]")

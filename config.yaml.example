@@ -66,8 +66,6 @@ LLM_ENDPOINT: "/v1/chat/completions"
 TOOL_SETTINGS:
   max_tool_calls: 100
   command_timeout_sec: 30
-  enable_parallel_execution: true
-  max_parallel_workers: 10
   max_command_output_lines: 100
   max_file_preview_lines: 200
 

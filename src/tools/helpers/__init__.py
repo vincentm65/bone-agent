@@ -53,13 +53,6 @@ from .loader import (
 # Plugin manifest for on-demand tool discovery
 from .plugin_manifest import PluginManifest, plugin_manifest
 
-# Parallel execution
-from .parallel_executor import (
-    ToolCall,
-    ToolResult,
-    ParallelToolExecutor,
-)
-
 __all__ = [
     # Core infrastructure
     'ToolDefinition',
@@ -90,8 +83,4 @@ __all__ = [
     # Plugin manifest
     'PluginManifest',
     'plugin_manifest',
-    # Parallel execution
-    'ToolCall',
-    'ToolResult',
-    'ParallelToolExecutor',
 ]

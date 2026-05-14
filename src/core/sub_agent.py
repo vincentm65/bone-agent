@@ -271,7 +271,6 @@ def run_sub_agent(
         suppress_result_display=True,
         is_sub_agent=True,
         panel_updater=panel_updater,
-        force_parallel_execution=True  # Enable parallel execution for read-only tools
     )
 
     # Wire the inner orchestrator's cancel event to the parent's subagent
