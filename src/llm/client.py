@@ -134,10 +134,26 @@ class LLMClient:
                 try:
                     response_json = response.json()
                     return self.handler.parse_response(response_json)
-                except ValueError:
+                except ValueError as e:
                     if getattr(self.handler, "supports_sse_response_fallback", False):
                         return self.handler.parse_sse_response(response.text)
-                    raise
+                    raise LLMResponseError(
+                        f"Invalid JSON response from {config['error_prefix']}",
+                        details={
+                            "provider": self.provider,
+                            "original_error": str(e),
+                            "retryable": True,
+                        },
+                    ) from e
+                except (KeyError, TypeError, IndexError) as e:
+                    raise LLMResponseError(
+                        f"Malformed response from {config['error_prefix']}",
+                        details={
+                            "provider": self.provider,
+                            "original_error": str(e),
+                            "retryable": True,
+                        },
+                    ) from e
 
         except requests.exceptions.RequestException as e:
             raise LLMConnectionError(

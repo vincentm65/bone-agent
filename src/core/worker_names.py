@@ -42,34 +42,3 @@ def generate_worker_name(rng: random.Random | None = None) -> str:
     noun = r.choice(NOUNS)
     return f"{adjective}_{noun}"
 
-
-def generate_unique_worker_name(
-    existing_names: set[str],
-    rng: random.Random | None = None,
-) -> str:
-    """Return a name guaranteed not to be in *existing_names*.
-
-    Tries up to 100 random combinations.  If all collide, appends an
-    incrementing numeric suffix to the last generated name (``bold_payne2``,
-    ``bold_payne3``, …) until a unique one is found.
-
-    Args:
-        existing_names: Set of names already in use.
-        rng: Optional ``random.Random`` for deterministic output.
-
-    Returns:
-        A unique worker name string.
-    """
-    r = rng or random
-    name = generate_worker_name(r)
-
-    for _ in range(100):
-        if name not in existing_names:
-            return name
-        name = generate_worker_name(r)
-
-    # All random attempts collided — fall back to numbered suffix.
-    suffix = 2
-    while f"{name}{suffix}" in existing_names:
-        suffix += 1
-    return f"{name}{suffix}"

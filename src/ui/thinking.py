@@ -31,16 +31,6 @@ class ThinkingIndicator:
         """Select a random word from weighted word lists."""
         return ProgressState.random_word()
 
-    @staticmethod
-    def _format_time(seconds):
-        """Format seconds as whole seconds or minutes:seconds."""
-        if seconds >= 60:
-            mins = int(seconds // 60)
-            secs = int(seconds % 60)
-            return f"{mins}m {secs}s"
-        else:
-            return f"{int(seconds)}s"
-
     def start(self):
         # Select initial word
         self.message = self._select_random_word()

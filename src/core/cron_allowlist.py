@@ -9,7 +9,6 @@ During interactive test runs (/cron run), accepted commands are auto-saved.
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import yaml
 

@@ -1485,7 +1485,7 @@ def _continue_main_after_subagent_overflow(chat_manager, console, query, result_
         f"Subagent overflow handoff for: {query}\n\n"
         f"{result_text}"
     )
-    chat_manager.messages.append({"role": "assistant", "content": overflow_intro})
+    chat_manager.add_message({"role": "assistant", "content": overflow_intro})
     chat_manager.token_tracker.current_context_tokens += chat_manager.token_tracker.estimate_tokens(
         overflow_intro
     )
@@ -1594,16 +1594,16 @@ def _process_subagent_result(
         else:
             assistant_text = result_text
 
-        chat_manager.messages.append({
+        chat_manager.add_message({
             "role": "user",
             "content": user_msg_content,
         })
-        chat_manager.messages.append({
+        chat_manager.add_message({
             "role": "assistant",
             "content": assistant_text,
         })
         if force_main_history:
-            chat_manager.messages.append({
+            chat_manager.add_message({
                 "role": "user",
                 "content": SUBAGENT_OVERFLOW_CONTINUATION,
             })
@@ -3673,7 +3673,7 @@ def _handle_swarm_start(chat_manager, console, name_arg):
     if len(chat_manager.messages) >= 3:
         msg1, msg2 = chat_manager.messages[1], chat_manager.messages[2]
         if msg1.get("role") == "user" and msg2.get("role") == "assistant":
-            chat_manager.messages = [chat_manager.messages[0]] + chat_manager.messages[3:]
+            chat_manager.replace_messages([chat_manager.messages[0]] + chat_manager.messages[3:])
 
     chat_manager.update_system_prompt()
 

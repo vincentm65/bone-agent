@@ -57,11 +57,6 @@ class ToolExecutionError(BoneAgentError):
     pass
 
 
-class CommandExecutionError(ToolExecutionError):
-    """Raised when shell command execution fails."""
-    pass
-
-
 class FileEditError(ToolExecutionError):
     """Raised when file edit operation fails."""
     pass

@@ -294,8 +294,6 @@ class ToolConfirmationPanel:
     """
 
     # Public constants (kept for backward compatibility)
-    SUMMARY_DISPLAY_DELAY = 0.5  # Retained for API compat; no longer used
-    CURSOR = "> "
     STANDARD_OPTIONS = [
         {"value": "accept", "text": "Accept"},
         {"value": "advise", "text": "Advise"},

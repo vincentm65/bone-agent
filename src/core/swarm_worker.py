@@ -81,7 +81,7 @@ def _create_worker_chat_manager(system_prompt: str, provider: str | None = None)
     cm.markdown_logger = None
     cm.user_message_logger = None
     # Replace system prompt (ChatManager builds its own on init)
-    cm.messages = [{"role": "system", "content": system_prompt}]
+    cm.replace_messages([{"role": "system", "content": system_prompt}], sync_log=False)
     cm._update_context_tokens()
     cm.context_token_estimate = cm.token_tracker.current_context_tokens
     return cm
@@ -97,7 +97,7 @@ def clear_worker_context(chat_manager: ChatManager) -> None:
         chat_manager: Worker's ChatManager instance.
     """
     system_prompt = chat_manager.messages[0]["content"] if chat_manager.messages else ""
-    chat_manager.messages = [{"role": "system", "content": system_prompt}]
+    chat_manager.replace_messages([{"role": "system", "content": system_prompt}], sync_log=False)
     chat_manager._update_context_tokens()
     chat_manager.context_token_estimate = chat_manager.token_tracker.current_context_tokens
     chat_manager.task_list.clear()

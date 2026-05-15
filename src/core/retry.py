@@ -45,9 +45,12 @@ def is_retryable_error(error):
     Returns:
         bool: True if the error is retryable
     """
-    # Never retry response parsing errors
+    # Response parsing/validation errors are normally deterministic and should
+    # not be retried.  Call sites may mark provider-shaped transient failures
+    # retryable (for example: HTTP 200 with no choices / empty assistant).
     if isinstance(error, LLMResponseError):
-        return False
+        details = getattr(error, 'details', {}) or {}
+        return bool(details.get("retryable"))
 
     # Check HTTP status code first (most reliable signal)
     details = getattr(error, 'details', {}) or {}

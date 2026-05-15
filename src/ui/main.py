@@ -4,7 +4,6 @@ import os
 import shlex
 import sys
 import time
-import random
 import threading
 import asyncio
 import warnings
@@ -21,7 +20,6 @@ if str(src_dir) not in sys.path:
 
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.theme import Theme
 from rich.text import Text
 from prompt_toolkit import PromptSession
@@ -29,7 +27,6 @@ from prompt_toolkit.application import in_terminal, run_in_terminal
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import ANSI
-from prompt_toolkit.styles import Style
 
 from ui.safe_console import SafeConsole
 
@@ -1180,8 +1177,7 @@ def main():
                     # Else: non-tools path.  Auto-turns need tools to process
                     # approvals and completions; skip with a warning if disabled.
                     else:
-                        chat_manager.messages.append({"role": "user", "content": final_content})
-                        chat_manager.log_message({"role": "user", "content": final_content})
+                        chat_manager.add_message({"role": "user", "content": final_content})
                     continue
 
                 # Agent work completed sentinel (999).  Inputhook for the
@@ -1470,8 +1466,7 @@ def main():
                     try:
                         _safe_print(console, session, "─" * console.width, style="rgb(30,30,30)")
                         _safe_print(console, session)  # Extra newline after user input to separate from LLM response
-                        chat_manager.messages.append({"role": "user", "content": final_content})
-                        chat_manager.log_message({"role": "user", "content": final_content})
+                        chat_manager.add_message({"role": "user", "content": final_content})
 
                         try:
                             stream = chat_manager.client.chat_completion(
@@ -1504,7 +1499,7 @@ def main():
                                     md = Markdown(left_align_headings(full_response), code_theme=MonokaiDarkBGStyle, justify="left")
                                     _safe_print(console, session, md)
 
-                                chat_manager.messages.append(
+                                chat_manager.add_message(
                                     {"role": "assistant", "content": full_response}
                                 )
 
@@ -1529,7 +1524,7 @@ def main():
                                             partial_with_note = partial + "\n\n*[Response interrupted]*"
                                             md = Markdown(left_align_headings(partial_with_note), code_theme=MonokaiDarkBGStyle, justify="left")
                                             _safe_print(console, session, md)
-                                            chat_manager.messages.append(
+                                            chat_manager.add_message(
                                                 {"role": "assistant", "content": partial}
                                             )
                                 # Reset tracker so a handled streaming interrupt

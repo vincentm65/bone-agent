@@ -1,13 +1,12 @@
 """Centralized configuration for bone-agent."""
 import re
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Set
+from typing import Set
 
 # Load config from llm.config
 # Note: src/ is added to sys.path in main.py, so we can import directly
 from llm.config import _CONFIG
-from llm import config as llm_config
 
 # Styles and themes
 from pygments.styles.monokai import MonokaiStyle
@@ -179,7 +178,6 @@ class SwarmSettings:
 
 # Global instances
 tool_settings = ToolSettings()
-file_settings = FileSettings()
 context_settings = ContextSettings()
 sub_agent_settings = SubAgentSettings()
 dream_settings = DreamSettings()

@@ -2,7 +2,6 @@
 
 import json
 import logging
-from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -12,9 +11,6 @@ from rich.text import Text
 
 from utils.settings import MAX_TOOL_CALLS, MonokaiDarkBGStyle, left_align_headings
 from tools import (
-    read_file,
-    list_directory,
-    create_file,
     TOOLS,
 )
 from tools.swarm import ADMIN_SWARM_TOOL_NAMES
@@ -351,6 +347,16 @@ class AgenticOrchestrator:
         """Return True for the canonical successful dispatch_swarm_task output."""
         return content.startswith("exit_code=0\n") and "Task:" in content
 
+    def _add_chat_message(self, message: dict) -> None:
+        add_message = getattr(self.chat_manager, "add_message", None)
+        if add_message:
+            add_message(message)
+            return
+        self.chat_manager.messages.append(message)
+        self.chat_manager.log_message(message)
+        if hasattr(self.chat_manager, "_context_dirty"):
+            self.chat_manager._context_dirty = True
+
     def run(self, user_input: str | list[dict[str, Any]], thinking_indicator=None, allowed_tools=None, allow_active_plugins=False):
         """Main orchestration loop.
 
@@ -386,10 +392,7 @@ class AgenticOrchestrator:
         user_message = {"role": "user", "content": sanitize_message_content(user_input)}
 
         # Append user message
-        self.chat_manager.messages.append(user_message)
-
-        # Log user message
-        self.chat_manager.log_message(user_message)
+        self.chat_manager.add_message(user_message)
 
         from tools.helpers.base import ToolRegistry
 
@@ -494,6 +497,29 @@ class AgenticOrchestrator:
                 )
                 if self._cancel_requested():
                     raise AgentTurnCancelled()
+
+                try:
+                    message = response["choices"][0]["message"]
+                except (TypeError, KeyError, IndexError) as parse_error:
+                    raise LLMResponseError(
+                        "Invalid response from model",
+                        details={
+                            "provider": self.chat_manager.client.provider,
+                            "original_error": str(parse_error),
+                            "retryable": True,
+                        },
+                    ) from parse_error
+
+                if not message.get("tool_calls") and not str(message.get("content") or "").strip():
+                    if self._is_after_successful_swarm_dispatch():
+                        return message
+                    raise LLMResponseError(
+                        "Model returned an empty response with no tool calls",
+                        details={
+                            "provider": self.chat_manager.client.provider,
+                            "retryable": True,
+                        },
+                    )
             except LLMError as e:
                 last_error = e
 
@@ -527,12 +553,6 @@ class AgenticOrchestrator:
                     response,
                     model_name=provider_cfg.get("model", ""),
                 )
-
-            try:
-                message = response["choices"][0]["message"]
-            except (KeyError, IndexError):
-                self.console.print("[red]Error: invalid response from model[/red]")
-                return None
 
             return message
 
@@ -571,9 +591,7 @@ class AgenticOrchestrator:
             # Always append to message history (AI needs the result regardless)
             response = dict(response)
             response["content"] = content
-            self.chat_manager.messages.append(response)
-            # Log assistant response
-            self.chat_manager.log_message(response)
+            self.chat_manager.add_message(response)
 
             # NEW: Compact tool results after final answer (per-message compaction)
             self.chat_manager.compact_tool_results(skip_token_update=True)
@@ -612,8 +630,7 @@ class AgenticOrchestrator:
             "role": "user",
             "content": "Tool limit reached. Provide your answer without calling tools."
         }
-        self.chat_manager.messages.append(user_message)
-        self.chat_manager.log_message(user_message)
+        self.chat_manager.add_message(user_message)
 
         try:
             response = self.chat_manager.client.chat_completion(
@@ -678,9 +695,7 @@ class AgenticOrchestrator:
         # Record message count before assistant message for potential
         # rollback if the subagent is cancelled mid-flight.
         _msg_count_before = len(self.chat_manager.messages)
-        self.chat_manager.messages.append(assistant_msg)
-        # Log assistant tool call message
-        self.chat_manager.log_message(assistant_msg)
+        self.chat_manager.add_message(assistant_msg)
 
         # NEW: Filter out non-allowed tools BEFORE execution
         # This silently removes unknown tools or tools not in the allowed whitelist
@@ -740,8 +755,7 @@ class AgenticOrchestrator:
                     "tool_call_id": tool_id,
                     "content": "exit_code=1\nTool not available. Please use the available tools from the function list."
                 }
-                self.chat_manager.messages.append(tool_msg)
-                self.chat_manager.log_message(tool_msg)
+                self._add_chat_message(tool_msg)
 
         # If all tools were filtered, return early
         if not tool_calls:
@@ -841,8 +855,7 @@ class AgenticOrchestrator:
                         "tool_call_id": tool_id,
                         "content": content_for_agent
                     }
-                    self.chat_manager.messages.append(tool_msg)
-                    self.chat_manager.log_message(tool_msg)
+                    self._add_chat_message(tool_msg)
                 return True  # Exit orchestration loop immediately
 
             # Append tool result if not skipped (guidance mode)
@@ -858,9 +871,7 @@ class AgenticOrchestrator:
                     "tool_call_id": tool_id,
                     "content": content_for_agent
                 }
-                self.chat_manager.messages.append(tool_msg)
-                # Log tool result
-                self.chat_manager.log_message(tool_msg)
+                self._add_chat_message(tool_msg)
                 if (
                     getattr(self.chat_manager, "swarm_admin_mode", False)
                     and tool_call.get("function", {}).get("name") == "dispatch_swarm_task"
@@ -1500,8 +1511,7 @@ class AgenticOrchestrator:
                 "tool_call_id": exc.tool_id,
                 "content": f"exit_code=0\n{str(tool_result_str)}",
             }
-        self.chat_manager.messages.append(tool_msg)
-        self.chat_manager.log_message(tool_msg)
+        self.chat_manager.add_message(tool_msg)
 
         if self._is_user_cancel_result(tool_result_str):
             return "done"
@@ -1568,8 +1578,7 @@ class AgenticOrchestrator:
             "tool_call_id": tool_id,
             "content": content,
         }
-        self.chat_manager.messages.append(tool_msg)
-        self.chat_manager.log_message(tool_msg)
+        self.chat_manager.add_message(tool_msg)
 
     def resume_after_selection(self, thinking_indicator=None):
         """Resume the agentic loop after a suspended select_option is resolved.
@@ -1643,8 +1652,7 @@ class AgenticOrchestrator:
             "tool_call_id": exc.tool_id,
             "content": tool_result_str,
         }
-        self.chat_manager.messages.append(tool_msg)
-        self.chat_manager.log_message(tool_msg)
+        self.chat_manager.add_message(tool_msg)
 
         if self._is_user_cancel_result(tool_result_str):
             return "done"
@@ -1730,8 +1738,7 @@ class AgenticOrchestrator:
             "tool_call_id": exc.tool_id,
             "content": tool_result_str,
         }
-        self.chat_manager.messages.append(tool_msg)
-        self.chat_manager.log_message(tool_msg)
+        self.chat_manager.add_message(tool_msg)
 
         if self._is_user_cancel_result(tool_result_str):
             return "done"
@@ -1802,8 +1809,7 @@ class AgenticOrchestrator:
 
         inject_content = AUTO_TURN_TAG + "\n" + "\n\n---\n\n".join(pending_prompts)
         inject_msg = {"role": "user", "content": inject_content}
-        self.chat_manager.messages.append(inject_msg)
-        self.chat_manager.log_message(inject_msg)
+        self.chat_manager.add_message(inject_msg)
         if self.debug_mode:
             self.console.print(
                 "[dim]Injected %d swarm event(s) mid-turn[/dim]"

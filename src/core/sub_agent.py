@@ -139,7 +139,7 @@ def _inject_system_prompt(chat_manager, sub_agent_type: str = "research"):
         soft_limit_tokens=sub_agent_settings.soft_limit_tokens,
         hard_limit_tokens=_effective_hard_limit_tokens,
     )
-    chat_manager.messages = [{"role": "system", "content": base_prompt}]
+    chat_manager.replace_messages([{"role": "system", "content": base_prompt}], sync_log=False)
 
 
 def _load_codebase_map(chat_manager):
@@ -157,7 +157,7 @@ def _load_codebase_map(chat_manager):
             "Use this as a reference when exploring the codebase.\n\n"
             f"## Codebase Map (auto-generated from agents.md)\n\n{map_content}"
         )
-        chat_manager.messages.append({"role": "user", "content": user_msg})
+        chat_manager.add_message({"role": "user", "content": user_msg})
 
 
 def _configure_isolation(chat_manager):
@@ -232,7 +232,7 @@ def run_sub_agent(
 
     # Inject initial context as a user/assistant exchange if provided
     if initial_context:
-        temp_chat_manager.messages.append(
+        temp_chat_manager.add_message(
             {"role": "user", "content": initial_context}
         )
 

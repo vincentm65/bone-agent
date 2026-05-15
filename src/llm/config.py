@@ -534,7 +534,6 @@ __all__ = [
     "LLM_PROVIDER",
     "TOOLS_ENABLED",
     "TOOLS_REQUIRE_CONFIRMATION",
-    "APPROVE_MODES",
     "APPROVE_MODE_LABELS",
 
     "get_provider_config",
