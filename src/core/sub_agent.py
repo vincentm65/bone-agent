@@ -21,6 +21,10 @@ _effective_hard_limit_tokens = min(
     context_settings.hard_limit_tokens,
 )
 
+# Effective billed-token limit: caps cumulative API token usage per sub-agent
+# to prevent runaway costs from many small calls that stay under the context limit.
+_effective_billed_limit_tokens = sub_agent_settings.billed_token_limit
+
 
 def _last_assistant_content(messages: list[dict], max_chars: int = 60_000) -> str:
     """Extract content from the last assistant message with non-empty content.
@@ -38,12 +42,7 @@ def _last_assistant_content(messages: list[dict], max_chars: int = 60_000) -> st
 
 
 class HardLimitExceeded(Exception):
-    """Raised when the sub-agent hits its hard token limit."""
-    pass
-
-
-class BilledLimitExceeded(Exception):
-    """Raised when the sub-agent hits its cumulative billed token limit."""
+    """Raised when the sub-agent hits its context hard limit (prevents API errors)."""
     pass
 
 
@@ -124,7 +123,7 @@ def _configure_compaction():
         return cm
 
 
-def _inject_system_prompt(chat_manager, sub_agent_type: str = "research"):
+def _inject_system_prompt(chat_manager, sub_agent_type: str = "research", diff_content: str | None = None):
     """Build sub-agent prompt and inject it.
 
     Token usage is reported live by the wrapper in run_sub_agent(),
@@ -133,11 +132,12 @@ def _inject_system_prompt(chat_manager, sub_agent_type: str = "research"):
     Args:
         chat_manager: ChatManager instance to configure
         sub_agent_type: Type of sub-agent ('research' or 'review').
+        diff_content: Optional git diff to embed in the system prompt (review mode).
     """
     base_prompt = build_sub_agent_prompt(
         sub_agent_type=sub_agent_type,
-        soft_limit_tokens=sub_agent_settings.soft_limit_tokens,
         hard_limit_tokens=_effective_hard_limit_tokens,
+        diff_content=diff_content,
     )
     chat_manager.replace_messages([{"role": "system", "content": base_prompt}], sync_log=False)
 
@@ -171,7 +171,7 @@ def _configure_isolation(chat_manager):
     chat_manager.markdown_logger = None
 
 
-def _create_chat_manager(sub_agent_type: str = "research"):
+def _create_chat_manager(sub_agent_type: str = "research", diff_content: str | None = None):
     """Create a fresh ChatManager instance for sub-agent use.
 
     Orchestrates compaction, prompt injection, codebase map loading,
@@ -179,12 +179,13 @@ def _create_chat_manager(sub_agent_type: str = "research"):
 
     Args:
         sub_agent_type: Type of sub-agent ('research' or 'review').
+        diff_content: Optional git diff to embed in the system prompt (review mode).
 
     Returns:
         ChatManager: A new ChatManager instance with pre-configured system prompt
     """
     chat_manager = _configure_compaction()
-    _inject_system_prompt(chat_manager, sub_agent_type=sub_agent_type)
+    _inject_system_prompt(chat_manager, sub_agent_type=sub_agent_type, diff_content=diff_content)
     _load_codebase_map(chat_manager)
     _configure_isolation(chat_manager)
     return chat_manager
@@ -199,6 +200,7 @@ def run_sub_agent(
     sub_agent_type: str = "research",
     initial_context: str = None,
     cancel_event=None,
+    diff_content: str | None = None,
 ) -> dict:
     """Run sub-agent using existing AgenticOrchestrator for delegated tasks.
 
@@ -210,7 +212,12 @@ def run_sub_agent(
         panel_updater: Optional SubAgentPanel for live panel updates
         sub_agent_type: Type of sub-agent ('research' or 'review').
         initial_context: Optional string injected as context before the task query
-            (e.g., a git diff for review mode).
+            (e.g., conversation history for /ask). Not used for review mode —
+            use diff_content instead.
+        cancel_event: Optional event to signal cancellation.
+        diff_content: Optional git diff embedded in the system prompt (review mode).
+            More efficient than initial_context because it avoids wasting a
+            user-message turn on raw diff text.
 
     Returns:
         Dict with:
@@ -228,36 +235,13 @@ def run_sub_agent(
         panel_updater = SimplePanelUpdater(console)
 
     # Create fresh ChatManager for sub-agent
-    temp_chat_manager = _create_chat_manager(sub_agent_type=sub_agent_type)
+    temp_chat_manager = _create_chat_manager(sub_agent_type=sub_agent_type, diff_content=diff_content)
 
-    # Inject initial context as a user/assistant exchange if provided
+    # Inject initial context as a user message if provided (used by /ask, not /review)
     if initial_context:
         temp_chat_manager.add_message(
             {"role": "user", "content": initial_context}
         )
-
-    # Preflight check: if initial context already exceeds the hard limit,
-    # bail out before making any API call. Compaction is disabled for
-    # sub-agents, so ensure_context_fits() would only warn — it cannot
-    # reduce the context. We must catch this here to avoid a guaranteed
-    # context-length error from the API.
-    temp_chat_manager._update_context_tokens()
-    preflight_tokens = temp_chat_manager.token_tracker.current_context_tokens
-    if preflight_tokens >= _effective_hard_limit_tokens:
-        return {
-            "result": "",
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "context_tokens": preflight_tokens,
-            },
-            "model": temp_chat_manager.client.model,
-            "error": None,
-            "preflight_overflow": True,
-            "preflight_tokens": preflight_tokens,
-            "hard_limit": _effective_hard_limit_tokens,
-        }
 
     # Import here to avoid circular import with core.agentic
     from core.agentic import AgenticOrchestrator
@@ -282,88 +266,39 @@ def run_sub_agent(
     if cancel_event is not None:
         orchestrator.set_cancel_event(cancel_event)
 
-    # Wrap orchestrator._get_llm_response to check hard token limit and
-    # wrap client.chat_completion once (outside the loop) to inject live
-    # token feedback as a system message — avoids per-call monkey-patching
-    # and eliminates any re-entrancy risk.
+    # Wrap orchestrator._get_llm_response to check context hard limit
+    # before each LLM call, preventing API context_length_exceeded errors.
     original_get_llm_response = orchestrator._get_llm_response
-    original_chat_completion = temp_chat_manager.client.chat_completion
-
-    _soft_limit_warned = False
-    _billed_warning_sent = False
-    _pending_warnings = []
-
-    def _chat_completion_with_token_hint(messages, **kwargs):
-        """Inject pending limit warnings into the next chat_completion call."""
-        nonlocal _pending_warnings
-        if _pending_warnings:
-            warning_msg = {"role": "system", "content": "\n".join(_pending_warnings)}
-            _pending_warnings = []
-            return original_chat_completion([warning_msg, *messages], **kwargs)
-        return original_chat_completion(messages, **kwargs)
 
     def _get_llm_response_with_hard_limit(allowed_tools=None, allow_active_plugins=False):
-        """Wrapper to check context and billed token limits and update panel state."""
-        nonlocal _soft_limit_warned, _billed_warning_sent
-
+        """Wrapper to check context hard limit before each LLM call."""
         if cancel_event and cancel_event.is_set():
             raise SubAgentCancelled("Sub-agent cancelled by user.")
 
+        # Force recount before reading — tool results or initial_context
+        # may have been added since the last token update.
+        temp_chat_manager._update_context_tokens(force=True)
         tt = temp_chat_manager.token_tracker
 
-        # --- Warning thresholds (checked before hard limits) ---
-        warnings = []
-
-        if not _soft_limit_warned and tt.current_context_tokens >= sub_agent_settings.soft_limit_tokens:
-            _soft_limit_warned = True
-            warnings.append(
-                f"WARNING: You have exceeded the current-context soft token limit "
-                f"({tt.current_context_tokens:,} / {sub_agent_settings.soft_limit_tokens:,}). "
-                "STOP exploring and return your findings immediately. Do NOT call any more tools."
-            )
-
-        if not _billed_warning_sent and tt.conv_total_tokens >= sub_agent_settings.billed_warning_tokens:
-            _billed_warning_sent = True
-            warnings.append(
-                f"WARNING: You have exceeded the cumulative billed token warning limit "
-                f"({tt.conv_total_tokens:,} / {sub_agent_settings.billed_warning_tokens:,}). "
-                "This sub-agent may be running away. STOP exploring and return your findings immediately. "
-                "Do NOT call any more tools."
-            )
-
-        # --- Hard limits (raise exceptions, including any pending warnings) ---
-
-        # Check hard token limit before making LLM call
-        # Use current_context_tokens (prompt size) not total_tokens (cumulative billing)
-        # to catch prompt-length-over-limit errors before they hit the API.
+        # Check hard token limit before making LLM call.
+        # Uses current_context_tokens (prompt size) to catch
+        # prompt-length-over-limit errors before they hit the API.
         if tt.current_context_tokens >= _effective_hard_limit_tokens:
-            msg = (
-                f"Sub-agent hard token limit exceeded: "
+            raise HardLimitExceeded(
+                f"Sub-agent context hard limit exceeded: "
                 f"{tt.current_context_tokens:,} / {_effective_hard_limit_tokens:,} tokens."
             )
-            if warnings:
-                msg = "\n".join(warnings) + "\n" + msg
-            raise HardLimitExceeded(msg)
 
-        # Check cumulative billed tokens to stop runaway sub-agents even when
-        # current context remains below the prompt-size hard limit.
-        if tt.conv_total_tokens >= sub_agent_settings.billed_hard_limit_tokens:
-            msg = (
-                f"Sub-agent billed token limit exceeded: "
-                f"{tt.conv_total_tokens:,} / {sub_agent_settings.billed_hard_limit_tokens:,} tokens."
+        # Check cumulative billed-token limit to prevent runaway costs.
+        # A sub-agent can make many small calls that each stay under the
+        # context hard limit but accumulate large API costs over time.
+        if tt.conv_total_tokens >= _effective_billed_limit_tokens:
+            raise HardLimitExceeded(
+                f"Sub-agent billed-token limit exceeded: "
+                f"{tt.conv_total_tokens:,} / {_effective_billed_limit_tokens:,} tokens."
             )
-            if warnings:
-                msg = "\n".join(warnings) + "\n" + msg
-            raise BilledLimitExceeded(msg)
-
-        # If warnings were generated but no hard limit was hit, queue them
-        # for injection by _chat_completion_with_token_hint on this turn's
-        # upcoming chat_completion call.
-        if warnings:
-            _pending_warnings.extend(warnings)
 
         # Update panel with live token counts
-        # Order: conversation length (current context) first, total tokens billed second
         conv_length = tt.current_context_tokens
         total_billed = tt.conv_total_tokens
         if hasattr(panel_updater, 'token_info'):
@@ -383,31 +318,11 @@ def run_sub_agent(
 
         return response
 
-    # Apply both patches once, before the orchestrator loop starts
+    # Apply patch once, before the orchestrator loop starts
     orchestrator._get_llm_response = _get_llm_response_with_hard_limit
-    temp_chat_manager.client.chat_completion = _chat_completion_with_token_hint
 
-    hard_limit_exceeded = False
-    billed_limit_exceeded = False
     cancelled = False
-
-    # Check cancellation before starting
-    if cancel_event and cancel_event.is_set():
-        tt = temp_chat_manager.token_tracker
-        return {
-            "result": "",
-            "usage": {
-                "prompt_tokens": tt.total_prompt_tokens,
-                "completion_tokens": tt.total_completion_tokens,
-                "total_tokens": tt.total_tokens,
-                "context_tokens": tt.current_context_tokens,
-                "cache_read_input_tokens": tt.total_cache_read_tokens,
-                "cache_creation_input_tokens": tt.total_cache_creation_tokens,
-            },
-            "model": temp_chat_manager.client.model,
-            "error": None,
-            "cancelled": True,
-        }
+    hard_limit_exceeded = False
 
     try:
         # Run sub-agent task
@@ -423,8 +338,6 @@ def run_sub_agent(
             raise SubAgentCancelled("Sub-agent cancelled by user.")
     except HardLimitExceeded:
         hard_limit_exceeded = True
-    except BilledLimitExceeded:
-        billed_limit_exceeded = True
     except SubAgentCancelled:
         cancelled = True
     except LLMError as e:
@@ -455,10 +368,6 @@ def run_sub_agent(
             "model": "",
             "error": error_details
         }
-    finally:
-        # Restore originals
-        temp_chat_manager.client.chat_completion = original_chat_completion
-
     if cancelled:
         tt = temp_chat_manager.token_tracker
         usage = {
@@ -480,35 +389,18 @@ def run_sub_agent(
             "cancelled": True,
         }
 
-    # Get final token usage (no need for delta calculation on fresh instance)
+    # Get final token usage
     delta_prompt = temp_chat_manager.token_tracker.total_prompt_tokens
     delta_completion = temp_chat_manager.token_tracker.total_completion_tokens
     delta_total = temp_chat_manager.token_tracker.total_tokens
     tt = temp_chat_manager.token_tracker
     delta_cost = tt.total_actual_cost + tt.total_estimated_cost
 
-    context_dumped = False
     if hard_limit_exceeded:
-        context_dumped = True
-        if sub_agent_settings.dump_context_on_hard_limit:
-            result = _format_messages_summary(temp_chat_manager.messages, "Hard Limit Reached")
-        else:
-            result = _last_assistant_content(temp_chat_manager.messages)
-    elif billed_limit_exceeded:
-        context_dumped = True
-        if sub_agent_settings.dump_context_on_hard_limit:
-            result = _format_messages_summary(temp_chat_manager.messages, "Token Budget Exhausted")
-        else:
-            final_content = _last_assistant_content(temp_chat_manager.messages)
-            prefix = (
-                f"Sub-agent hit the cumulative token budget "
-                f"({tt.conv_total_tokens:,} / {sub_agent_settings.billed_hard_limit_tokens:,} tokens burned). "
-                "The findings below are partial — the sub-agent was stopped mid-task. "
-                "Review what it found so far and decide whether to continue with a follow-up query."
-            )
-            result = f"{prefix}\n\n{final_content}" if final_content else prefix
+        result = _format_messages_summary(temp_chat_manager.messages, "Token Budget Exhausted")
     else:
         result = _last_assistant_content(temp_chat_manager.messages)
+
     usage = {
         "prompt_tokens": delta_prompt,
         "completion_tokens": delta_completion,
@@ -528,8 +420,5 @@ def run_sub_agent(
         "hard_limit_exceeded": hard_limit_exceeded,
         "hard_limit_tokens": _effective_hard_limit_tokens,
         "context_tokens": tt.current_context_tokens,
-        "billed_limit_exceeded": billed_limit_exceeded,
-        "billed_hard_limit_tokens": sub_agent_settings.billed_hard_limit_tokens,
-        "billed_total_tokens": tt.conv_total_tokens,
-        "context_dumped": context_dumped,
+        "context_dumped": hard_limit_exceeded,
     }

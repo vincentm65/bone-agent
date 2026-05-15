@@ -21,7 +21,7 @@ _PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 SUB_AGENT_SECTIONS = {
     "token_budget": """## Token Budget
 
-You have a total budget of approximately $hard_limit tokens for this task. As you approach $soft_limit tokens, stop exploring and return findings to the main agent. Do not continue reading files, searching, or making tool calls once you have enough evidence or are near the soft limit. Wrap up with citations promptly.""",
+You have a total budget of approximately $hard_limit tokens for this task. If you have enough evidence to answer, stop exploring and return findings to the main agent. Wrap up with citations promptly.""",
 
     "response_format": """# Response Format
 
@@ -63,6 +63,12 @@ You are a bounded research sub-agent. Answer only the delegated question; do not
 
 Use read-only tools to gather just enough evidence: start with targeted rg, read only the most relevant files/ranges, and avoid reading every search result or large files in full. Stop once you can answer; the main agent can ask follow-ups.
 
+**read_file discipline:**
+- Always provide start_line and max_lines. Never read an entire file unless you already know it is small (<50 lines).
+- Use rg to locate relevant line numbers first, then read only the range you need.
+- If rg returns matches, read 20-50 lines of context around each match — not the whole file.
+- Reading an entire 500+ line file is almost always a mistake that wastes your token budget.
+
 Return a compact research packet: direct answer, key files/functions, minimal citations, and any important uncertainty.""",
 
     "review_mode": """# Current mode: Code Review
@@ -74,8 +80,9 @@ Your output goes directly to the user — write clean, readable markdown.
 Report every issue you find, not a sample. If you found 20 warnings, list all 20. Do not stop early or summarize counts without listing each finding.
 
 ## Workflow
-1. Parse file paths from diff headers (`+++ b/` or `--- a/`)
-2. Use `read_file` on each changed file for surrounding context
+The full diff is embedded below in a `## Git Diff` section. You already have all changed lines — do not re-read them. Use `read_file` (with start_line and max_lines) only to check surrounding context, callers, or related code that the diff does not show.
+1. Read the embedded diff
+2. Use `read_file` only when you need context beyond what the diff provides
 3. Cross-reference related files when needed
 4. Write your review
 
@@ -290,7 +297,6 @@ def _sub_agent_sections() -> list[tuple[str, callable]]:
     """Return (key, content_fn) pairs for the sub-agent prompt."""
     return [
         ("context", _build_context_section),
-        ("skills", lambda: _static("skills.md")),
     ]
 
 
@@ -312,13 +318,14 @@ def build_system_prompt(active_skills_section: str = "") -> str:
     return result
 
 
-def build_sub_agent_prompt(sub_agent_type: str = "research", soft_limit_tokens: int | None = None, hard_limit_tokens: int | None = None) -> str:
+def build_sub_agent_prompt(sub_agent_type: str = "research", hard_limit_tokens: int | None = None, diff_content: str | None = None) -> str:
     """Build prompt for sub-agent (research or review, read-only).
 
     Args:
         sub_agent_type: Type of sub-agent ('research' or 'review').
-        soft_limit_tokens: Soft token limit to display in prompt.
         hard_limit_tokens: Hard token limit to display in prompt.
+        diff_content: Optional git diff to embed directly in the system prompt
+            (review mode). Avoids wasting a user-message turn on raw diff text.
 
     Returns:
         Complete system prompt string
@@ -326,16 +333,17 @@ def build_sub_agent_prompt(sub_agent_type: str = "research", soft_limit_tokens: 
     result = _build_prompt_to_list(_sub_agent_sections())
 
     # Append parameterized sections (always last)
-    if soft_limit_tokens is not None and hard_limit_tokens is not None:
+    if hard_limit_tokens is not None:
         result.append(
             Template(SUB_AGENT_SECTIONS["token_budget"]).safe_substitute(
-                soft_limit=f"{soft_limit_tokens:,}",
                 hard_limit=f"{hard_limit_tokens:,}",
             )
         )
 
     if sub_agent_type == "review":
         result.append(SUB_AGENT_SECTIONS["review_mode"])
+        if diff_content:
+            result.append(f"## Git Diff\n\n```diff\n{diff_content}\n```")
     else:
         result.append(SUB_AGENT_SECTIONS["mode"])
 

@@ -66,15 +66,12 @@ class ToolCompactionSettings:
 @dataclass
 class SubAgentSettings:
     """Sub-agent token limits and behavior configuration."""
-    soft_limit_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("soft_limit_tokens", 100_000))
     hard_limit_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("hard_limit_tokens", 150_000))
-    billed_warning_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("billed_warning_tokens", 200_000))
-    billed_hard_limit_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("billed_hard_limit_tokens", 500_000))
+    billed_token_limit: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("billed_token_limit", 500_000))
     enable_compaction: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("enable_compaction", True))
     compact_trigger_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("compact_trigger_tokens", 50_000))
     allowed_tools: list = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("allowed_tools", ["rg", "read_file", "list_directory", "web_search"]))
     allow_active_plugins: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("allow_active_plugins", False))
-    dump_context_on_hard_limit: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("dump_context_on_hard_limit", True))
 
 
 # Context compaction settings

@@ -222,12 +222,18 @@ def _read_file_content(
 
 @tool(
     name="read_file",
-    description="Read file contents. Prefer over rg when you know the file path.",
+    description=(
+        "Read file contents. Prefer over rg when you know the file path. "
+        "IMPORTANT: Always provide start_line and max_lines to read only the range you need. "
+        "Never omit max_lines for files you haven't previously read — use rg --count or "
+        "list_directory first if you need to estimate file size. Reading entire large files "
+        "wastes context budget and degrades response quality."
+    ),
     parameters={
         "type": "object",
         "properties": {
             "path_str": {"type": "string", "description": "Path to read"},
-            "max_lines": {"type": "integer", "description": "Max lines to read (omit for full file)"},
+            "max_lines": {"type": "integer", "description": "Max lines to read. REQUIRED for unfamiliar files — do not omit unless you know the file is small."},
             "start_line": {"type": "integer", "description": "1-based start line (default: 1)"},
             "reason": {"type": "string", "description": "Required when reading outside the project boundary: explain why broader filesystem access is necessary"}
         },

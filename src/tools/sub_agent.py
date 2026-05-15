@@ -121,21 +121,6 @@ def sub_agent(
             panel.cancel()
             return "exit_code=130\nSubagent cancelled by user."
 
-        # Check for preflight context overflow (initial context exceeds hard limit)
-        if sub_agent_data.get('preflight_overflow'):
-            tokens = sub_agent_data.get('preflight_tokens', 0)
-            limit = sub_agent_data.get('hard_limit', 0)
-            panel.cancel()
-            msg = (
-                f"Subagent cannot start: initial context ({tokens:,} tokens) "
-                f"exceeds hard limit ({limit:,} tokens). "
-                "Try compacting the main session (/compact), clearing context (/clear), "
-                "or reducing the amount of injected context."
-            )
-            console.print(f"[dim red]╰─ preflight overflow: {tokens:,} / {limit:,} tokens[/dim red]", highlight=False)
-            console.file.flush()
-            return f"exit_code=1\n{msg}"
-
         # Check for errors
         if sub_agent_data.get('error'):
             panel.set_error(sub_agent_data['error'])
@@ -182,22 +167,6 @@ def sub_agent(
             limit = sub_agent_data.get('hard_limit_tokens', 0)
             console.print(
                 f"[dim yellow]╰─ subagent reached context limit; handing bounded summary to main agent: {tokens:,} / {limit:,} tokens[/dim yellow]",
-                highlight=False,
-            )
-            console.file.flush()
-            return raw_result
-
-        # If billed limit was exceeded, clear the toolbar and return only the
-        # bounded hidden summary produced by core.sub_agent.
-        if sub_agent_data.get('billed_limit_exceeded'):
-            if hasattr(panel, 'clear'):
-                panel.clear()
-            else:
-                panel.cancel()
-            billed_total = sub_agent_data.get('billed_total_tokens', 0)
-            billed_limit = sub_agent_data.get('billed_hard_limit_tokens', 0)
-            console.print(
-                f"[dim yellow]╰─ subagent reached token budget; handing bounded summary to main agent: {billed_total:,} / {billed_limit:,} tokens burned[/dim yellow]",
                 highlight=False,
             )
             console.file.flush()

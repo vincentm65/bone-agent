@@ -219,29 +219,6 @@ def _handle_update(chat_manager, console, debug_mode_container, args, cron_sched
     return CommandResult(status="handled")
 
 
-_CRON_ADD_EXAMPLES = [
-    "[dim]  /cron add morning_brief weekdays at 8am Give me a morning briefing[/dim]",
-    "[dim]  /cron add cleanup \"every 1 hour\" \"Clean up temp files\"[/dim]",
-    "[dim]  /cron add news daily at 5am Draft an email with AI news[/dim]",
-]
-
-_SCHEDULE_HELP = (
-    "[dim]Schedule formats: every N minutes|hours|days, daily at HH:MM, "
-    "weekdays at HH:MM, <dayname> at HH:MM, or bare HH:MM[/dim]"
-)
-
-
-def _print_cron_add_usage(console, prefix=None):
-    """Print /cron add usage and examples."""
-    if prefix:
-        console.print(prefix)
-    console.print("[red]Usage: /cron add <id> <schedule> <command>[/red]")
-    console.print(_SCHEDULE_HELP)
-    console.print("[dim]Tip: quote the schedule or command if they contain spaces[/dim]")
-    console.print("[dim]Examples:[/dim]")
-    for line in _CRON_ADD_EXAMPLES:
-        console.print(line)
-
 
 def _cron_list(console, cron_config):
     """Display all cron jobs in a table."""
@@ -273,88 +250,6 @@ def _cron_list(console, cron_config):
     return CommandResult(status="handled")
 
 
-def _cron_add(console, sub_args, cron_config, notify_scheduler):
-    """Add a new cron job."""
-    from core.cron import CronJob, parse_schedule
-
-    tokens = sub_args.strip().split()
-    if len(tokens) < 3:
-        _print_cron_add_usage(console)
-        return CommandResult(status="handled")
-
-    job_id = tokens[0]
-    # Greedily consume tokens for the schedule (min 1, max 6 words)
-    schedule = None
-    cmd_start = 2
-    for end in range(2, min(len(tokens) + 1, 8)):
-        candidate = " ".join(tokens[1:end])
-        try:
-            parse_schedule(candidate)
-            schedule = candidate
-            cmd_start = end
-            break
-        except ValueError:
-            continue
-
-    if schedule is None:
-        attempted = " ".join(tokens[1:min(len(tokens), 7)])
-        console.print(f"[red]Cannot parse schedule: '{attempted}'[/red]")
-        console.print(_SCHEDULE_HELP)
-        return CommandResult(status="handled")
-
-    command = " ".join(tokens[cmd_start:])
-
-    if not re.match(r'^[a-zA-Z0-9_-]+$', job_id):
-        console.print(f"[red]Invalid job ID '{job_id}'. Use only letters, numbers, underscores, and hyphens.[/red]")
-        return CommandResult(status="handled")
-
-    if job_id in cron_config.jobs:
-        console.print(f"[red]Job '{job_id}' already exists. Remove it first or use a different ID.[/red]")
-        return CommandResult(status="handled")
-
-    job = CronJob(id=job_id, schedule=schedule, command=command)
-    cron_config.add_job(job)
-    notify_scheduler()
-    console.print(f"[green]Added cron job '{job_id}' (schedule: {schedule})[/green]")
-    return CommandResult(status="handled")
-
-
-def _cron_remove(console, sub_args, cron_config, notify_scheduler):
-    """Remove a cron job by ID."""
-    job_id = sub_args.strip()
-    if not job_id:
-        console.print("[red]Usage: /cron remove <id>[/red]")
-        return CommandResult(status="handled")
-    if job_id == "dream":
-        console.print("[red]The 'dream' job is managed by DREAM_SETTINGS.enabled in config.yaml and cannot be removed.[/red]")
-        return CommandResult(status="handled")
-    if cron_config.remove_job(job_id):
-        notify_scheduler()
-        console.print(f"[green]Removed cron job '{job_id}'[/green]")
-    else:
-        console.print(f"[red]Job '{job_id}' not found[/red]")
-    return CommandResult(status="handled")
-
-
-def _cron_toggle(console, sub_args, cron_config, notify_scheduler, enable):
-    """Enable or disable a cron job."""
-    verb = "enable" if enable else "disable"
-    style = "green" if enable else "yellow"
-    job_id = sub_args.strip()
-    if not job_id:
-        console.print(f"[red]Usage: /cron {verb} <id>[/red]")
-        return CommandResult(status="handled")
-    if not enable and job_id == "dream":
-        console.print("[red]The 'dream' job is managed by DREAM_SETTINGS.enabled in config.yaml and cannot be disabled via /cron.[/red]")
-        return CommandResult(status="handled")
-    if job_id in cron_config.jobs:
-        cron_config.update_job(job_id, enabled=enable)
-        notify_scheduler()
-        console.print(f"[{style}]{verb.title()}d '{job_id}'[/{style}]")
-    else:
-        console.print(f"[red]Job '{job_id}' not found[/red]")
-    return CommandResult(status="handled")
-
 
 def _cron_run(console, sub_args, cron_config):
     """Manually trigger a cron job immediately."""
@@ -380,91 +275,14 @@ def _cron_run(console, sub_args, cron_config):
     return CommandResult(status="handled")
 
 
-def _cron_allowlist(console, sub_args):
-    """Manage cron command allowlists."""
-    from core.cron_allowlist import CronAllowlist
-    allowlist = CronAllowlist()
-
-    allow_parts = sub_args.strip().split(maxsplit=1)
-    allow_sub = allow_parts[0].lower() if allow_parts else ""
-    allow_rest = allow_parts[1] if len(allow_parts) > 1 else ""
-
-    if allow_sub == "list" and allow_rest:
-        jid = allow_rest.strip()
-        cmds = allowlist.get_commands(jid)
-        if not cmds:
-            console.print(f"[dim]No allowed commands for '{jid}'.[/dim]")
-            return CommandResult(status="handled")
-        console.print(f"[bold]{jid}[/bold] ({len(cmds)} command{'s' if len(cmds) != 1 else ''})")
-        for cmd in cmds:
-            console.print(f"  [green]✓[/green] {cmd}")
-        return CommandResult(status="handled")
-
-    if not allow_sub or allow_sub == "list":
-        all_jobs = allowlist.all_jobs()
-        if not all_jobs:
-            console.print("[dim]No cron command allow lists. Run '/cron run <id>' to build one.[/dim]")
-            return CommandResult(status="handled")
-        for jid, cmds in all_jobs.items():
-            console.print(f"[bold]{jid}[/bold] ({len(cmds)} command{'s' if len(cmds) != 1 else ''})")
-            if cmds:
-                for cmd in cmds:
-                    console.print(f"  [green]✓[/green] {cmd}")
-            else:
-                console.print("  [dim](empty)[/dim]")
-        return CommandResult(status="handled")
-
-    if allow_sub == "add":
-        tokens = allow_rest.strip().split(maxsplit=1)
-        if len(tokens) < 2:
-            console.print("[red]Usage: /cron allowlist add <job_id> <command>[/red]")
-            return CommandResult(status="handled")
-        jid, cmd = tokens[0], tokens[1]
-        if allowlist.add_command(jid, cmd):
-            console.print(f"[green]Added '{cmd}' to '{jid}' allow list.[/green]")
-        else:
-            console.print(f"[dim]Command already in '{jid}' allow list.[/dim]")
-        return CommandResult(status="handled")
-
-    if allow_sub in ("remove", "rm"):
-        tokens = allow_rest.strip().split(maxsplit=1)
-        if len(tokens) < 2:
-            console.print("[red]Usage: /cron allowlist remove <job_id> <command>[/red]")
-            return CommandResult(status="handled")
-        jid, cmd = tokens[0], tokens[1]
-        if allowlist.remove_command(jid, cmd):
-            console.print(f"[green]Removed '{cmd}' from '{jid}' allow list.[/green]")
-        else:
-            console.print(f"[red]Command not found in '{jid}' allow list.[/red]")
-        return CommandResult(status="handled")
-
-    if allow_sub == "clear":
-        jid = allow_rest.strip()
-        if not jid:
-            console.print("[red]Usage: /cron allowlist clear <job_id>[/red]")
-            return CommandResult(status="handled")
-        count = allowlist.clear_job(jid)
-        console.print(f"[green]Cleared {count} command{'s' if count != 1 else ''} from '{jid}' allow list.[/green]")
-        return CommandResult(status="handled")
-
-    console.print(f"[red]Unknown allowlist sub-command: '{allow_sub}'[/red]")
-    console.print("[dim]Sub-commands: list [job_id], add, remove, clear[/dim]")
-    return CommandResult(status="handled")
-
-
 def _handle_cron(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
-    """Manage cron jobs: list, add, remove, enable, disable."""
+    """Manage cron jobs: list, run."""
     from core.cron import CronConfig
 
     if cron_scheduler is not None:
         cron_config = cron_scheduler.config
     else:
         cron_config = CronConfig()
-
-    def notify_scheduler():
-        """Immediately reload scheduler config after a mutation."""
-        if cron_scheduler is not None:
-            cron_scheduler.reload()
 
     if not args or args.strip() == "list":
         return _cron_list(console, cron_config)
@@ -473,23 +291,15 @@ def _handle_cron(chat_manager, console, debug_mode_container, args, cron_schedul
     sub_cmd = parts[0].lower()
     sub_args = parts[1] if len(parts) > 1 else ""
 
-    dispatch = {
-        "add": lambda: _cron_add(console, sub_args, cron_config, notify_scheduler),
-        "remove": lambda: _cron_remove(console, sub_args, cron_config, notify_scheduler),
-        "rm": lambda: _cron_remove(console, sub_args, cron_config, notify_scheduler),
-        "enable": lambda: _cron_toggle(console, sub_args, cron_config, notify_scheduler, enable=True),
-        "disable": lambda: _cron_toggle(console, sub_args, cron_config, notify_scheduler, enable=False),
-        "run": lambda: _cron_run(console, sub_args, cron_config),
-        "allowlist": lambda: _cron_allowlist(console, sub_args),
-        "help": lambda: show_cron_help_table(console) or CommandResult(status="handled"),
-    }
+    if sub_cmd == "run":
+        return _cron_run(console, sub_args, cron_config)
 
-    handler = dispatch.get(sub_cmd)
-    if handler:
-        return handler()
+    if sub_cmd == "help":
+        show_cron_help_table(console)
+        return CommandResult(status="handled")
 
     console.print(f"[red]Unknown cron sub-command: '{sub_cmd}'[/red]")
-    console.print("[dim]Sub-commands: list, add, remove, enable, disable, run, allowlist, help[/dim]")
+    console.print("[dim]Sub-commands: list, run, help[/dim]")
     return CommandResult(status="handled")
 
 
@@ -1519,16 +1329,6 @@ def _process_subagent_result(
     if sub_result.get("cancelled"):
         panel.cancel()
         console.print(f"[dim]{label} cancelled.[/dim]", highlight=False)
-    elif sub_result.get("preflight_overflow"):
-        panel.cancel()
-        tokens = sub_result.get("preflight_tokens", 0)
-        limit = sub_result.get("hard_limit", 0)
-        console.print(
-            f"{label} cannot start: initial context ({tokens:,} tokens) "
-            f"exceeds hard limit ({limit:,} tokens).",
-            highlight=False,
-            markup=False,
-        )
     elif sub_result.get("hard_limit_exceeded"):
         _clear_subagent_panel(panel)
         ctx_tokens = sub_result.get("context_tokens", 0)
@@ -1536,16 +1336,6 @@ def _process_subagent_result(
         console.print(
             f"Task too large for subagent; continuing with main agent: "
             f"context ({ctx_tokens:,} tokens) reached hard limit ({hard_limit:,} tokens).",
-            highlight=False,
-            markup=False,
-        )
-    elif sub_result.get("billed_limit_exceeded"):
-        _clear_subagent_panel(panel)
-        billed_total = sub_result.get("billed_total_tokens", 0)
-        billed_limit = sub_result.get("billed_hard_limit_tokens", 0)
-        console.print(
-            f"Task too large for subagent; continuing with main agent: "
-            f"token budget ({billed_total:,} tokens) reached hard limit ({billed_limit:,} tokens).",
             highlight=False,
             markup=False,
         )
@@ -1568,7 +1358,6 @@ def _process_subagent_result(
 
     is_success = not (
         sub_result.get("cancelled")
-        or sub_result.get("preflight_overflow")
         or sub_result.get("error")
     )
 
@@ -1622,44 +1411,6 @@ def _process_subagent_result(
         continuation(sub_result)
 
     return sub_result
-
-
-def _run_review_worker(chat_manager, console, query, diff_output, user_intent):
-    """Run the /review sub-agent and handle display/history injection."""
-    from core.sub_agent import run_sub_agent
-    from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
-
-    panel = SubAgentPanel(query, chat_manager)
-
-    # Clear stale cancellation flag and obtain cancel event for this run
-    chat_manager.clear_subagent_cancel()
-
-    try:
-        sub_result = run_sub_agent(
-            task_query=query,
-            repo_root=Path.cwd().resolve(),
-            rg_exe_path=str(_RG_EXE_PATH),
-            console=console,
-            panel_updater=panel,
-            sub_agent_type="review",
-            initial_context=diff_output,
-            cancel_event=chat_manager.get_subagent_cancel_event(),
-        )
-    except Exception as e:
-        panel.set_error(str(e))
-        console.print("Sub-agent failed: ", style="red", highlight=False)
-        console.print(str(e), highlight=False, markup=False)
-        sub_result = {"error": str(e)}
-
-    user_msg = "/review"
-    if user_intent:
-        user_msg += f"\n\nUser intent: {user_intent}"
-    return _process_subagent_result(
-        chat_manager, console, sub_result, panel, query,
-        label="Review",
-        user_msg_content=user_msg,
-        do_citation_expansion=True,
-    )
 
 
 def _handle_review(chat_manager, console, debug_mode_container, args, cron_scheduler=None):
@@ -1734,15 +1485,40 @@ def _handle_review(chat_manager, console, debug_mode_container, args, cron_sched
     if user_intent:
         query += f"\n\nUser intent: {user_intent}"
 
-    # ── Build worker closure for main-loop background execution ──
+    # ── Run sub-agent directly ───────────────────────────────────
     def _review_worker(_console, safe_console, completion_event):
+        from core.sub_agent import run_sub_agent
+        from utils.paths import RG_EXE_PATH as _RG_EXE_PATH
+
+        panel = SubAgentPanel(query, chat_manager)
+        chat_manager.clear_subagent_cancel()
+
         try:
-            _run_review_worker(
-                chat_manager,
-                safe_console or _console,
-                query,
-                diff_output,
-                user_intent,
+            sub_result = run_sub_agent(
+                task_query=query,
+                repo_root=Path.cwd().resolve(),
+                rg_exe_path=str(_RG_EXE_PATH),
+                console=safe_console or _console,
+                panel_updater=panel,
+                sub_agent_type="review",
+                diff_content=diff_output,
+                cancel_event=chat_manager.get_subagent_cancel_event(),
+            )
+        except Exception as e:
+            panel.set_error(str(e))
+            _console.print("Sub-agent failed: ", style="red", highlight=False)
+            _console.print(str(e), highlight=False, markup=False)
+            sub_result = {"error": str(e)}
+
+        try:
+            user_msg = "/review"
+            if user_intent:
+                user_msg += f"\n\nUser intent: {user_intent}"
+            _process_subagent_result(
+                chat_manager, safe_console or _console, sub_result, panel, query,
+                label="Review",
+                user_msg_content=user_msg,
+                do_citation_expansion=True,
             )
         finally:
             completion_event.set()

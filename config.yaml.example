@@ -108,13 +108,10 @@ CONTEXT_SETTINGS:
 # -- Sub-Agent Settings -------------------------------------------------------
 
 SUB_AGENT_SETTINGS:
-  soft_limit_tokens: 100000
+  # Context hard limit — prevents API context_length_exceeded errors
   hard_limit_tokens: 150000
-  billed_warning_tokens: 200000
-  billed_hard_limit_tokens: 500000
   compact_trigger_tokens: 50000
   enable_compaction: false
-  dump_context_on_hard_limit: true
 
 # -- Status Bar ---------------------------------------------------------------
 

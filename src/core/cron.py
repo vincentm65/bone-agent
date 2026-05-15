@@ -467,7 +467,7 @@ class CronScheduler:
         logger.info("Cron scheduler stopped")
 
     def reload(self):
-        """Reload config from disk (e.g. after /cron add/remove)."""
+        """Reload config from disk (e.g. after /cron remove or external edit)."""
         with self._lock:
             self.config.load()
 
@@ -536,7 +536,7 @@ class CronScheduler:
 
             self._stop_event.wait(self.CHECK_INTERVAL)
 
-            # Reload config from disk so /cron add/remove changes are picked up
+            # Reload config from disk so external changes are picked up
             with self._lock:
                 self.config.load()
                 # Sync in-memory last_runs from reloaded config
