@@ -291,18 +291,13 @@ class AgenticOrchestrator:
         """
         return self.console
 
-    def _get_effective_tools(self, allowed_tools=None, allow_active_plugins=False):
+    def _get_effective_tools(self, allowed_tools=None):
         """Return tool schemas allowed for the current run."""
-        from tools.helpers.base import ToolRegistry
-
         tools = TOOLS()
         if allowed_tools is None:
             return tools
 
         effective_names = set(allowed_tools)
-        if allow_active_plugins:
-            effective_names.update(ToolRegistry.active_plugin_names())
-
         if not effective_names:
             return []
 
@@ -357,21 +352,34 @@ class AgenticOrchestrator:
         if hasattr(self.chat_manager, "_context_dirty"):
             self.chat_manager._context_dirty = True
 
-    def run(self, user_input: str | list[dict[str, Any]], thinking_indicator=None, allowed_tools=None, allow_active_plugins=False):
+    def _print_agent_stopped(self, reason: str):
+        """Print a visible stop marker when the agent loop exits abnormally.
+
+        Without this, error-only exits via _get_llm_response returning None
+        silently vanish — the user sees the agent stop with no explanation.
+        """
+        console = self._get_console()
+        if console is not None:
+            try:
+                console.print()
+                console.print(f"[dim yellow]Agent stopped: {reason}[/dim yellow]")
+                console.print()
+            except Exception:
+                pass
+
+    def run(self, user_input: str | list[dict[str, Any]], thinking_indicator=None, allowed_tools=None):
         """Main orchestration loop.
 
         Args:
             user_input: User's input message content
             thinking_indicator: Optional ThinkingIndicator instance
             allowed_tools: Optional list of allowed tool names (for research)
-            allow_active_plugins: Whether to include active plugin tools in restricted runs
 
         Returns:
             "done" on normal completion, "suspended" if a tool approval was
             handed off to the main prompt and the caller must resume.
         """
         self._current_allowed_tools = allowed_tools
-        self._current_allow_active_plugins = allow_active_plugins
 
         # Clear completed task lists on the next normal user turn. Swarm
         # auto-turns are synthetic follow-ups for the active plan, so they
@@ -394,18 +402,10 @@ class AgenticOrchestrator:
         # Append user message
         self.chat_manager.add_message(user_message)
 
-        from tools.helpers.base import ToolRegistry
-
         try:
             while True:
                 if self._cancel_requested():
                     raise AgentTurnCancelled()
-
-                # Decrement plugin TTLs after previous iteration's tool execution.
-                # Evicted plugins are excluded from the next LLM call's context window.
-                evicted = ToolRegistry.decrement_plugin_ttls()
-                if evicted and self.debug_mode:
-                    self.console.print(f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]")
 
                 # ── Mid-turn swarm inbox injection ──────────────────────
                 self._drain_and_inject_swarm_messages()
@@ -413,9 +413,11 @@ class AgenticOrchestrator:
                 # Get response from LLM
                 response = self._get_llm_response(
                     allowed_tools=allowed_tools,
-                    allow_active_plugins=allow_active_plugins,
                 )
                 if response is None:
+                    # _get_llm_response already printed the error; surface a
+                    # user-visible note so the turn doesn't silently vanish.
+                    self._print_agent_stopped("LLM error — all retries exhausted")
                     return
                 if self._cancel_requested():
                     raise AgentTurnCancelled()
@@ -434,7 +436,6 @@ class AgenticOrchestrator:
                         response,
                         thinking_indicator,
                         allowed_tools,
-                        allow_active_plugins=allow_active_plugins,
                     )
                     if should_exit:
                         return
@@ -456,7 +457,7 @@ class AgenticOrchestrator:
                 self.chat_manager.sync_log()
             raise
 
-    def _get_llm_response(self, allowed_tools=None, allow_active_plugins=False):
+    def _get_llm_response(self, allowed_tools=None):
         """Get next LLM response with tool definitions.
 
         Includes automatic retry with live countdown for timeout/connection errors.
@@ -464,7 +465,6 @@ class AgenticOrchestrator:
 
         Args:
             allowed_tools: Optional list of allowed tool names (overrides mode-based filtering)
-            allow_active_plugins: Whether to include active plugin tools in restricted runs
 
         Returns:
             Response dict from LLM, or None if error occurred
@@ -476,13 +476,12 @@ class AgenticOrchestrator:
         self.chat_manager.ensure_context_fits(console=self.console)
 
         # Use allowed_tools if provided, otherwise use mode-based filtering
-        if allowed_tools is not None and not allowed_tools and not allow_active_plugins:
+        if allowed_tools is not None and not allowed_tools:
             self.console.print("[red]Error: allowed_tools is empty[/red]")
             return None
 
         tools = self._get_effective_tools(
             allowed_tools=allowed_tools,
-            allow_active_plugins=allow_active_plugins,
         )
         if allowed_tools is not None and self.debug_mode:
             tool_names = [t["function"]["name"] for t in tools]
@@ -599,7 +598,6 @@ class AgenticOrchestrator:
             # Update context tokens with current run's effective tools
             tools_for_mode = self._get_effective_tools(
                 allowed_tools=getattr(self, "_current_allowed_tools", None),
-                allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
             )
             self.chat_manager._update_context_tokens(tools_for_mode)
 
@@ -662,14 +660,13 @@ class AgenticOrchestrator:
 
         return self._handle_final_response(final_message, thinking_indicator)
 
-    def _handle_tool_calls(self, response, thinking_indicator, allowed_tools=None, allow_active_plugins=False):
+    def _handle_tool_calls(self, response, thinking_indicator, allowed_tools=None):
         """Process tool calls and display accompanying content.
 
         Args:
             response: Full message dict from LLM (includes content and tool_calls)
             thinking_indicator: Optional ThinkingIndicator instance
             allowed_tools: Optional list of allowed tool names
-            allow_active_plugins: Whether to allow active plugin tools in restricted runs
 
         Returns:
             True if should exit the orchestration loop
@@ -722,8 +719,6 @@ class AgenticOrchestrator:
             effective_allowed_tools = None
             if allowed_tools is not None:
                 effective_allowed_tools = set(allowed_tools)
-                if allow_active_plugins:
-                    effective_allowed_tools.update(ToolRegistry.active_plugin_names())
 
             if effective_allowed_tools is not None and function_name not in effective_allowed_tools:
                 # Silent fail - skip this tool
@@ -885,7 +880,6 @@ class AgenticOrchestrator:
         # Update context tokens with current run's effective tools
         tools_for_mode = self._get_effective_tools(
             allowed_tools=getattr(self, "_current_allowed_tools", None),
-            allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
         )
         self.chat_manager._update_context_tokens(tools_for_mode)
 
@@ -1046,9 +1040,6 @@ class AgenticOrchestrator:
 
         tool = ToolRegistry.get(function_name)
         if tool:
-            # Reset TTL for plugin-tier tools when they are actually called
-            if ToolRegistry.is_plugin_active(function_name):
-                ToolRegistry.touch_plugin(function_name)
             try:
                 context = build_context(
                     repo_root=self.repo_root,
@@ -1525,7 +1516,6 @@ class AgenticOrchestrator:
 
         tools_for_mode = self._get_effective_tools(
             allowed_tools=getattr(self, "_current_allowed_tools", None),
-            allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
         )
         self.chat_manager._update_context_tokens(tools_for_mode)
         self.chat_manager.ensure_context_fits(console=self.console)
@@ -1666,7 +1656,6 @@ class AgenticOrchestrator:
 
         tools_for_mode = self._get_effective_tools(
             allowed_tools=getattr(self, "_current_allowed_tools", None),
-            allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
         )
         self.chat_manager._update_context_tokens(tools_for_mode)
         self.chat_manager.ensure_context_fits(console=self.console)
@@ -1752,7 +1741,6 @@ class AgenticOrchestrator:
 
         tools_for_mode = self._get_effective_tools(
             allowed_tools=getattr(self, "_current_allowed_tools", None),
-            allow_active_plugins=getattr(self, "_current_allow_active_plugins", False),
         )
         self.chat_manager._update_context_tokens(tools_for_mode)
         self.chat_manager.ensure_context_fits(console=self.console)
@@ -1821,29 +1809,19 @@ class AgenticOrchestrator:
 
         Does NOT append a new user message — picks up where ``run()`` left off.
         """
-        from tools.helpers.base import ToolRegistry
-
         try:
             while True:
                 if self._cancel_requested():
                     raise AgentTurnCancelled()
-
-                evicted = ToolRegistry.decrement_plugin_ttls()
-                if evicted and self.debug_mode:
-                    self.console.print(
-                        f"[dim]Plugins evicted (TTL expired): {evicted}[/dim]"
-                    )
 
                 # Mid-turn swarm inbox injection
                 self._drain_and_inject_swarm_messages()
 
                 response = self._get_llm_response(
                     allowed_tools=getattr(self, "_current_allowed_tools", None),
-                    allow_active_plugins=getattr(
-                        self, "_current_allow_active_plugins", False
-                    ),
                 )
                 if response is None:
+                    self._print_agent_stopped("LLM error — all retries exhausted")
                     return "done"
                 if self._cancel_requested():
                     raise AgentTurnCancelled()
@@ -1859,9 +1837,6 @@ class AgenticOrchestrator:
                         response,
                         thinking_indicator,
                         allowed_tools=getattr(self, "_current_allowed_tools", None),
-                        allow_active_plugins=getattr(
-                            self, "_current_allow_active_plugins", False
-                        ),
                     )
                     if should_exit:
                         return "done"

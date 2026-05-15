@@ -44,7 +44,7 @@ def _get_log_dir() -> Path:
 class CronJob:
     """A single cron job definition."""
     id: str
-    schedule: str           # Natural language: "every 5 minutes", "weekdays at 8am"
+    schedule: str           # Structured: "interval 5m", "daily 08:00", "weekdays 09:00", "weekly 10:00 mon"
     command: str            # The prompt to feed into the agentic loop
     enabled: bool = True
     description: str = ""
@@ -60,144 +60,105 @@ class CronJob:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
-# ── Schedule parser ──────────────────────────────────────────────────────
+# ── Schedule handling ────────────────────────────────────────────────────
+#
+# Structured schedule formats (written by the LLM directly into jobs.yaml):
+#   "interval 5m"         — every 5 minutes (also h, d)
+#   "daily 08:00"         — every day at 08:00
+#   "weekdays 09:00"      — Mon-Fri at 09:00
+#   "weekly 10:00 mon"    — every Monday at 10:00
 
-# Patterns we support (ordered by specificity):
-#   "every N minutes|hours|days"
-#   "daily at HH:MM"
-#   "weekdays at HH:MM"
-#   "mondays|tuesdays|... at HH:MM"
-#   "HH:MM" (daily shorthand)
-
-def _extract_time(m: re.Match) -> dict:
-    """Extract hour/minute from a regex match with hour, minute, ampm groups."""
-    hour = int(m.group("hour"))
-    minute = int(m.group("minute") or 0)
-    ampm = (m.group("ampm") or "").lower()
-    if ampm == "am" and hour == 12:
-        hour = 0
-    elif ampm == "pm" and hour != 12:
-        hour += 12
-    return {"hour": hour, "minute": minute}
-
-
-_SCHEDULE_PATTERNS = [
-    # every N <unit>
-    (re.compile(
-        r"^every\s+(?P<n>\d+)\s*(?P<unit>minute|minutes|min|m|hour|hours|hr|h|day|days|d)s?\s*$",
-        re.IGNORECASE
-    ), "interval"),
-    # every day/night/morning/afternoon/evening [at] <time>
-    (re.compile(
-        r"^every\s+(?:day|night|morning|afternoon|evening)s?\s+(?:at\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>[ap]m)?\s*$",
-        re.IGNORECASE
-    ), "daily"),
-    # weekdays at <time>
-    (re.compile(
-        r"^weekdays?\s+at\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>[ap]m)?\s*$",
-        re.IGNORECASE
-    ), "weekdays"),
-    # specific day at <time>
-    (re.compile(
-        r"^(?P<day>monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>[ap]m)?\s*$",
-        re.IGNORECASE
-    ), "day_of_week"),
-    # daily at <time>
-    (re.compile(
-        r"^daily\s+at\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>[ap]m)?\s*$",
-        re.IGNORECASE
-    ), "daily"),
-    # bare HH:MM or HHam/pm (treated as daily)
-    (re.compile(
-        r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>[ap]m)?\s*$"
-    ), "daily"),
-]
-
-_DAY_MAP = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
-}
+_INTERVAL_RE = re.compile(r"^interval\s+(?P<n>\d+)(?P<unit>[mhd])$")
+_TIME_PATTERN = r"(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)"
+_TIME_RE = re.compile(rf"^{_TIME_PATTERN}$")
+_WEEKLY_RE = re.compile(
+    rf"^weekly\s+{_TIME_PATTERN}\s+(?P<day>mon|tue|wed|thu|fri|sat|sun)$"
+)
+_DAY_ABBREV = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
 
 def parse_schedule(schedule: str) -> dict:
-    """Parse a natural-language schedule into a structured spec.
+    """Parse a structured schedule string into a spec dict.
 
-    Returns dict with:
-        type: "interval" | "daily" | "weekdays" | "day_of_week"
-        For interval: interval_seconds (int)
-        For time-based: hour (int), minute (int)
-        For day_of_week: weekday (0=Mon..6=Sun)
-
+    Returns dict with type and relevant fields.
     Raises ValueError if schedule can't be parsed.
     """
-    schedule = schedule.strip()
-    for pattern, sched_type in _SCHEDULE_PATTERNS:
-        m = pattern.match(schedule)
-        if m:
-            if sched_type == "interval":
-                n = int(m.group("n"))
-                if n <= 0:
-                    raise ValueError(
-                        f"Interval must be at least 1: 'every {n} {m.group('unit')}'"
-                    )
-                unit = m.group("unit").lower()
-                if unit in ("minute", "minutes", "min", "m"):
-                    return {"type": "interval", "interval_seconds": n * 60}
-                elif unit in ("hour", "hours", "hr", "h"):
-                    return {"type": "interval", "interval_seconds": n * 3600}
-                elif unit in ("day", "days", "d"):
-                    return {"type": "interval", "interval_seconds": n * 86400}
-            elif sched_type == "weekdays":
-                t = _extract_time(m)
-                return {"type": "weekdays", **t}
-            elif sched_type == "day_of_week":
-                t = _extract_time(m)
-                return {
-                    "type": "day_of_week",
-                    "weekday": _DAY_MAP[m.group("day").lower()],
-                    **t,
-                }
-            elif sched_type == "daily":
-                t = _extract_time(m)
-                return {"type": "daily", **t}
+    s = schedule.strip().lower()
+
+    # interval 5m / 2h / 1d
+    m = _INTERVAL_RE.match(s)
+    if m:
+        n = int(m.group("n"))
+        if n <= 0:
+            raise ValueError(f"Interval must be at least 1: '{schedule}'")
+        unit = m.group("unit")
+        secs = {"m": 60, "h": 3600, "d": 86400}[unit] * n
+        return {"type": "interval", "interval_seconds": secs}
+
+    # weekly HH:MM day
+    m = _WEEKLY_RE.match(s)
+    if m:
+        result = {
+            "type": "weekly",
+            "hour": int(m.group("hour")),
+            "minute": int(m.group("minute")),
+            "weekday": _DAY_ABBREV[m.group("day")],
+        }
+        _validate_time_spec(result, schedule)
+        return result
+
+    # daily HH:MM / weekdays HH:MM
+    parts = s.split()
+    if len(parts) == 2 and parts[0] in ("daily", "weekdays"):
+        kind = parts[0]
+        tm = _TIME_RE.match(parts[1])
+        if tm:
+            result = {
+                "type": kind,
+                "hour": int(tm.group("hour")),
+                "minute": int(tm.group("minute")),
+            }
+            _validate_time_spec(result, schedule)
+            return result
 
     raise ValueError(
         f"Cannot parse schedule: '{schedule}'. "
-        f"Examples: 'every 5 minutes', 'every hour', 'daily at 8am', "
-        f"'every day at 5am', 'weekdays at 9:00', 'mondays at 10:30pm'"
+        f"Formats: 'interval 5m', 'interval 2h', 'interval 1d', "
+        f"'daily 08:00', 'weekdays 09:00', 'weekly 10:00 mon'"
     )
+
+
+def _validate_time_spec(spec: dict, schedule: str) -> None:
+    """Validate hour/minute ranges in a parsed time-based schedule spec."""
+    if spec["type"] in ("daily", "weekdays", "weekly"):
+        hour = spec.get("hour", 0)
+        minute = spec.get("minute", 0)
+        if not (0 <= hour <= 23):
+            raise ValueError(f"Invalid hour {hour} in schedule: '{schedule}'")
+        if not (0 <= minute <= 59):
+            raise ValueError(f"Invalid minute {minute} in schedule: '{schedule}'")
 
 
 def _should_run(spec: dict, last_run: Optional[datetime], now: datetime) -> bool:
     """Check if a job with the given schedule spec should run now."""
     if spec["type"] == "interval":
-        interval = spec["interval_seconds"]
         if last_run is None:
             return True
-        return (now - last_run).total_seconds() >= interval
+        return (now - last_run).total_seconds() >= spec["interval_seconds"]
 
-    elif spec["type"] in ("daily", "weekdays", "day_of_week"):
-        # Time-based: check if we've passed the target time today
-        # and haven't already run today
-        target_time = now.replace(hour=spec["hour"], minute=spec["minute"], second=0, microsecond=0)
+    # Time-based: daily, weekdays, weekly
+    target = now.replace(hour=spec["hour"], minute=spec["minute"], second=0, microsecond=0)
 
-        # Check day-of-week constraints
-        if spec["type"] == "weekdays" and now.weekday() >= 5:
-            return False
-        if spec["type"] == "day_of_week" and now.weekday() != spec["weekday"]:
-            return False
+    if spec["type"] == "weekdays" and now.weekday() >= 5:
+        return False
+    if spec["type"] == "weekly" and now.weekday() != spec["weekday"]:
+        return False
 
-        # Has the target time passed today?
-        if now < target_time:
-            return False
-
-        # Did we already run today (after target time)?
-        if last_run is not None and last_run >= target_time:
-            return False
-
-        return True
-
-    return False
+    if now < target:
+        return False
+    if last_run is not None and last_run >= target:
+        return False
+    return True
 
 
 # ── Config persistence ───────────────────────────────────────────────────
@@ -276,7 +237,7 @@ def _write_job_log(job: CronJob, output: str, error: bool):
 # ── Dream job (auto-seeded) ─────────────────────────────────────────────
 
 DREAM_JOB_ID = "dream"
-DREAM_JOB_SCHEDULE = "daily at 4am"
+DREAM_JOB_SCHEDULE = "daily 04:00"
 
 
 def ensure_dream_job(config: CronConfig) -> None:
@@ -292,6 +253,14 @@ def ensure_dream_job(config: CronConfig) -> None:
 
     if dream_settings.enabled and MEMORY_SETTINGS.get("enabled", True):
         if DREAM_JOB_ID in config.jobs:
+            existing = config.jobs[DREAM_JOB_ID]
+            try:
+                parse_schedule(existing.schedule)
+            except ValueError:
+                logger.info("Upgrading dream job schedule from '%s' to '%s'",
+                            existing.schedule, DREAM_JOB_SCHEDULE)
+                existing.schedule = DREAM_JOB_SCHEDULE
+                config.save()
             return
         job = CronJob(
             id=DREAM_JOB_ID,

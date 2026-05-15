@@ -412,8 +412,10 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
             int: Message index where the uncompacted tail starts
         """
         tc = context_settings.tool_compaction
-        token_budget = uncompacted_tail_tokens if uncompacted_tail_tokens is not None else tc.uncompacted_tail_tokens
+        token_budget = uncompacted_tail_tokens if uncompacted_tail_tokens is not None else tc.limit_tokens
         min_blocks = min_tool_blocks if min_tool_blocks is not None else tc.min_tool_blocks
+        if token_budget is None:
+            return 1
         n = len(self._cm.messages)
 
         # The verbatim region ends at the first in-flight message (exclusive)
@@ -463,14 +465,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
 
     # -- Compaction orchestration ----------------------------------------------
 
-    def _mark_compaction_baseline(self):
-        """Record current context tokens as post-compaction cooldown baseline."""
-        self._cm._tokens_at_last_compaction = self._cm.token_tracker.current_context_tokens
-
-    def _reset_compaction_cooldown(self):
-        """Reset compaction cooldown baseline to 0."""
-        self._cm._tokens_at_last_compaction = 0
-
     def compact_tool_results(self, skip_token_update=False,
                               uncompacted_tail_tokens=None, min_tool_blocks=None):
         """Replace completed tool-result blocks with summaries using token-budget tail.
@@ -496,39 +490,22 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         if self._cm._compaction_disabled:
             return
 
-        if not context_settings.tool_compaction.enable_per_message_compaction:
+        if context_settings.tool_compaction.limit_tokens is None and uncompacted_tail_tokens is None:
             return
 
         # Safety: Don't compact if very few messages
         if len(self._cm.messages) < 6:  # Minimum: user+assistant+tool+assistant+user+assistant
             return
 
-        # Cooldown gate: skip routine compaction unless context has grown enough
-        # since last compaction. This prevents back-to-back compactions that
-        # churn the message prefix and defeat ephemeral prompt caching.
-        # Always allow compaction when override parameters are set (aggressive
-        # compaction from ensure_context_fits).
+        # Routine tool compaction runs only when the current context reaches
+        # the configured token limit. Aggressive callers pass explicit overrides.
         is_aggressive = uncompacted_tail_tokens is not None or min_tool_blocks is not None
         if not is_aggressive:
             tc = context_settings.tool_compaction
             self._cm._update_context_tokens(force=True)
             current = self._cm.token_tracker.current_context_tokens
-
-            # Warmup gate: never compact below the warmup threshold.
-            if current < tc.compaction_warmup_tokens:
+            if not isinstance(tc.limit_tokens, int) or current < tc.limit_tokens:
                 return
-
-            # Growth gate: skip if context hasn't grown enough since last compaction.
-            if self._cm._tokens_at_last_compaction > 0:
-                # Defensive: if the baseline is stale (e.g. history compaction
-                # reduced context below it), reset to current so growth is
-                # measured from an accurate anchor going forward.
-                if current < self._cm._tokens_at_last_compaction:
-                    self._cm._tokens_at_last_compaction = current
-                else:
-                    growth = current - self._cm._tokens_at_last_compaction
-                    if growth < tc.compaction_growth_threshold:
-                        return
 
         # Find completed tool-result blocks
         blocks = self._find_tool_blocks()
@@ -616,8 +593,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         self._cm.messages = SanitizedMessageList(new_messages)
         if not skip_token_update:
             self._cm._update_context_tokens(force=True)
-            # Update cooldown gate with post-compaction token count.
-            self._mark_compaction_baseline()
         else:
             self._cm.mark_context_dirty()
 
@@ -760,10 +735,6 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         # Update context estimate (keeps cumulative API usage intact)
         self._cm.context_token_estimate = tokens_after
 
-        # Refresh compaction cooldown baseline so future routine
-        # tool compactions anchor growth from this new, lower context.
-        self._mark_compaction_baseline()
-
         # Notify only for manual trigger
         if console and trigger == "manual":
             reduction = tokens_before - tokens_after
@@ -797,14 +768,15 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         if self._cm._compaction_disabled:
             return
 
-        # Use custom threshold if set, otherwise use global setting
+        # Use custom threshold if set, otherwise use global setting.
+        # None means automatic history compaction is off.
         trigger_threshold = (
             self._cm._compact_trigger_tokens
             if self._cm._compact_trigger_tokens is not None
             else context_settings.compact_trigger_tokens
         )
 
-        if total_tokens >= trigger_threshold:
+        if trigger_threshold is not None and total_tokens >= trigger_threshold:
             # Auto-compact with optional notification
             result = self.compact_history(console=None, trigger="auto")
             if result and context_settings.notify_auto_compaction and console:
@@ -840,6 +812,8 @@ Provide a concise summary (2-4 paragraphs) that captures all essential context f
         self._cm._update_context_tokens(force=True)
         current_tokens = self._cm.token_tracker.current_context_tokens
         hard_limit = context_settings.hard_limit_tokens
+        if hard_limit is None:
+            return {"action": "none", "tokens": current_tokens}
 
         # Layer 0: Under limit — no action needed
         if current_tokens < hard_limit:

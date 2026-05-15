@@ -56,7 +56,12 @@ def _colorize_numbered_lines(lines, file_path=None):
     except (OSError, AttributeError):
         terminal_width = DEFAULT_TERMINAL_WIDTH  # Fallback default
 
-    result = Text()
+    # We pre-pad changed lines to exact terminal-width multiples so the
+    # background color fills every visual row when long lines wrap. Rich's
+    # normal Text wrapping can reflow at spaces and trim trailing padding from
+    # wrapped chunks, which makes highlights stop before the terminal edge.
+    # Disable Rich wrapping here and let the terminal wrap the padded text.
+    result = Text(no_wrap=True, overflow="ignore")
     for line in lines:
         # Check the sign character (7th character, index 6)
         # Format: "   5 - text" or "   6 + text" or "   7   text"
@@ -66,11 +71,15 @@ def _colorize_numbered_lines(lines, file_path=None):
 
             if sign == "-":
                 # Removed line - red background
-                padded = line.ljust(terminal_width)
+                # Pad to next multiple of terminal_width so wrapped rows
+                # also get full-width background highlight
+                padded_width = -(-len(line) // terminal_width) * terminal_width
+                padded = line.ljust(padded_width)
                 result.append(padded, style="on #870101")
             elif sign == "+":
                 # Added line - green background
-                padded = line.ljust(terminal_width)
+                padded_width = -(-len(line) // terminal_width) * terminal_width
+                padded = line.ljust(padded_width)
                 result.append(padded, style="on #005f00")
             else:
                 # Unchanged line - dim grey
@@ -177,7 +186,7 @@ def _build_diff(
 
     # Handle empty case
     if not formatted_lines:
-        result = Text()
+        result = Text(no_wrap=True, overflow="ignore")
         if show_header:
             result.append(f"\n{header}\n")
             result.append("(no changes)\n", style="dim")
@@ -188,8 +197,10 @@ def _build_diff(
     # Get colored diff as Text object
     diff_text = _colorize_numbered_lines(formatted_lines, file_path)
 
-    # Build output based on mode
-    result = Text()
+    # Build output based on mode. Preserve the no-wrap/ignore rendering mode
+    # used by _colorize_numbered_lines after appending the colored diff into
+    # the wrapper Text object.
+    result = Text(no_wrap=True, overflow="ignore")
     if show_header:
         result.append(f"\n{header}\n")
         result.append(diff_text)

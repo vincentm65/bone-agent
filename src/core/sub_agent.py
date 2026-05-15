@@ -16,10 +16,11 @@ from utils.settings import context_settings, sub_agent_settings
 # what the model/context window actually supports. This prevents sub-agent
 # API calls from exceeding the model's context window when sub_agent_settings
 # is configured higher than context_settings.hard_limit_tokens.
-_effective_hard_limit_tokens = min(
-    sub_agent_settings.hard_limit_tokens,
-    context_settings.hard_limit_tokens,
-)
+_configured_hard_limits = [
+    limit for limit in (sub_agent_settings.hard_limit_tokens, context_settings.hard_limit_tokens)
+    if limit is not None
+]
+_effective_hard_limit_tokens = min(_configured_hard_limits) if _configured_hard_limits else None
 
 # Effective billed-token limit: caps cumulative API token usage per sub-agent
 # to prevent runaway costs from many small calls that stay under the context limit.
@@ -270,7 +271,7 @@ def run_sub_agent(
     # before each LLM call, preventing API context_length_exceeded errors.
     original_get_llm_response = orchestrator._get_llm_response
 
-    def _get_llm_response_with_hard_limit(allowed_tools=None, allow_active_plugins=False):
+    def _get_llm_response_with_hard_limit(allowed_tools=None):
         """Wrapper to check context hard limit before each LLM call."""
         if cancel_event and cancel_event.is_set():
             raise SubAgentCancelled("Sub-agent cancelled by user.")
@@ -283,7 +284,7 @@ def run_sub_agent(
         # Check hard token limit before making LLM call.
         # Uses current_context_tokens (prompt size) to catch
         # prompt-length-over-limit errors before they hit the API.
-        if tt.current_context_tokens >= _effective_hard_limit_tokens:
+        if _effective_hard_limit_tokens is not None and tt.current_context_tokens >= _effective_hard_limit_tokens:
             raise HardLimitExceeded(
                 f"Sub-agent context hard limit exceeded: "
                 f"{tt.current_context_tokens:,} / {_effective_hard_limit_tokens:,} tokens."
@@ -307,7 +308,6 @@ def run_sub_agent(
 
         response = original_get_llm_response(
             allowed_tools=allowed_tools,
-            allow_active_plugins=allow_active_plugins,
         )
 
         # Post-call cancellation check: if user pressed Ctrl+C while the HTTP
@@ -330,7 +330,6 @@ def run_sub_agent(
             task_query,
             thinking_indicator=None,
             allowed_tools=sub_agent_settings.allowed_tools,
-            allow_active_plugins=sub_agent_settings.allow_active_plugins,
         )
         # Check cancellation after run completes (may have been signalled
         # during a non-LLM phase like tool execution).

@@ -83,8 +83,11 @@ FILE_SETTINGS:
     - env
 
 # -- Context Settings ---------------------------------------------------------
-# compact_trigger_tokens: reactive post-response compaction
-# hard_limit_tokens: proactive pre-send guard (defaults to 90% of max_context_window)
+# Token limits may be an integer token count or "off".
+# compact_trigger_tokens: automatic history compaction after a turn.
+# tool_compaction.limit_tokens: automatic tool-result compaction after tool output.
+# hard_limit_tokens: proactive pre-send guard (defaults to 90% of max_context_window).
+# A token is model text budget, not LOC; roughly 3-4 English characters.
 
 CONTEXT_SETTINGS:
   compact_trigger_tokens: 100000
@@ -94,21 +97,14 @@ CONTEXT_SETTINGS:
   log_conversations: false
   conversations_dir: conversations
   tool_compaction:
-    enable_per_message_compaction: true
-    uncompacted_tail_tokens: 40000
+    limit_tokens: 40000
     min_tool_blocks: 5
     compact_failed_tools: true
-    # Skip routine compaction unless context has grown by this many tokens
-    # since last compaction. Prevents cache-churning back-to-back compactions.
-    compaction_growth_threshold: 50000
-    # Minimum context tokens before any routine compaction is allowed.
-    # Ensures caching has value before we start rewriting message history.
-    compaction_warmup_tokens: 30000
 
 # -- Sub-Agent Settings -------------------------------------------------------
 
 SUB_AGENT_SETTINGS:
-  # Context hard limit — prevents API context_length_exceeded errors
+  # Hard limit may be an integer token count or "off".
   hard_limit_tokens: 150000
   compact_trigger_tokens: 50000
   enable_compaction: false

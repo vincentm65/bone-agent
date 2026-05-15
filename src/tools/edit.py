@@ -393,7 +393,9 @@ def run_edit_file(arguments, repo_root, console, gitignore_spec=None, vault_root
             )
 
         # Success - return Rich Text object with styled diff (no exit_code prefix)
-        result = Text()
+        # Preserve diff Text render options so manually padded highlight rows
+        # are not re-wrapped or stripped by Rich.
+        result = Text(no_wrap=True, overflow="ellipsis")
         result.append(diff_text)
         result.append("\n")
         return result
@@ -496,7 +498,9 @@ def edit_file(
             return preview_status
 
         # Build a Rich Text object with diff only (exit_code is for agent, not user display)
-        result = Text()
+        # Preserve diff Text render options so manually padded highlight rows
+        # are not re-wrapped or stripped by Rich.
+        result = Text(no_wrap=True, overflow="ellipsis")
         result.append(preview_diff)
         return result
 

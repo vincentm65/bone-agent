@@ -120,11 +120,6 @@ class ChatManager:
         # Set by agentic.py before executing tools, cleared after all results appended
         self._compaction_locked = False
 
-        # Cooldown gate: tracks post-compaction token count to prevent
-        # back-to-back compactions that churn the message prefix and
-        # defeat ephemeral prompt caching.
-        self._tokens_at_last_compaction = 0
-
         self._init_messages(reset_totals=True)
 
     def set_compaction_lock(self, locked):
@@ -219,9 +214,6 @@ class ChatManager:
         # Initialize context tokens with actual message count (including tools if enabled)
         self._update_context_tokens(force=True)
         self.context_token_estimate = self.token_tracker.current_context_tokens
-
-        # Reset compaction cooldown baseline on fresh start / session reset.
-        self._get_context_compaction()._reset_compaction_cooldown()
 
     def _build_system_prompt(self) -> str:
         """Build system prompt."""
@@ -335,10 +327,6 @@ class ChatManager:
         if not hasattr(self, "_context_compaction"):
             self._context_compaction = ContextCompaction(self)
         return self._context_compaction
-
-    def _reset_compaction_cooldown(self):
-        """Compatibility wrapper for the extracted cooldown reset."""
-        return self._get_context_compaction()._reset_compaction_cooldown()
 
     def compact_tool_results(self, skip_token_update=False,
                               uncompacted_tail_tokens=None, min_tool_blocks=None):

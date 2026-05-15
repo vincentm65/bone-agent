@@ -14,6 +14,7 @@ from ui.banner import display_startup_banner
 from ui.setting_selector import SettingSelector, SettingCategory, SettingOption
 
 from utils.settings import MonokaiDarkBGStyle, context_settings, left_align_headings, tool_settings, swarm_settings
+from utils.settings import token_limit
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -400,12 +401,17 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
         ),
     ]
 
-    # Build context/compaction settings
+    # Build context/compaction settings. Token limits accept a number or "off".
     ctx_settings = [
         SettingOption(
-            key="compact_trigger_tokens", text="Compaction Threshold",
-            value=context_settings.compact_trigger_tokens,
-            input_type="number",
+            key="compact_trigger_tokens", text="Auto Compaction Limit",
+            value=context_settings.format_limit(context_settings.compact_trigger_tokens),
+            input_type="text",
+        ),
+        SettingOption(
+            key="tool_compaction_limit_tokens", text="Tool Compaction Limit",
+            value=context_settings.format_limit(context_settings.tool_compaction.limit_tokens),
+            input_type="text",
         ),
         SettingOption(
             key="max_context_window", text="Max Context Window",
@@ -414,25 +420,14 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
         ),
         SettingOption(
             key="hard_limit_tokens", text="Hard Context Limit",
-            value=context_settings.hard_limit_tokens,
-            input_type="number",
+            value=context_settings.format_limit(context_settings.hard_limit_tokens),
+            input_type="text",
         ),
         SettingOption(
             key="notify_auto_compaction", text="Auto-Compaction Notifications",
             value=context_settings.notify_auto_compaction,
             input_type="boolean",
             on_text="ON", off_text="OFF",
-        ),
-        SettingOption(
-            key="enable_tool_compaction", text="Per-Message Tool Compaction",
-            value=context_settings.tool_compaction.enable_per_message_compaction,
-            input_type="boolean",
-            on_text="ON", off_text="OFF",
-        ),
-        SettingOption(
-            key="uncompacted_tail_tokens", text="Uncompacted Tail Tokens",
-            value=context_settings.tool_compaction.uncompacted_tail_tokens,
-            input_type="number",
         ),
         SettingOption(
             key="min_tool_blocks", text="Min Tool Blocks Preserved",
@@ -444,16 +439,6 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
             value=context_settings.tool_compaction.compact_failed_tools,
             input_type="boolean",
             on_text="ON", off_text="OFF",
-        ),
-        SettingOption(
-            key="compaction_growth_threshold", text="Tool Compaction Growth Threshold",
-            value=context_settings.tool_compaction.compaction_growth_threshold,
-            input_type="number",
-        ),
-        SettingOption(
-            key="compaction_warmup_tokens", text="Tool Compaction Warmup Tokens",
-            value=context_settings.tool_compaction.compaction_warmup_tokens,
-            input_type="number",
         ),
     ]
 
@@ -486,6 +471,7 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
 
         change_lines = []
         sb_changes = {}
+        bad_keys = set()
         for key, value in changes.items():
             if key == "debug":
                 debug_mode_container['debug'] = value
@@ -511,29 +497,44 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
                 state = "enabled" if value else "disabled"
                 change_lines.append(f"  Memory: {state}")
             elif key == "compact_trigger_tokens":
-                context_settings.compact_trigger_tokens = int(value)
-                change_lines.append(f"  Compaction Threshold: {value:,} tokens")
+                try:
+                    context_settings.compact_trigger_tokens = token_limit(value, None)
+                    limit_text = context_settings.format_limit(context_settings.compact_trigger_tokens)
+                    change_lines.append(f"  Auto Compaction Limit: {limit_text}")
+                except (ValueError, TypeError):
+                    bad_keys.add(key)
+                    change_lines.append(f"  Auto Compaction Limit: invalid value '{value}' — use a number or 'off'")
             elif key == "max_context_window":
-                context_settings.max_context_window = int(value)
-                change_lines.append(f"  Max Context Window: {value:,} tokens")
-                # Auto-recalculate hard limit unless user set it explicitly in this batch
-                if "hard_limit_tokens" not in changes:
-                    context_settings.hard_limit_tokens = int(int(value) * 0.9)
-                    change_lines.append(f"  Hard Context Limit: {context_settings.hard_limit_tokens:,} tokens (auto-derived)")
+                try:
+                    context_settings.max_context_window = int(value)
+                    change_lines.append(f"  Max Context Window: {value:,} tokens")
+                    # Auto-recalculate hard limit unless user set it explicitly in this batch
+                    if "hard_limit_tokens" not in changes:
+                        context_settings.hard_limit_tokens = int(int(value) * 0.9)
+                        change_lines.append(f"  Hard Context Limit: {context_settings.hard_limit_tokens:,} tokens (auto-derived)")
+                except (ValueError, TypeError):
+                    bad_keys.add(key)
+                    change_lines.append(f"  Max Context Window: invalid value '{value}' — use a number")
             elif key == "hard_limit_tokens":
-                context_settings.hard_limit_tokens = int(value)
-                change_lines.append(f"  Hard Context Limit: {value:,} tokens")
+                try:
+                    context_settings.hard_limit_tokens = token_limit(value, None)
+                    limit_text = context_settings.format_limit(context_settings.hard_limit_tokens)
+                    change_lines.append(f"  Hard Context Limit: {limit_text}")
+                except (ValueError, TypeError):
+                    bad_keys.add(key)
+                    change_lines.append(f"  Hard Context Limit: invalid value '{value}' — use a number or 'off'")
             elif key == "notify_auto_compaction":
                 context_settings.notify_auto_compaction = value
                 state = "enabled" if value else "disabled"
                 change_lines.append(f"  Auto-Compaction Notifications: {state}")
-            elif key == "enable_tool_compaction":
-                context_settings.tool_compaction.enable_per_message_compaction = value
-                state = "enabled" if value else "disabled"
-                change_lines.append(f"  Per-Message Tool Compaction: {state}")
-            elif key == "uncompacted_tail_tokens":
-                context_settings.tool_compaction.uncompacted_tail_tokens = int(value)
-                change_lines.append(f"  Uncompacted Tail Tokens: {value:,}")
+            elif key == "tool_compaction_limit_tokens":
+                try:
+                    context_settings.tool_compaction.limit_tokens = token_limit(value, None)
+                    limit_text = context_settings.format_limit(context_settings.tool_compaction.limit_tokens)
+                    change_lines.append(f"  Tool Compaction Limit: {limit_text}")
+                except (ValueError, TypeError):
+                    bad_keys.add(key)
+                    change_lines.append(f"  Tool Compaction Limit: invalid value '{value}' — use a number or 'off'")
             elif key == "min_tool_blocks":
                 context_settings.tool_compaction.min_tool_blocks = int(value)
                 change_lines.append(f"  Min Tool Blocks Preserved: {value}")
@@ -541,29 +542,25 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
                 context_settings.tool_compaction.compact_failed_tools = value
                 state = "enabled" if value else "disabled"
                 change_lines.append(f"  Compact Failed Tools: {state}")
-            elif key == "compaction_growth_threshold":
-                context_settings.tool_compaction.compaction_growth_threshold = int(value)
-                change_lines.append(f"  Tool Compaction Growth Threshold: {value:,}")
-            elif key == "compaction_warmup_tokens":
-                context_settings.tool_compaction.compaction_warmup_tokens = int(value)
-                change_lines.append(f"  Tool Compaction Warmup Tokens: {value:,}")
             elif key in sb_labels:
                 sb_changes[key] = value
                 state = "ON" if value else "OFF"
                 change_lines.append(f"  {sb_labels[key]}: {state}")
 
+        # Remove keys that failed validation so they don't cause a second error
+        # during config persistence.
+        for bk in bad_keys:
+            changes.pop(bk, None)
+
         # Persist context setting changes to config
         ctx_keys = {
             "compact_trigger_tokens",
+            "tool_compaction_limit_tokens",
             "max_context_window",
             "hard_limit_tokens",
             "notify_auto_compaction",
-            "enable_tool_compaction",
-            "uncompacted_tail_tokens",
             "min_tool_blocks",
             "compact_failed_tools",
-            "compaction_growth_threshold",
-            "compaction_warmup_tokens",
         }
         ctx_changes = {k: v for k, v in changes.items() if k in ctx_keys}
         if ctx_changes:
@@ -574,26 +571,21 @@ def _handle_config(chat_manager, console, debug_mode_container, args, cron_sched
                 if "tool_compaction" not in cfg_data["CONTEXT_SETTINGS"]:
                     cfg_data["CONTEXT_SETTINGS"]["tool_compaction"] = {}
 
-                context_number_keys = ("compact_trigger_tokens", "max_context_window", "hard_limit_tokens")
-                for ctx_key in context_number_keys:
+                for ctx_key in ("compact_trigger_tokens", "hard_limit_tokens"):
                     if ctx_key in ctx_changes:
-                        cfg_data["CONTEXT_SETTINGS"][ctx_key] = int(ctx_changes[ctx_key])
+                        cfg_data["CONTEXT_SETTINGS"][ctx_key] = token_limit(ctx_changes[ctx_key], None) or "off"
+                if "max_context_window" in ctx_changes:
+                    cfg_data["CONTEXT_SETTINGS"]["max_context_window"] = int(ctx_changes["max_context_window"])
                 if "notify_auto_compaction" in ctx_changes:
                     cfg_data["CONTEXT_SETTINGS"]["notify_auto_compaction"] = ctx_changes["notify_auto_compaction"]
 
                 tool_cfg = cfg_data["CONTEXT_SETTINGS"]["tool_compaction"]
-                if "enable_tool_compaction" in ctx_changes:
-                    tool_cfg["enable_per_message_compaction"] = ctx_changes["enable_tool_compaction"]
-                if "uncompacted_tail_tokens" in ctx_changes:
-                    tool_cfg["uncompacted_tail_tokens"] = int(ctx_changes["uncompacted_tail_tokens"])
+                if "tool_compaction_limit_tokens" in ctx_changes:
+                    tool_cfg["limit_tokens"] = token_limit(ctx_changes["tool_compaction_limit_tokens"], None) or "off"
                 if "min_tool_blocks" in ctx_changes:
                     tool_cfg["min_tool_blocks"] = int(ctx_changes["min_tool_blocks"])
                 if "compact_failed_tools" in ctx_changes:
                     tool_cfg["compact_failed_tools"] = ctx_changes["compact_failed_tools"]
-                if "compaction_growth_threshold" in ctx_changes:
-                    tool_cfg["compaction_growth_threshold"] = int(ctx_changes["compaction_growth_threshold"])
-                if "compaction_warmup_tokens" in ctx_changes:
-                    tool_cfg["compaction_warmup_tokens"] = int(ctx_changes["compaction_warmup_tokens"])
                 config_manager.save(cfg_data)
             except Exception as e:
                 console.print(f"[red]Failed to save context settings: {e}[/red]")
@@ -1321,6 +1313,7 @@ def _process_subagent_result(
     do_citation_expansion=False,
     skip_inject=False,
     continuation=None,
+    display_result=True,
 ):
     """Handle sub-agent result: status display, markdown output, and history injection."""
     _forward_subagent_usage(chat_manager, sub_result)
@@ -1362,7 +1355,7 @@ def _process_subagent_result(
     )
 
     # ── Display result ───────────────────────────────────────────
-    if result_text and is_success:
+    if display_result and result_text and is_success:
         console.print()
         md = Markdown(left_align_headings(result_text), code_theme=MonokaiDarkBGStyle, justify="left")
         console.print(md)
@@ -1519,6 +1512,7 @@ def _handle_review(chat_manager, console, debug_mode_container, args, cron_sched
                 label="Review",
                 user_msg_content=user_msg,
                 do_citation_expansion=True,
+                display_result=True,
             )
         finally:
             completion_event.set()
@@ -2631,7 +2625,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
     from core.skills import iter_skill_summaries, validate_skill_name
     from ui.setting_selector import SettingOption, SettingCategory, SettingSelector
     from tools.helpers.base import ToolRegistry, TOOL_GROUPS
-    from tools.helpers.plugin_manifest import plugin_manifest
 
     # Text subcommands
     if args:
@@ -2639,16 +2632,12 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
 
         if args_clean.lower() in ("list", "status"):
             all_tools = sorted(ToolRegistry._tools.values(), key=lambda t: t.name)
-            plugin_defs = sorted(plugin_manifest.get_all(), key=lambda t: t.name)
             skills = sorted(iter_skill_summaries(), key=lambda s: s.name)
             disabled = ToolRegistry.get_disabled()
             hidden_skills = set(tool_settings.hidden_skills)
             disabled_tools = {t.name for t in all_tools if t.name in disabled}
             console.print(
                 f"[bold #5F9EA0]Tools: {len(all_tools) - len(disabled_tools)} enabled, {len(disabled_tools)} disabled[/bold #5F9EA0]"
-            )
-            console.print(
-                f"[bold #5F9EA0]User plugins: {sum(1 for p in plugin_defs if p.name not in disabled)} enabled, {sum(1 for p in plugin_defs if p.name in disabled)} disabled[/bold #5F9EA0]"
             )
             console.print(
                 f"[bold #5F9EA0]Skills: {len(skills) - len(hidden_skills)} visible, {len(hidden_skills)} hidden[/bold #5F9EA0]"
@@ -2670,12 +2659,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
                     console.print(f"  [bold]{group_label}[/bold]")
                 status = "[red]off[/red]" if is_off else "[green]on[/green] "
                 console.print(f"    {status} {t.name}")
-
-            console.print()
-            console.print("  [bold]User plugins[/bold]")
-            for plugin in plugin_defs:
-                status = "[red]off[/red]" if plugin.name in disabled else "[green]on[/green] "
-                console.print(f"    {status} {plugin.name}")
 
             console.print()
             console.print("  [bold]Skills[/bold]")
@@ -2728,7 +2711,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
             # Single tool/plugin operations
             if action in ("enable", "disable"):
                 all_registered_lower = {t.name.lower(): t.name for t in ToolRegistry._tools.values()}
-                all_registered_lower.update({t.name.lower(): t.name for t in plugin_manifest.get_all()})
                 matched = all_registered_lower.get(target.lower())
                 if not matched:
                     console.print(f"[red]Unknown tool or plugin: {target}[/red]")
@@ -2780,7 +2762,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
 
     # No args — interactive toggle UI, organized by groups
     all_tools_map = {t.name: t for t in ToolRegistry._tools.values()}
-    plugin_tools = {t.name: t for t in plugin_manifest.get_all()}
     disabled = ToolRegistry.get_disabled()
     hidden_skills = set(tool_settings.hidden_skills)
 
@@ -2824,20 +2805,6 @@ def _handle_tools(chat_manager, console, debug_mode_container, args, cron_schedu
                 off_text="OFF",
             ))
         categories.append(SettingCategory(title="Other", settings=other_options))
-
-    plugin_options = []
-    for name in sorted(plugin_tools):
-        is_off = name in disabled
-        plugin_options.append(SettingOption(
-            key=name,
-            text=name,
-            value=not is_off,
-            input_type="boolean",
-            on_text="ON",
-            off_text="OFF",
-        ))
-    if plugin_options:
-        categories.append(SettingCategory(title="User plugins", settings=plugin_options))
 
     skill_options = []
     for skill in sorted(iter_skill_summaries(), key=lambda s: s.name):

@@ -80,11 +80,10 @@ Your output goes directly to the user — write clean, readable markdown.
 Report every issue you find, not a sample. If you found 20 warnings, list all 20. Do not stop early or summarize counts without listing each finding.
 
 ## Workflow
-The full diff is embedded below in a `## Git Diff` section. You already have all changed lines — do not re-read them. Use `read_file` (with start_line and max_lines) only to check surrounding context, callers, or related code that the diff does not show.
-1. Read the embedded diff
-2. Use `read_file` only when you need context beyond what the diff provides
-3. Cross-reference related files when needed
-4. Write your review
+The full diff is embedded below in a `## Git Diff` section. You already have all changed lines — do not re-read them.
+1. Read the embedded diff carefully
+2. Write your review from the diff alone — you have the code
+3. Only use `read_file` if you genuinely cannot assess an issue from the diff (e.g., you need to see a caller, a base class, or surrounding context that was not changed). Limit yourself to 2-3 `read_file` calls total.
 
 ## Output Template
 

@@ -50,8 +50,6 @@ from .loader import (
     discover_tools,
 )
 
-# Plugin manifest for on-demand tool discovery
-from .plugin_manifest import PluginManifest, plugin_manifest
 
 __all__ = [
     # Core infrastructure
@@ -80,7 +78,4 @@ __all__ = [
     'coerce_bool',
     # Tool loading and discovery
     'discover_tools',
-    # Plugin manifest
-    'PluginManifest',
-    'plugin_manifest',
 ]

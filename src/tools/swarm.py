@@ -413,9 +413,6 @@ def register() -> None:
             description=spec["description"],
             parameters=spec["parameters"],
             handler=spec["fn"],
-            tier="core",
-            tags=spec.get("tags", []),
-            category=spec.get("category", ""),
         ))
 
 

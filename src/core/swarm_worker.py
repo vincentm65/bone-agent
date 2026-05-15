@@ -453,7 +453,6 @@ class SwarmWorkerRunner:
         auth_token: str = "",
         approval_timeout: int = 300,
         worker_tools: list[str] | None = None,
-        allow_active_plugins: bool = False,
         cron_job_id: Optional[str] = None,
         cron_allowlist: Any = None,
         cron_interactive: bool = False,
@@ -471,7 +470,6 @@ class SwarmWorkerRunner:
         self._auth_token = auth_token
         self.approval_timeout = approval_timeout
         self.worker_tools = worker_tools or swarm_settings.worker_tools
-        self.allow_active_plugins = allow_active_plugins
         self.cron_job_id = cron_job_id
         self.cron_allowlist = cron_allowlist
         self.cron_interactive = cron_interactive
@@ -1236,7 +1234,6 @@ class SwarmWorkerRunner:
                 prompt_text,
                 thinking_indicator=None,  # spinner replaces thinking indicator
                 allowed_tools=self.worker_tools,
-                allow_active_plugins=self.allow_active_plugins,
             )
         except Exception as e:
             result_holder['error'] = str(e)
@@ -1463,7 +1460,6 @@ def run_worker_cli(
     auth_token: str = "",
     approval_timeout: int = 300,
     worker_tools: list[str] | None = None,
-    allow_active_plugins: bool = False,
     profile: str = "",
 ):
     """Run the worker as a CLI process.
@@ -1479,7 +1475,6 @@ def run_worker_cli(
         port: WebSocket server port.
         approval_timeout: Timeout for command approval in seconds.
         worker_tools: Override list of allowed tool names.
-        allow_active_plugins: Whether to allow active plugin tools.
         profile: Worker profile name (loaded from ~/.bone/worker_profiles/).
     """
     console = Console()
@@ -1498,7 +1493,6 @@ def run_worker_cli(
         auth_token=auth_token,
         approval_timeout=approval_timeout,
         worker_tools=worker_tools,
-        allow_active_plugins=allow_active_plugins,
         display_name=profile_cfg.get("display_name"),
         model=profile_cfg.get("model"),
         provider=profile_cfg.get("provider"),

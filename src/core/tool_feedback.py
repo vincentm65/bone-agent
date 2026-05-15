@@ -330,7 +330,7 @@ def handle_list_directory_feedback(tool_result, console, panel_updater):
 def handle_search_plugins_feedback(tool_result, console, panel_updater):
     """Handle feedback for search_plugins tool.
 
-    Display compact capability results in the same style as other tool output.
+    Display compact skill search results in the same style as other tool output.
     """
     lines = tool_result.split('\n')
     prefix = "╰─ " if not panel_updater else ""
@@ -364,17 +364,14 @@ def handle_search_plugins_feedback(tool_result, console, panel_updater):
             i += 1
             continue
 
-        if line.startswith("Activated plugins:") or line.startswith("Loaded skills:") or line.startswith("Load issues:"):
+        if line.startswith("Loaded skills:") or line.startswith("Load issues:"):
             break
 
         item_match = re.match(r'^- (.+)$', line)
         if item_match:
             item = {
                 "name": item_match.group(1),
-                "type": "",
-                "status": "",
                 "summary": "",
-                "tags": "",
             }
             i += 1
             while i < len(lines):
@@ -385,21 +382,22 @@ def handle_search_plugins_feedback(tool_result, console, panel_updater):
                     continue
                 if re.match(r'^- (.+)$', stripped):
                     break
-                if stripped.startswith("Activated plugins:") or stripped.startswith("Loaded skills:") or stripped.startswith("Load issues:"):
+                if stripped.startswith("Loaded skills:") or stripped.startswith("Load issues:"):
                     break
-                if stripped.startswith("type: "):
-                    item["type"] = stripped.replace("type: ", "", 1)
-                elif stripped.startswith("status: "):
-                    item["status"] = stripped.replace("status: ", "", 1)
-                elif stripped.startswith("summary: "):
+                if stripped.startswith("summary: "):
                     item["summary"] = stripped.replace("summary: ", "", 1)
-                elif stripped.startswith("tags: "):
-                    item["tags"] = stripped.replace("tags: ", "", 1)
                 i += 1
             capabilities.append(item)
             continue
 
         i += 1
+
+    # Collect load confirmation messages (Loaded skills: / Load issues:)
+    load_messages = []
+    for remaining_line in lines:
+        stripped = remaining_line.strip()
+        if stripped.startswith("Loaded skills:") or stripped.startswith("Load issues:"):
+            load_messages.append(stripped)
 
     if not capabilities:
         msg_lines = [l for l in lines if l.strip() and not l.startswith("exit_code=")]
@@ -424,23 +422,21 @@ def handle_search_plugins_feedback(tool_result, console, panel_updater):
         is_last = (idx == len(display_capabilities) - 1) and (remaining == 0)
         connector = "└─" if is_last else "├─"
 
-        if capability["type"] == "plugin":
-            meta = "[dim](plugin)[/dim]"
-            if capability["status"]:
-                meta += f" [dim][{capability['status']}][/dim]"
-        else:
-            meta = "[dim](skill)[/dim]"
+        meta = "[dim](skill)[/dim]"
 
         detail_indent = "   │  " if not is_last else "      "
         line_parts = [f"   {connector} {capability['name']} {meta}"]
         if capability["summary"]:
             append_wrapped_detail(line_parts, capability["summary"], detail_indent)
-        if capability["tags"]:
-            append_wrapped_detail(line_parts, f"tags: {capability['tags']}", detail_indent)
         tree_lines.append("\n".join(line_parts))
 
     if remaining > 0:
         tree_lines.append(f"   └─ ... and {remaining} more")
+
+    if load_messages:
+        tree_lines.append("")
+        for msg in load_messages:
+            tree_lines.append(f"   [bold]{msg}[/bold]")
 
     output = f"{prefix}{header}\n" + "\n".join(tree_lines)
     _print_or_append(output, console, panel_updater)
@@ -893,16 +889,16 @@ def build_panel_tool_message(tool_name, tool_result, command):
 
     if tool_name == "search_plugins":
         query = ""
-        query_match = re.search(r"matching '([^']+)':", tool_result or "")
+        query_match = re.search(r"Capability matches for: (.+)", tool_result or "")
         if query_match:
-            query = query_match.group(1)
+            query = query_match.group(1).strip()
 
-        # Count plugin entries
-        plugin_count = len(re.findall(r'^- \*\*.*?\*\*', tool_result or "", re.MULTILINE))
-        if plugin_count > 0:
-            label = f"plugins matching '{query}'" if query else "plugins"
-            return f"[grey]search_plugins {query}[/grey]\n[dim]╰─ {plugin_count} {label}[/dim]"
-        return f"[grey]search_plugins {query}[/grey]\n[dim]╰─ No plugins found[/dim]"
+        # Count skill entries
+        skill_count = len(re.findall(r'^- (\S+)', tool_result or "", re.MULTILINE))
+        if skill_count > 0:
+            label = f"skills matching '{query}'" if query else "skills"
+            return f"[grey]search_plugins {query}[/grey]\n[dim]╰─ {skill_count} {label}[/dim]"
+        return f"[grey]search_plugins {query}[/grey]\n[dim]╰─ No skills found[/dim]"
 
     if tool_name == "web_search":
         query = ""

@@ -77,28 +77,19 @@ try:
 except Exception as e:
     _logger.debug("Failed to apply disabled tools: %s", e)
 
-# Load plugin tools into the PluginManifest (not ToolRegistry).
-# Plugin modules with @tool(tier="plugin") register into the manifest
-# and are only activated in ToolRegistry on-demand via search_plugins.
+# Load user tool plugins from ~/.bone/tool_plugins/
 try:
     from .helpers.loader import discover_tools, ensure_user_tool_plugins_dir
-    from .helpers.plugin_manifest import plugin_manifest
 
     src_dir = str(Path(__file__).resolve().parents[1])
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
 
-    discover_tools([str(ensure_user_tool_plugins_dir())])
+    new_tools = discover_tools([str(ensure_user_tool_plugins_dir())])
+    _logger.info("User plugins loaded: %d new tools registered", new_tools)
 
-    _logger.info(
-        "Plugin manifest: %s plugins available (categories: %s)",
-        plugin_manifest.plugin_count(),
-        plugin_manifest.get_categories(),
-    )
-
-    # Re-apply disabled_tools now that plugins are in the manifest
+    # Re-apply disabled_tools for newly loaded plugins
     for tool_name in tool_settings.disabled_tools:
-        if plugin_manifest.has_plugin(tool_name):
-            ToolRegistry.disable(tool_name)
+        ToolRegistry.disable(tool_name)
 except Exception as e:
-    _logger.debug("Failed to load plugin tools: %s", e)
+    _logger.debug("Failed to load user plugin tools: %s", e)

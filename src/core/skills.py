@@ -233,18 +233,13 @@ def write_skill(name: str, content: str, overwrite: bool = False) -> Path:
         if not tags and existing_meta.get("tags"):
             tags = _normalize_tags(existing_meta.get("tags"))
 
-    # If still missing, auto-generate
+    # If still missing, auto-generate a basic description
     if _needs_metadata({"description": description, "tags": tags}):
         prompt_body = _strip_heading(valid_name, body)
-        if prompt_body:
-            from core.metadata import generate_metadata
-            generated = generate_metadata(prompt_body, valid_name)
-            generated_description = _normalize_description(generated.get("description", ""))
-            generated_tags = _normalize_tags(generated.get("tags"))
-            if not description:
-                description = generated_description
-            if not tags:
-                tags = generated_tags
+        if prompt_body and not description:
+            description = prompt_body.strip()[:200]
+        if not tags:
+            tags = ["skill"]
 
     formatted = format_skill_file(valid_name, body, description=description, tags=tags)
     _atomic_write(path, formatted)

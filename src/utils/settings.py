@@ -2,7 +2,7 @@
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 
 # Load config from llm.config
 # Note: src/ is added to sys.path in main.py, so we can import directly
@@ -18,6 +18,30 @@ class MonokaiDarkBGStyle(MonokaiStyle):
 
 
 _HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
+
+
+def token_limit(value, default: Optional[int]) -> Optional[int]:
+    """Parse a config token limit: integer tokens or off/disabled."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return None if value is False else default
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"off", "disabled", "disable", "none", "false", "no", "true", "0"}:
+            return None
+        if not normalized:
+            return None
+        return int(normalized.replace(",", "").replace("_", ""))
+    try:
+        result = int(value)
+        return result if result > 0 else None
+    except (ValueError, TypeError):
+        return default
+def _formattoken_limit(value: Optional[int]) -> str:
+    return "off" if value is None else f"{value:,}"
 
 
 def left_align_headings(text: str) -> str:
@@ -52,46 +76,52 @@ class FileSettings:
                 self.exclude_dirs = {".git", ".venv", "llama.cpp", "bin", "__pycache__"}
 
 
+def _resolve_tool_compaction_limit() -> Optional[int]:
+    """Resolve tool compaction token limit from config."""
+    tc_cfg = _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {})
+    raw = tc_cfg.get("limit_tokens", 40_000)
+    return token_limit(raw, 40_000)
+
+
 @dataclass
 class ToolCompactionSettings:
-    """Per-message tool result compaction settings."""
-    enable_per_message_compaction: bool = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("enable_per_message_compaction", True))
-    uncompacted_tail_tokens: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("uncompacted_tail_tokens", 40_000))
+    """Tool result compaction settings."""
+    limit_tokens: Optional[int] = field(default_factory=_resolve_tool_compaction_limit)
     min_tool_blocks: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("min_tool_blocks", 5))
     compact_failed_tools: bool = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("compact_failed_tools", True))
-    compaction_growth_threshold: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("compaction_growth_threshold", 50_000))
-    compaction_warmup_tokens: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("tool_compaction", {}).get("compaction_warmup_tokens", 30_000))
 
 
 @dataclass
 class SubAgentSettings:
     """Sub-agent token limits and behavior configuration."""
-    hard_limit_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("hard_limit_tokens", 150_000))
-    billed_token_limit: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("billed_token_limit", 500_000))
+    hard_limit_tokens: Optional[int] = field(default_factory=lambda: token_limit(_CONFIG.get("SUB_AGENT_SETTINGS", {}).get("hard_limit_tokens", 150_000), 150_000))
+    billed_token_limit: Optional[int] = field(default_factory=lambda: token_limit(_CONFIG.get("SUB_AGENT_SETTINGS", {}).get("billed_token_limit", 500_000), 500_000))
     enable_compaction: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("enable_compaction", True))
     compact_trigger_tokens: int = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("compact_trigger_tokens", 50_000))
     allowed_tools: list = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("allowed_tools", ["rg", "read_file", "list_directory", "web_search"]))
-    allow_active_plugins: bool = field(default_factory=lambda: _CONFIG.get("SUB_AGENT_SETTINGS", {}).get("allow_active_plugins", False))
 
 
 # Context compaction settings
 @dataclass
 class ContextSettings:
     """Context compaction thresholds and defaults."""
-    compact_trigger_tokens: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("compact_trigger_tokens", 100_000))
+    compact_trigger_tokens: Optional[int] = field(default_factory=lambda: token_limit(_CONFIG.get("CONTEXT_SETTINGS", {}).get("compact_trigger_tokens", 100_000), 100_000))
     max_context_window: int = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("max_context_window", 200_000))
     log_conversations: bool = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("log_conversations", False))
     conversations_dir: str = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("conversations_dir", "conversations"))
     notify_auto_compaction: bool = field(default_factory=lambda: _CONFIG.get("CONTEXT_SETTINGS", {}).get("notify_auto_compaction", True))
     tool_compaction: ToolCompactionSettings = field(default_factory=ToolCompactionSettings)
-    hard_limit_tokens: int = field(init=False, repr=False)
+    hard_limit_tokens: Optional[int] = field(init=False, repr=False)
 
     def __post_init__(self):
         _ctx = _CONFIG.get("CONTEXT_SETTINGS", {})
         if "hard_limit_tokens" in _ctx:
-            self.hard_limit_tokens = _ctx["hard_limit_tokens"]
+            self.hard_limit_tokens = token_limit(_ctx["hard_limit_tokens"], None)
         else:
             self.hard_limit_tokens = int(self.max_context_window * 0.9)
+
+    def format_limit(self, value: Optional[int]) -> str:
+        return _formattoken_limit(value)
 
 
 @dataclass
@@ -170,7 +200,6 @@ class SwarmSettings:
         "create_file", "execute_command",
         "create_task_list", "complete_task", "show_task_list",
     ]))
-    allow_active_plugins: bool = field(default_factory=lambda: _CONFIG.get("SWARM_SETTINGS", {}).get("allow_active_plugins", False))
 
 
 # Global instances
